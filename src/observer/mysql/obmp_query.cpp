@@ -89,6 +89,7 @@ int ObMPQuery::process()
 {
   int ret = OB_SUCCESS;
   #ifdef PERF_MODE
+  //note
   // use for ob layer benchmark
   // https://yuque.antfin-inc.com/ob/transaction/lqwppx
   bool layer_perf_hit = false;
