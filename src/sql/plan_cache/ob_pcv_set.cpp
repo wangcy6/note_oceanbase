@@ -53,9 +53,14 @@ int ObPCVSet::init(ObILibCacheCtx &ctx, const ObILibCacheObject *obj)
       LOG_WARN("fail to deep_copy_sql", K(ret), K(pc_ctx.raw_sql_));
     } else {
       is_inited_ = true;
-      min_cluster_version_ = GET_MIN_CLUSTER_VERSION();
+      if (pc_ctx.exec_ctx_.get_min_cluster_version() != GET_MIN_CLUSTER_VERSION()) {
+        LOG_TRACE("Lob Debug, using remote min cluster version",
+                K(pc_ctx.exec_ctx_.get_min_cluster_version()),
+                K(GET_MIN_CLUSTER_VERSION()));
+      }
+      min_cluster_version_ = pc_ctx.exec_ctx_.get_min_cluster_version();
       normal_parse_const_cnt_ = pc_ctx.normal_parse_const_cnt_;
-      LOG_DEBUG("inited pcv set", K(pc_key_), K(ObTimeUtility::current_time()));
+      LOG_TRACE("inited pcv set", K(pc_key_), K(ObTimeUtility::current_time()));
     }
   }
   return ret;
@@ -107,23 +112,28 @@ int ObPCVSet::inner_get_cache_obj(ObILibCacheCtx &ctx,
   int ret = OB_SUCCESS;
   ObPlanCacheObject *plan = NULL;
   ObPlanCacheCtx &pc_ctx = static_cast<ObPlanCacheCtx&>(ctx);
-  if (pc_ctx.is_ps_mode_) {
-    if (normal_parse_const_cnt_ != pc_ctx.fp_result_.ps_params_.count()) {
-      ret = OB_NOT_SUPPORTED;
+  if (PC_PS_MODE == pc_ctx.mode_ || PC_PL_MODE == pc_ctx.mode_) {
+    if (normal_parse_const_cnt_ != pc_ctx.fp_result_.parameterized_params_.count()) {
+      ret = OB_ERR_UNEXPECTED;
       LOG_WARN("param num is not equal", K_(normal_parse_const_cnt),
-               "ps_params_count", pc_ctx.fp_result_.ps_params_.count());
+               "parameterized_params_count", pc_ctx.fp_result_.parameterized_params_.count());
     }
   } else {
     if (normal_parse_const_cnt_ != pc_ctx.fp_result_.raw_params_.count()) {
-      ret = OB_NOT_SUPPORTED;
-      SQL_PC_LOG(DEBUG, "const number of fast parse and normal parse is different",
+      ret = OB_ERR_UNEXPECTED;
+      SQL_PC_LOG(TRACE, "const number of fast parse and normal parse is different",
                  "fast_parse_const_num", pc_ctx.fp_result_.raw_params_.count(),
                  K_(normal_parse_const_cnt),
                  K(pc_ctx.fp_result_.raw_params_));
     }
   }
+  if (pc_ctx.exec_ctx_.get_min_cluster_version() != GET_MIN_CLUSTER_VERSION()) {
+    LOG_TRACE("Lob Debug, using remote min cluster version",
+             K(pc_ctx.exec_ctx_.get_min_cluster_version()),
+             K(GET_MIN_CLUSTER_VERSION()));
+  }
   if (OB_FAIL(ret)) {
-  } else if (min_cluster_version_ != GET_MIN_CLUSTER_VERSION()) {
+  } else if (min_cluster_version_ != pc_ctx.exec_ctx_.get_min_cluster_version()) {
     ret = OB_OLD_SCHEMA_VERSION;
   } else if (need_check_gen_tbl_col_) {
     // 检查是否有generated table投影列同名的可能
@@ -152,26 +162,26 @@ int ObPCVSet::inner_get_cache_obj(ObILibCacheCtx &ctx,
     bool need_check_schema = true;
     DLIST_FOREACH(pcv, pcv_list_) {
       bool is_same = false;
-      LOG_DEBUG("get plan, pcv", K(pcv));
+      LOG_TRACE("get plan, pcv", K(pcv));
       if (OB_FAIL(pcv->get_all_dep_schema(pc_ctx,
                                           pc_ctx.sql_ctx_.session_info_->get_database_id(),
                                           new_tenant_schema_version,
                                           need_check_schema,
                                           schema_array))) {
         if (OB_OLD_SCHEMA_VERSION == ret) {
-          LOG_DEBUG("failed to get all table schema", K(ret));
+          LOG_TRACE("failed to get all table schema", K(ret));
         } else {
           LOG_WARN("failed to get all table schema", K(ret));
         }
       } else if (OB_FAIL(pcv->match(pc_ctx, schema_array, is_same))) {
         LOG_WARN("fail to match pcv when get plan", K(ret));
       } else if (false == is_same) {
-        LOG_DEBUG("failed to match param");
+        LOG_TRACE("failed to match param");
         /*do nothing*/
       } else {
         matched_pcv = pcv;
         if (OB_FAIL(pcv->choose_plan(pc_ctx, schema_array, plan))) {
-          LOG_DEBUG("failed to get plan in plan cache value", K(ret));
+          LOG_TRACE("failed to get plan in plan cache value", K(ret));
         }
         break;
       }
@@ -179,7 +189,7 @@ int ObPCVSet::inner_get_cache_obj(ObILibCacheCtx &ctx,
     // 如果tenant schema变化了, 但table schema没有过期, 则更新tenant schema
     // plan必须不为NULL，因为下层可能会有覆盖错误码的行为，即使计划没有匹配上，
     // ret仍然为success，此时tenant schema version又会被推高，可能有正确性问题
-    // bug link：https://aone.alibaba-inc.com/issue/19829168
+    // bug link：
     if (OB_SUCC(ret) && NULL != matched_pcv && NULL != plan) {
       if (OB_FAIL(matched_pcv->lift_tenant_schema_version(new_tenant_schema_version))) {
         LOG_WARN("failed to lift pcv's tenant schema version", K(ret));
@@ -218,7 +228,7 @@ int ObPCVSet::inner_add_cache_obj(ObILibCacheCtx &ctx,
              K(pc_ctx.sql_ctx_.session_info_));
   } else if (get_plan_num() >= MAX_PCV_SET_PLAN_NUM) {
     static const int64_t PRINT_PLAN_EXCEEDS_LOG_INTERVAL = 20 * 1000 * 1000; // 20s
-    ret = OB_NOT_SUPPORTED;
+    ret = OB_ERR_UNEXPECTED;
     if (REACH_TIME_INTERVAL(PRINT_PLAN_EXCEEDS_LOG_INTERVAL)) {
       LOG_INFO("number of plans in a single pcv_set reach limit", K(ret), K(get_plan_num()), K(pc_ctx));
     }
@@ -238,7 +248,7 @@ int ObPCVSet::inner_add_cache_obj(ObILibCacheCtx &ctx,
         if (OB_FAIL(pcv->add_plan(*plan, schema_array, pc_ctx))) {
           if (OB_SQL_PC_PLAN_DUPLICATE == ret
               || is_not_supported_err(ret)) {
-            LOG_DEBUG("fail to add plan to pcv", K(ret));
+            LOG_TRACE("fail to add plan to pcv", K(ret));
           } else {
             LOG_WARN("fail to add plan to pcv", K(ret));
           }
@@ -330,7 +340,7 @@ int ObPCVSet::deep_copy_sql(const ObString &sql)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(sql.ptr())) {
-    SQL_PC_LOG(DEBUG, "sql is empty, ignore copy sql", K(ret), K(lbt()));
+    SQL_PC_LOG(TRACE, "sql is empty, ignore copy sql", K(ret), K(lbt()));
   } else if (OB_FAIL(ob_write_string(allocator_, sql, sql_))) {
     SQL_PC_LOG(WARN, "deep copy sql into pcv_set failed", K(ret), K(sql));
   }
@@ -483,7 +493,7 @@ int ObPCVSet::check_raw_param_for_dup_col(ObPlanCacheCtx &pc_ctx, bool &contain_
 
             if (0 != l_tmp_str.compare(r_tmp_str)) {
               all_same = false;
-              LOG_DEBUG("raw text not matched", K(l_tmp_str), K(r_tmp_str));
+              LOG_TRACE("raw text not matched", K(l_tmp_str), K(r_tmp_str));
             }
           }
         } // for end
@@ -493,6 +503,24 @@ int ObPCVSet::check_raw_param_for_dup_col(ObPlanCacheCtx &pc_ctx, bool &contain_
   }
   return ret;
 }
+int ObPCVSet::check_contains_table(uint64_t db_id, common::ObString tab_name, bool &contains)
+{
+  int ret = OB_SUCCESS;
+  DLIST_FOREACH(pcv, pcv_list_) {
+    if (OB_ISNULL(pcv)) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid argument", K(pcv), K(ret));
+    } else if (OB_FAIL(pcv->check_contains_table(db_id, tab_name, contains))) {
+      LOG_WARN("fail to check table name", K(ret), K(db_id), K(tab_name));
+    } else if (!contains) {
+      // continue find
+    } else {
+      break;
+    }
+  }
+  return ret;
+}
+
 
 }
 }

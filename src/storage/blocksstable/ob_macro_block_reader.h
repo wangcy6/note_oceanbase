@@ -112,7 +112,7 @@ public:
 
   int init(const char *data, const int64_t size, const bool hex_print = false);
   void reset();
-  int dump();
+  int dump(const uint64_t tablet_id, const int64_t scn);
 private:
   int dump_sstable_macro_block(const bool is_index_block);
   int dump_bloom_filter_data_block();
@@ -120,6 +120,7 @@ private:
       const int64_t micro_idx,
       const bool is_index_block,
       ObMacroBlockRowBareIterator &macro_bare_iter);
+  int dump_macro_block_meta_block(ObMacroBlockRowBareIterator &macro_bare_iter);
   int dump_sstable_micro_header(
       const ObMicroBlockData &micro_data,
       const int64_t micro_idx,
@@ -129,6 +130,7 @@ private:
       ObMacroBlockRowBareIterator &macro_bare_iter);
   int dump_sstable_micro_data(const ObMicroBlockData &micro_data, const bool is_index_block);
   int dump_column_info(const int64_t col_cnt);
+  bool check_need_print(const uint64_t tablet_id, const int64_t scn);
 private:
   // raw data
   const char *data_;

@@ -49,7 +49,7 @@ void ObLSFreezeTask::handle()
 }
 
 ObLSFreezeThread::ObLSFreezeThread()
-  : inited_(false), tg_id_(-1), available_index_(-1)
+    : inited_(false), tg_id_(-1), available_index_(-1), lock_(common::ObLatchIds::THREAD_POOL_LOCK)
 {
   for (int64_t i = 0; i < MAX_FREE_TASK_NUM; i++) {
     task_array_[i] = NULL;
@@ -77,7 +77,7 @@ void ObLSFreezeThread::destroy()
   }
 }
 
-int ObLSFreezeThread::init(int tg_id)
+int ObLSFreezeThread::init(const int64_t tenant_id, int tg_id)
 {
   int ret = OB_SUCCESS;
   if (inited_) {
@@ -88,7 +88,7 @@ int ObLSFreezeThread::init(int tg_id)
   } else if (OB_FAIL(TG_SET_HANDLER_AND_START(tg_id_, *this))) {
     STORAGE_LOG(WARN, "ObSimpleThreadPool inited error.", K(ret));
   } else {
-    ObMemAttr memattr(OB_SERVER_TENANT_ID, "FreezeTask");
+    ObMemAttr memattr(tenant_id, "FreezeTask");
     for (int64_t i = 0; OB_SUCC(ret) && i < MAX_FREE_TASK_NUM; i++) {
       ObLSFreezeTask *ptr
         = (ObLSFreezeTask *)ob_malloc(sizeof(ObLSFreezeTask), memattr);
@@ -136,7 +136,7 @@ int ObLSFreezeThread::add_task(ObDataCheckpoint *data_checkpoint,
 void ObLSFreezeThread::handle(void *task)
 {
   if (NULL == task) {
-    STORAGE_LOG(WARN, "task is null", KP(task));
+    STORAGE_LOG_RET(WARN, OB_ERR_UNEXPECTED, "task is null", KP(task));
   } else {
     ObLSFreezeTask *freeze_task = static_cast<ObLSFreezeTask *>(task);
     freeze_task->handle();

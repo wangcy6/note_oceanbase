@@ -24,7 +24,7 @@ namespace sql
 {
 
 ObExprSleep::ObExprSleep(ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_SLEEP, N_SYS_SLEEP, 1, NOT_ROW_DIMENSION)
+    : ObFuncExprOperator(alloc, T_FUN_SYS_SLEEP, N_SYS_SLEEP, 1, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -56,8 +56,9 @@ int ObExprSleep::sleep(int64_t usec)
   int64_t dead_line = ObTimeUtility::current_time() + usec;
   int64_t usec_rem = usec;
   useconds_t usec_req = static_cast<useconds_t>(MIN(CHECK_INTERVAL_IN_US, usec_rem));
+  ObWaitEventGuard wait_guard(ObWaitEventIds::DEFAULT_SLEEP, 0, usec);
   while(usec_req > 0) {
-    (void)ob_usleep(usec_req);
+    ob_usleep(usec_req);
     if (OB_FAIL(THIS_WORKER.check_status())) {
       break;
     } else {

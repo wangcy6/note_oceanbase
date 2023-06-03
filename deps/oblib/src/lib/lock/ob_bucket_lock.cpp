@@ -38,23 +38,31 @@ int ObBucketLock::init(
   const lib::ObLabel &label,
   const uint64_t tenant_id)
 {
+  attr_.label_ = label;
+  attr_.tenant_id_ = tenant_id;
+  return init(bucket_cnt, latch_id, attr_);
+}
+
+int ObBucketLock::init(
+  const uint64_t bucket_cnt,
+  const uint32_t latch_id,
+  const ObMemAttr &attr)
+{
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     COMMON_LOG(WARN, "The ObBucketLock has been inited, ", K(ret));
   } else if (OB_UNLIKELY(0 == bucket_cnt)
     || OB_UNLIKELY(latch_id >= ObLatchIds::LATCH_END)
-    || OB_UNLIKELY(OB_INVALID_ID == tenant_id)) {
+    || OB_UNLIKELY(OB_INVALID_ID == attr.tenant_id_)) {
     ret = OB_INVALID_ARGUMENT;
-    COMMON_LOG(WARN, "Invalid argument, ", K(bucket_cnt), K(latch_id), K(label), K(tenant_id), K(ret));
+    COMMON_LOG(WARN, "Invalid argument, ", K(bucket_cnt), K(latch_id), K(ret));
   } else {
+    attr_ = attr;
     bucket_cnt_ = bucket_cnt;
     latch_cnt_ = bucket_cnt_ / 8 + 1;
-    ObMemAttr mem_attr;
     void *buf = NULL;
-    mem_attr.tenant_id_ = tenant_id;
-    mem_attr.label_ = label;
-    if (OB_UNLIKELY(NULL == (buf = ob_malloc(latch_cnt_ * sizeof(ObLatch), mem_attr)))) {
+    if (OB_UNLIKELY(NULL == (buf = ob_malloc(latch_cnt_ * sizeof(ObLatch), attr_)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       COMMON_LOG(ERROR, "Fail to allocate memory, ", K_(latch_cnt), K(ret));
     } else {
@@ -74,7 +82,7 @@ void ObBucketLock::destroy()
 {
   is_inited_ = false;
   if (NULL != latches_) {
-    for (uint64_t i = 0; i < latch_cnt_; ++i) {
+    for (int64_t i = latch_cnt_ - 1; i >= 0; --i) {
       latches_[i].~ObLatch();
     }
     ob_free(latches_);
@@ -232,7 +240,7 @@ int ObBucketLock::wrlock_all()
     }
 
     if (OB_FAIL(ret)) {
-      for (int64_t i = 0; i <= last_succ_idx; ++i) {
+      for (int64_t i = last_succ_idx; i >= 0; --i) {
         latches_[i].unlock();
       }
     }
@@ -279,7 +287,7 @@ int ObBucketLock::try_lock_all(const bool is_write_lock)
     }
 
     if (OB_FAIL(ret)) {
-      for (int64_t i = 0; i <= last_succ_idx; ++i) {
+      for (int64_t i = last_succ_idx; i >= 0; --i) {
         latches_[i].unlock();
       }
     }
@@ -298,7 +306,7 @@ int ObBucketLock::unlock_all()
     ret = OB_NOT_INIT;
     COMMON_LOG(WARN, "The ObBucketLock has not been inited, ", K(ret));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < latch_cnt_; ++i) {
+    for (int64_t i = latch_cnt_ - 1; OB_SUCC(ret) && i >= 0; --i) {
       latches_[i].unlock();
     }
   }
@@ -326,7 +334,7 @@ ObMultiBucketLockGuard::~ObMultiBucketLockGuard()
   int tmp_ret = OB_SUCCESS;
   for (int64_t i = 0; i < latch_array_.count(); ++i) {
     if (OB_UNLIKELY(OB_SUCCESS != (tmp_ret = lock_.unlock_latch_idx(latch_array_.at(i))))) {
-      COMMON_LOG(ERROR, "Fail to unlock bucket, ", K(tmp_ret), "latch_idx", latch_array_.at(i));
+      COMMON_LOG_RET(ERROR, tmp_ret, "Fail to unlock bucket, ", K(tmp_ret), "latch_idx", latch_array_.at(i));
     }
   }
 };

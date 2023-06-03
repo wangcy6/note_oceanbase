@@ -137,6 +137,7 @@ private:
   backup::ObBackupMetaIndexStoreWrapper *second_meta_index_store_;
   ObRestoreMacroBlockIdMgr *restore_macro_block_id_mgr_;
   blocksstable::ObBufferReader data_buffer_; // Data used to assemble macroblocks
+  blocksstable::ObBufferReader read_buffer_; // Buffer used to read macro data
   common::ObArenaAllocator allocator_;
   int64_t macro_block_index_;
   int64_t macro_block_count_;
@@ -194,8 +195,8 @@ private:
   const ObSSTable *sstable_;
   const ObSSTableMeta *meta_;
   ObDatumRange datum_range_;
-  ObSSTableSecMetaIterator second_meta_iterator_;
   common::ObArenaAllocator allocator_;
+  ObSSTableSecMetaIterator second_meta_iterator_;
   DISALLOW_COPY_AND_ASSIGN(ObCopyMacroBlockObProducer);
 };
 
@@ -271,7 +272,6 @@ private:
       const share::ObLSID &ls_id,
       const ObTabletID &tablet_id,
       obrpc::ObCopyTabletInfo &tablet_info);
-
 private:
   bool is_inited_;
   ObArray<common::ObTabletID> tablet_id_array_;
@@ -364,7 +364,7 @@ private:
   int get_tablet_meta_(
       const common::ObTabletID &tablet_id,
       ObMigrationTabletParam &tablet_meta);
-  int may_update_tablet_meta_(
+  int update_tablet_meta_if_restore_major_(
       const common::ObTabletID &tablet_id,
       ObTabletHandle &tablet_handle,
       ObMigrationTabletParam &tablet_meta);
@@ -594,8 +594,8 @@ private:
   ObTableHandleV2 table_handle_;
   ObTabletHandle tablet_handle_;
   ObDatumRange datum_range_;
-  ObSSTableSecMetaIterator second_meta_iterator_;
   common::ObArenaAllocator allocator_;
+  ObSSTableSecMetaIterator second_meta_iterator_;
   DISALLOW_COPY_AND_ASSIGN(ObCopySSTableMacroRangeObProducer);
 };
 

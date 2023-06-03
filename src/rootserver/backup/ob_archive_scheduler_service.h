@@ -38,7 +38,6 @@ namespace share {
 namespace rootserver
 {
 
-class ObServerManager;
 class ObZoneManager;
 class ObUnitManager;
 
@@ -66,7 +65,6 @@ public:
   ~ObArchiveSchedulerService() {}
 
   int init(
-    ObServerManager &server_mgr,
     ObZoneManager &zone_mgr,
     ObUnitManager &unit_manager,
     share::schema::ObMultiVersionSchemaService *schema_service,
@@ -93,6 +91,10 @@ public:
 
   void wakeup();
 
+  int open_archive_mode(const uint64_t tenant_id, const common::ObIArray<uint64_t> &archive_tenant_ids);
+
+  int close_archive_mode(const uint64_t tenant_id, const common::ObIArray<uint64_t> &archive_tenant_ids);
+
   // If input tenant is sys tenant and archive_tenant_ids is empty, then start archive for all tenants.
   // Or if input tenant is sys tenant but archive_tenant_ids is not empty, then start archive for tenants in archive_tenant_ids.
   // Otherwize, just start archive for input tenant.
@@ -105,6 +107,7 @@ public:
 
 private:
   int process_();
+  int inner_process_(const uint64_t tenant_id);
   int start_tenant_archive_(const uint64_t tenant_id);
   // Return the first error that failed to start archive if force_start is true. Otherwise,
   // ignore all error.
@@ -115,10 +118,15 @@ private:
   int stop_tenant_archive_(const uint64_t tenant_id);
   int get_all_tenant_ids_(common::ObIArray<uint64_t> &tenantid_array);
 
+
+  int open_tenant_archive_mode_(const common::ObIArray<uint64_t> &tenant_ids_array);
+  int open_tenant_archive_mode_(const uint64_t tenant_id);
+  int close_tenant_archive_mode_(const common::ObIArray<uint64_t> &tenant_ids_array);
+  int close_tenant_archive_mode_(const uint64_t tenant_id);
+
   bool is_inited_;
   bool is_working_;
   mutable ObArchiveThreadIdling idling_;
-  ObServerManager *server_mgr_;
   ObZoneManager *zone_mgr_;
   ObUnitManager *unit_mgr_;
   obrpc::ObSrvRpcProxy *rpc_proxy_;

@@ -14,6 +14,8 @@
 #include <vector>
 #define private public
 #define protected public
+#define UNITTEST
+
 #include "storage/tx/ob_mock_tx_ctx.h"
 
 namespace oceanbase
@@ -111,6 +113,8 @@ TEST_F(TestMockObTxCtx, test_simple_tx_ctx1)
   ctx1.ls_memo_[ctx2.addr_] = ls_id2;
   ctx1.set_trans_type_(TransType::DIST_TRANS);
   ctx1.upstream_state_ = ObTxState::INIT;
+  // set self to root
+  ctx1.exec_info_.upstream_ = ls_id1;
   ctx1.set_downstream_state(ObTxState::REDO_COMPLETE);
   ctx1.exec_info_.participants_.push_back(ls_id1);
   ctx1.exec_info_.participants_.push_back(ls_id2);

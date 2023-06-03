@@ -32,7 +32,7 @@ const static int64_t DEF_COL_NUM = 4;
 void check_row_fuse(const char *input, const char *expect)
 {
   int ret = OB_SUCCESS;
-  common::ObArenaAllocator allocator(ObModIds::OB_ST_TEMP);
+  common::ObArenaAllocator allocator("StTemp");
   //const ObStoreRow *expect_row = NULL;
   const ObStoreRow *input_row = NULL;
   ObStoreRow *result = NULL;
@@ -77,7 +77,7 @@ void check_row_fuse(const char *input, const char *expect)
 void check_simple_row_fuse(const char *input, const char *expect)
 {
   int ret = OB_SUCCESS;
-  common::ObArenaAllocator allocator(ObModIds::OB_ST_TEMP);
+  common::ObArenaAllocator allocator("StTemp");
   //const ObStoreRow *expect_row = NULL;
   const ObStoreRow *input_row = NULL;
   ObStoreRow *result = NULL;
@@ -231,7 +231,7 @@ TEST(ObRowFuseTest, test_fuse_empty)
 
 TEST(ObRowFuseTest, test_invalid_input_row)
 {
-  common::ObArenaAllocator allocator(ObModIds::OB_ST_TEMP);
+  common::ObArenaAllocator allocator("StTemp");
   char *input_ptr = (char *)allocator.alloc(OB_ROW_MAX_COLUMNS_COUNT * sizeof(ObObj) + sizeof(ObStoreRow));
   char *result_ptr = (char *)allocator.alloc(OB_ROW_MAX_COLUMNS_COUNT * sizeof(ObObj) + sizeof(ObStoreRow));
   ObStoreRow *input_row = new (input_ptr) ObStoreRow;
@@ -255,7 +255,7 @@ TEST(ObRowFuseTest, test_invalid_input_row)
 
 TEST(ObRowFuseTest, test_invalid_argument)
 {
-  common::ObArenaAllocator allocator(ObModIds::OB_ST_TEMP);
+  common::ObArenaAllocator allocator("StTemp");
   char *input_ptr = (char *)allocator.alloc(DEF_COL_NUM * sizeof(ObObj) + sizeof(ObStoreRow));
   char *result_ptr = (char *)allocator.alloc(DEF_COL_NUM * sizeof(ObObj) + sizeof(ObStoreRow));
   ObStoreRow *input_row = new (input_ptr) ObStoreRow;
@@ -279,7 +279,7 @@ TEST(ObRowFuseTest, test_invalid_argument)
 
 TEST(ObRowFuseTest, test_err_unexpected)
 {
-  common::ObArenaAllocator allocator(ObModIds::OB_ST_TEMP);
+  common::ObArenaAllocator allocator("StTemp");
   char *input_ptr = (char *)allocator.alloc(DEF_COL_NUM * sizeof(ObObj) + sizeof(ObStoreRow));
   char *result_ptr = (char *)allocator.alloc(DEF_COL_NUM * sizeof(ObObj) + sizeof(ObStoreRow));
   ObStoreRow *input_row = new (input_ptr) ObStoreRow;
@@ -301,7 +301,7 @@ TEST(ObRowFuseTest, test_err_unexpected)
 TEST(ObRowFuseTest, test_nop_pos)
 {
   ObNopPos nop_pos;
-  common::ObArenaAllocator allocator(ObModIds::OB_ST_TEMP);
+  common::ObArenaAllocator allocator("StTemp");
   // ASSERT_EQ(OB_ALLOCATE_MEMORY_FAILED, nop_pos.init(LONG_MAX));
   ASSERT_EQ(OB_SUCCESS, nop_pos.init(allocator, 256));
 }
@@ -315,7 +315,7 @@ void check_fuse_row_flag(
   row.flag_ = old_flag;
   row.flag_.fuse_flag(ObDmlRowFlag(input_flag));
   if (expect_flag != row.flag_.whole_flag_) {
-    STORAGE_LOG(WARN, "not equal", K(old_flag), K(input_flag),
+    STORAGE_LOG_RET(WARN, OB_ERR_UNEXPECTED, "not equal", K(old_flag), K(input_flag),
         K(expect_flag), "fused_flag", row.flag_);
   }
 }

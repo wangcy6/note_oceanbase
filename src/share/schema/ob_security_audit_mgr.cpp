@@ -71,19 +71,19 @@ struct Deep_Copy_EarlyStopCondition
 
 ObSAuditMgr::ObSAuditMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      audit_infos_(0, NULL, ObModIds::OB_SCHEMA_SECURITY_AUDIT),
-      audit_map_(ObModIds::OB_SCHEMA_SECURITY_AUDIT)
+      audit_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_SECURITY_AUDIT, ObCtxIds::SCHEMA_SERVICE)),
+      audit_map_(SET_USE_500(ObModIds::OB_SCHEMA_SECURITY_AUDIT, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
 ObSAuditMgr::ObSAuditMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      audit_infos_(0, NULL, ObModIds::OB_SCHEMA_SECURITY_AUDIT),
-      audit_map_(ObModIds::OB_SCHEMA_SECURITY_AUDIT)
+      audit_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_SECURITY_AUDIT, ObCtxIds::SCHEMA_SERVICE)),
+      audit_map_(SET_USE_500(ObModIds::OB_SCHEMA_SECURITY_AUDIT, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -108,7 +108,7 @@ int ObSAuditMgr::init()
 void ObSAuditMgr::reset()
 {
   if (OB_UNLIKELY(!is_inited_)) {
-    LOG_WARN("audit manger not init");
+    LOG_WARN_RET(OB_NOT_INIT, "audit manger not init");
   } else {
     audit_infos_.clear();
     audit_map_.clear();

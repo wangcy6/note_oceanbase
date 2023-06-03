@@ -107,6 +107,11 @@ int ObRevokeResolver::resolve_revoke_role_inner(
         LOG_USER_ERROR(OB_ERR_USER_OR_ROLE_DOES_NOT_EXIST, user_name.length(), user_name.ptr());
       }
       LOG_WARN("fail to get user id", K(ret), K(user_name), K(host_name));
+    } else if (OB_FAIL(check_dcl_on_inner_user(revoke_role->type_,
+                                               params_.session_info_->get_priv_user_id(),
+                                               user_id))) {
+      LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user", K(ret),
+               K(session_info_->get_priv_user_id()), K(user_name));
     }
     OZ (revoke_stmt->add_grantee(user_name));
     OZ (params_.schema_checker_->get_user_info(tenant_id, user_id, user_info), user_id);
@@ -186,13 +191,19 @@ int ObRevokeResolver::resolve_revoke_sysprivs_inner(
     const ObString &user_name = user_name_array.at(i);
     const ObString &host_name = host_name_array.at(i);
     OZ (revoke_stmt->add_grantee(user_name));
-    if (OB_SUCC(ret) && OB_FAIL(params_.schema_checker_->get_user_id(
-          revoke_stmt->get_tenant_id(), user_name, host_name, user_id))) {
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(params_.schema_checker_->get_user_id(revoke_stmt->get_tenant_id(), user_name,
+                                                            host_name, user_id))) {
       if (OB_USER_NOT_EXIST == ret) {
         ret = OB_ERR_USER_OR_ROLE_DOES_NOT_EXIST;
         LOG_USER_ERROR(OB_ERR_USER_OR_ROLE_DOES_NOT_EXIST, user_name.length(), user_name.ptr());
       }
       LOG_WARN("fail to get user id", K(ret), K(user_name), K(host_name));
+    }  else if (OB_FAIL(check_dcl_on_inner_user(revoke_role->type_,
+                                               params_.session_info_->get_priv_user_id(),
+                                               user_id))) {
+      LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user", K(ret),
+               K(session_info_->get_priv_user_id()), K(user_name));
     }
     OZ (params_.schema_checker_->get_user_info(
         revoke_stmt->get_tenant_id(), user_id, user_info), user_id);
@@ -363,6 +374,11 @@ int ObRevokeResolver::resolve_mysql(const ParseNode &parse_tree)
                   ret = OB_NOT_SUPPORTED;
                   LOG_WARN("Revoke privilege from root at global level is not supported", K(ret));
                   LOG_USER_ERROR(OB_NOT_SUPPORTED, "Revoke privilege from root at global level");
+                } else if (OB_FAIL(check_dcl_on_inner_user(node->type_,
+                                                          params_.session_info_->get_priv_user_id(),
+                                                          user_id))) {
+                  LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user",
+                           K(ret), K(session_info_->get_priv_user_id()), K(user_name));
                 } else if (OB_FAIL(revoke_stmt->add_user(user_id))) {
                   LOG_WARN("Add user to grant_stmt error", K(ret), K(user_id));
                 } else {
@@ -608,6 +624,11 @@ int ObRevokeResolver::resolve_revoke_role_and_sysprivs_inner(const ParseNode *no
         LOG_USER_ERROR(OB_ERR_USER_OR_ROLE_DOES_NOT_EXIST, user_name.length(), user_name.ptr());
       }
       LOG_WARN("fail to get user id", K(ret), K(user_name), K(host_name));
+    } else if (OB_FAIL(check_dcl_on_inner_user(node->type_,
+                                               params_.session_info_->get_priv_user_id(),
+                                               user_id))) {
+      LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user", K(ret),
+               K(session_info_->get_priv_user_id()), K(user_id));
     }
     OZ (revoke_stmt->add_grantee(user_name));
     OZ (params_.schema_checker_->get_user_info(tenant_id, user_id, user_info), user_id);
@@ -784,6 +805,11 @@ int ObRevokeResolver::resolve_revoke_obj_priv_inner(const ParseNode *node,
               ret = OB_NOT_SUPPORTED;
               LOG_WARN("Revoke privilege from root at global level is not supported", K(ret));
               LOG_USER_ERROR(OB_NOT_SUPPORTED, "Revoke privilege from root at global level");
+            } else if (OB_FAIL(check_dcl_on_inner_user(node->type_,
+                                                       params_.session_info_->get_priv_user_id(),
+                                                       user_id))) {
+              LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user",
+                       K(ret), K(params_.session_info_->get_priv_user_id()), K(user_id));
             } else if (OB_FAIL(revoke_stmt->add_user(user_id))) {
               LOG_WARN("Add user to grant_stmt error", K(ret), K(user_id));
             } else {

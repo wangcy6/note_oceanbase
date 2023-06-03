@@ -44,7 +44,6 @@ class ObSrvRpcProxy;
 
 namespace rootserver
 {
-class ObServerManager;
 class ObZoneManager;
 class ObDDLService;
 class ObDDLTaskRecord;
@@ -56,7 +55,10 @@ public:
   virtual ~ObIndexBuilder();
 
   int create_index(const obrpc::ObCreateIndexArg &arg,
+<<<<<<< HEAD
                    const share::SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                    obrpc::ObAlterTableRes &res);
   int drop_index(const obrpc::ObDropIndexArg &arg, obrpc::ObDropIndexRes &res);
 
@@ -64,22 +66,33 @@ public:
   // if not all index table updated return OB_EAGAIN.
   int do_create_index(
       const obrpc::ObCreateIndexArg &arg,
+<<<<<<< HEAD
       const share::SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       obrpc::ObAlterTableRes &res);
   int do_create_global_index(
       share::schema::ObSchemaGetterGuard &schema_guard,
       const obrpc::ObCreateIndexArg &arg,
       const share::schema::ObTableSchema &table_schema,
+<<<<<<< HEAD
       const share::SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       obrpc::ObAlterTableRes &res);
   int do_create_local_index(
       share::schema::ObSchemaGetterGuard &schema_guard,
       const obrpc::ObCreateIndexArg &arg,
       const share::schema::ObTableSchema &table_schema,
+<<<<<<< HEAD
       const share::SCN &frozen_scn,
       obrpc::ObAlterTableRes &res);
   int generate_schema(const obrpc::ObCreateIndexArg &arg,
                       const share::SCN &frozen_scn,
+=======
+      obrpc::ObAlterTableRes &res);
+  int generate_schema(const obrpc::ObCreateIndexArg &arg,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                       share::schema::ObTableSchema &data_schema,
                       const bool global_index_without_column_info,
                       share::schema::ObTableSchema &index_schema);
@@ -93,7 +106,8 @@ public:
                               const share::schema::ObTableSchema *index_schema,
                               const int64_t parallelism,
                               common::ObIAllocator &allocator,
-                              ObDDLTaskRecord &task_record);
+                              ObDDLTaskRecord &task_record,
+                              const int64_t group_id);
 private:
   typedef common::ObArray<std::pair<int64_t, common::ObString> > OrderFTColumns;
   class FulltextColumnOrder
@@ -110,7 +124,10 @@ private:
   };
 
   int set_basic_infos(const obrpc::ObCreateIndexArg &arg,
+<<<<<<< HEAD
                       const share::SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                       const share::schema::ObTableSchema &data_schema,
                       share::schema::ObTableSchema &schema);
   int set_index_table_columns(const obrpc::ObCreateIndexArg &arg,

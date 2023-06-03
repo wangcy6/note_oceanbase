@@ -15,6 +15,7 @@
 
 #include <pthread.h>
 #include "lib/compress/ob_compressor_pool.h"
+#include "lib/container/ob_array_serialization.h"
 #include "share/config/ob_config_helper.h"
 #include "share/ob_encryption_util.h"
 #include "share/parameter/ob_parameter_attr.h"
@@ -45,6 +46,7 @@ enum ObConfigItemType{
   OB_CONF_ITEM_TYPE_MOMENT = 8,
   OB_CONF_ITEM_TYPE_CAPACITY = 9,
   OB_CONF_ITEM_TYPE_LOGARCHIVEOPT = 10,
+  OB_CONF_ITEM_TYPE_VERSION = 11,
 };
 
 class ObConfigItem
@@ -65,6 +67,11 @@ public:
   bool check() const
   {
     return NULL == ck_ ? value_valid_ : value_valid_ && ck_->check(*this);
+  }
+  virtual bool check_unit(const char *str) const
+  {
+    UNUSED(str);
+    return true;
   }
   bool set_value(const common::ObString &string)
   {
@@ -105,6 +112,21 @@ public:
     ret = databuff_printf(value_reboot_str_, sizeof(value_reboot_str_), pos, "%s", str);
     return ret == OB_SUCCESS;
   }
+  bool set_dump_value(const char *str)
+  {
+    int64_t pos = 0;
+    int ret = OB_SUCCESS;
+    ret = databuff_printf(value_dump_str_, sizeof(value_dump_str_), pos, "%s", str);
+    return ret == OB_SUCCESS;
+  }
+  void set_dump_value_updated()
+  {
+    dump_value_updated_ = true;
+  }
+  bool dump_value_updated() const
+  {
+    return dump_value_updated_;
+  }
   void set_value_updated()
   {
     value_updated_ = true;
@@ -137,7 +159,9 @@ public:
   {
     const char *ret = nullptr;
     ObLatchRGuard rd_guard(const_cast<ObLatch&>(lock_), ObLatchIds::CONFIG_LOCK);
-    if (reboot_effective() && is_initial_value_set()) {
+    if (dump_value_updated()) {
+      ret = value_dump_str_;
+    } else if (reboot_effective() && is_initial_value_set()) {
       ret = value_reboot_str_;
     } else {
       ret = value_str_;
@@ -190,9 +214,11 @@ protected:
   bool inited_;
   bool initial_value_set_;
   bool value_updated_;
+  bool dump_value_updated_;
   bool value_valid_;
   char value_str_[OB_MAX_CONFIG_VALUE_LEN];
   char value_reboot_str_[OB_MAX_CONFIG_VALUE_LEN];
+  char value_dump_str_[OB_MAX_CONFIG_VALUE_LEN];
   const char* name_str_;
   const char* info_str_;
   const char* range_str_;
@@ -220,7 +246,7 @@ public:
   ObConfigIntListItem &operator=(const char *str)
   {
     if (!set_value(str)) {
-      OB_LOG(WARN, "obconfig int list item set value failed");
+      OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "obconfig int list item set value failed");
     }
     return *this;
   }
@@ -288,7 +314,7 @@ public:
   ObConfigStrListItem &operator=(const char *str)
   {
     if (!set_value(str)) {
-      OB_LOG(WARN, "obconfig str list item set value failed");
+      OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "obconfig str list item set value failed");
     }
     return *this;
   }
@@ -392,10 +418,9 @@ public:
   virtual ObConfigItemType get_config_item_type() const {
     return ObConfigItemType::OB_CONF_ITEM_TYPE_INTEGRAL;
   }
-
 protected:
   //use current value to do input operation
-  bool set(const char *str);
+  virtual bool set(const char *str);
   virtual int64_t parse(const char *str, bool &valid) const = 0;
 
 private:
@@ -473,7 +498,7 @@ inline ObConfigDoubleItem &ObConfigDoubleItem::operator = (double value)
   char buf[2L<<10];
   (void) snprintf(buf, sizeof(buf), "%f", value);
   if (!set_value(buf)) {
-    OB_LOG(WARN, "obconfig double item set value failed");
+    OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "obconfig double item set value failed");
   }
   return *this;
 }
@@ -508,6 +533,12 @@ public:
   virtual ~ObConfigCapacityItem() {}
 
   ObConfigCapacityItem &operator = (int64_t value);
+  virtual bool check_unit(const char *str) const
+  {
+    bool is_valid;
+    IGNORE_RETURN ObConfigCapacityParser::get(str, is_valid);
+    return is_valid;
+  }
 
 protected:
   int64_t parse(const char *str, bool &valid) const;
@@ -520,7 +551,7 @@ inline ObConfigCapacityItem &ObConfigCapacityItem::operator = (int64_t value)
   char buf[2L<<10];
   (void) snprintf(buf, sizeof(buf), "%ldB", value);
   if (!set_value(buf)) {
-    OB_LOG(WARN, "obconfig capacity item set value failed");
+    OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "obconfig capacity item set value failed");
   }
   return *this;
 }
@@ -552,7 +583,7 @@ inline ObConfigTimeItem &ObConfigTimeItem::operator = (int64_t value){
   char buf[2L<<10];
   (void) snprintf(buf, sizeof(buf), "%ldus", value);
   if (!set_value(buf)) {
-    OB_LOG(WARN, "obconfig time item set value failed");
+    OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "obconfig time item set value failed");
   }
   return *this;
 }
@@ -588,7 +619,7 @@ inline ObConfigIntItem &ObConfigIntItem::operator = (int64_t value)
   char buf[64];
   (void) snprintf(buf, sizeof(buf), "%ld", value);
   if (!set_value(buf)) {
-    OB_LOG(WARN, "obconfig int item set value failed");
+    OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "obconfig int item set value failed");
   }
   return *this;
 }
@@ -689,6 +720,7 @@ public:
     return ObString::make_string(value_str_);
   }
   int copy(char *buf, const int64_t buf_len); // '\0' will be added
+  int deep_copy_value_string(ObIAllocator &allocator, ObString &dst);
   virtual ObConfigItemType get_config_item_type() const {
     return ObConfigItemType::OB_CONF_ITEM_TYPE_STRING;
   }
@@ -720,7 +752,7 @@ public:
   ObConfigLogArchiveOptionsItem &operator=(const char *str)
   {
     if (!set_value(str)) {
-      OB_LOG(WARN, "obconfig log archive options item set value failed");
+      OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "obconfig log archive options item set value failed");
     }
     return *this;
   }
@@ -814,6 +846,84 @@ protected:
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigLogArchiveOptionsItem);
+};
+
+class ObConfigVersionItem
+  : public ObConfigIntegralItem
+{
+public:
+  ObConfigVersionItem(ObConfigContainer *container,
+                       Scope::ScopeInfo scope_info,
+                       const char *name,
+                       const char *def,
+                       const char *range,
+                       const char *info,
+                       const ObParameterAttr attr = ObParameterAttr());
+  ObConfigVersionItem(ObConfigContainer *container,
+                      Scope::ScopeInfo scope_info,
+                      const char *name,
+                      const char *def,
+                      const char *info,
+                      const ObParameterAttr attr = ObParameterAttr());
+  virtual ~ObConfigVersionItem() {}
+
+  virtual ObConfigItemType get_config_item_type() const {
+    return ObConfigItemType::OB_CONF_ITEM_TYPE_VERSION;
+  }
+  ObConfigVersionItem &operator = (int64_t value);
+
+protected:
+  virtual bool set(const char *str) override;
+  virtual int64_t parse(const char *str, bool &valid) const override;
+
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObConfigVersionItem);
+};
+
+
+class ObConfigPairs
+{
+public:
+
+struct ObConfigPair {
+public:
+  ObConfigPair()
+    : key_(), value_()
+  {}
+  ~ObConfigPair() {}
+  TO_STRING_KV(K_(key), K_(value));
+public:
+  ObString key_;
+  ObString value_;
+};
+
+public:
+  ObConfigPairs()
+    : tenant_id_(common::OB_INVALID_TENANT_ID),
+      allocator_(),
+      config_array_()
+  {}
+  ~ObConfigPairs() {}
+  void init(const uint64_t tenant_id) { tenant_id_ = tenant_id; }
+  bool is_valid() const
+  {
+    return OB_INVALID_TENANT_ID != tenant_id_
+           && config_array_.count() > 0;
+  }
+  void reset();
+  int assign(const ObConfigPairs &other);
+
+  uint64_t get_tenant_id() const { return tenant_id_; }
+  const common::ObSArray<ObConfigPair> &get_configs() const { return config_array_; }
+  int get_config_str(char *buf, const int64_t length) const;
+  int64_t get_config_str_length() const;
+  int add_config(const ObString &key, const ObString &value);
+
+  TO_STRING_KV(K_(tenant_id), K_(config_array));
+private:
+  uint64_t tenant_id_;
+  ObArenaAllocator allocator_;
+  common::ObSArray<ObConfigPair> config_array_;
 };
 
 } // namespace common

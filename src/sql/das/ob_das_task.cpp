@@ -79,7 +79,10 @@ OB_DEF_DESERIALIZE(ObDASRemoteInfo)
   int ctdef_cnt = 0;
   int rtdef_cnt = 0;
   ObEvalCtx *eval_ctx = nullptr;
-  ObDASTaskFactory *das_factory = ObDASSyncAccessP::get_das_factory();
+  ObDASTaskFactory *das_factory =
+      ObDASAsyncAccessP::get_das_factory() != nullptr
+          ? ObDASAsyncAccessP::get_das_factory()
+          : ObDASSyncAccessP::get_das_factory();
 #if !defined(NDEBUG)
   CK(typeid(*exec_ctx_) == typeid(ObDesExecContext));
 #endif
@@ -177,6 +180,7 @@ int ObIDASTaskOp::start_das_task()
 {
   int &ret = errcode_;
   int simulate_error = EVENT_CALL(EventTable::EN_DAS_SIMULATE_OPEN_ERROR);
+  int need_dump = EVENT_CALL(EventTable::EN_DAS_SIMULATE_DUMP_WRITE_BUFFER);
   if (OB_UNLIKELY(!is_in_retry() && OB_SUCCESS != simulate_error)) {
     ret = simulate_error;
   } else {
@@ -187,10 +191,23 @@ int ObIDASTaskOp::start_das_task()
         //dump das task data to help analysis defensive bug
         dump_data();
       }
+    } else if (OB_SUCCESS != need_dump) {
+      dump_data();
     }
+  }
+  // no need to advance state here because this function could be called on remote executor.
+  if (OB_FAIL(ret)) {
+    set_task_status(ObDasTaskStatus::FAILED);
+  } else {
+    set_task_status(ObDasTaskStatus::FINISHED);
   }
   return ret;
 }
+
+void ObIDASTaskOp::set_task_status(ObDasTaskStatus status)
+{
+  task_status_ = status;
+};
 
 int ObIDASTaskOp::end_das_task()
 {
@@ -239,7 +256,7 @@ OB_DEF_SERIALIZE(ObDASTaskArg)
   if (OB_SUCC(ret) && OB_FAIL(serialization::encode_vi64(buf, buf_len, pos, task_ops_.count()))) {
     LOG_WARN("fail to encode ob array count", K(ret));
   }
-  for (int64_t i = 0; OB_SUCC(ret) && i < task_ops_.count(); i ++) {
+  for (int64_t i = 0; OB_SUCC(ret) && i < task_ops_.count(); i++) {
     OB_UNIS_ENCODE(task_ops_.at(i)->get_type());
     OB_UNIS_ENCODE(*task_ops_.at(i));
   }
@@ -252,7 +269,10 @@ OB_DEF_DESERIALIZE(ObDASTaskArg)
   ObDASOpType op_type = DAS_OP_INVALID;
   int64_t count = 0;
   ObIDASTaskOp *task_op = nullptr;
-  ObDASTaskFactory *das_factory = ObDASSyncAccessP::get_das_factory();
+  ObDASTaskFactory *das_factory =
+      ObDASAsyncAccessP::get_das_factory() != nullptr
+          ? ObDASAsyncAccessP::get_das_factory()
+          : ObDASSyncAccessP::get_das_factory();
   CK(OB_NOT_NULL(das_factory));
   LST_DO_CODE(OB_UNIS_DECODE,
               timeout_ts_,
@@ -269,7 +289,8 @@ OB_DEF_DESERIALIZE(ObDASTaskArg)
   for (int64_t i = 0; OB_SUCC(ret) && i < count; i ++) {
     OB_UNIS_DECODE(op_type);
     OZ(das_factory->create_das_task_op(op_type, task_op));
-    OZ(task_op->init_task_info());
+    // Here you must init first, you need to set the allocator
+    OZ(task_op->init_task_info(ObDASWriteBuffer::DAS_ROW_DEFAULT_EXTEND_SIZE));
     if (OB_SUCC(ret)) {
       task_ops_.at(i) = task_op;
     }
@@ -302,23 +323,42 @@ OB_DEF_SERIALIZE_SIZE(ObDASTaskArg)
 
 int ObDASTaskArg::add_task_op(ObIDASTaskOp *task_op)
 {
-  // we currently only support single task per ObDASTaskArg.
-  // TODO(roland.qk):remove this assert check after we enable DAS task aggregation.
-  OB_ASSERT(task_ops_.count() == 0);
   return task_ops_.push_back(task_op);
 }
 
 ObIDASTaskOp *ObDASTaskArg::get_task_op()
 {
-  OB_ASSERT(task_ops_.count() == 1);
   return task_ops_.at(0);
+}
+
+int ObIDASTaskOp::state_advance()
+{
+  int ret = OB_SUCCESS;
+  OB_ASSERT(cur_agg_list_ != nullptr);
+  OB_ASSERT(task_status_ != ObDasTaskStatus::UNSTART);
+  if (task_status_ == ObDasTaskStatus::FINISHED) {
+    if (OB_FAIL(get_agg_tasks()->move_to_success_tasks(this))) {
+      LOG_WARN("failed to move task to success tasks", KR(ret));
+    }
+  } else if (task_status_ == ObDasTaskStatus::FAILED) {
+    if (OB_FAIL(get_agg_tasks()->move_to_failed_tasks(this))) {
+      LOG_WARN("failed to move task to success tasks", KR(ret));
+    }
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid task state",KR(ret), K_(task_status));
+  }
+  return ret;
 }
 
 ObDASTaskResp::ObDASTaskResp()
   : has_more_(false),
     ctrl_svr_(),
     runner_svr_(),
-    op_results_()
+    op_results_(),
+    rcode_(),
+    trans_result_(),
+    das_factory_(nullptr)
 {
 }
 
@@ -381,21 +421,23 @@ OB_DEF_DESERIALIZE(ObDASTaskResp)
 {
   int ret = OB_SUCCESS;
   int64_t count = 0;
+  ObIDASTaskResult *op_result = nullptr;
   LST_DO_CODE(OB_UNIS_DECODE,
               has_more_,
               ctrl_svr_,
               runner_svr_);
   if (OB_SUCC(ret) && OB_FAIL(serialization::decode_vi64(buf, data_len, pos, &count))) {
     LOG_WARN("fail to decode ob array count", K(ret));
-  } else if (count != op_results_.count()) {
+  } else if (count > op_results_.count()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("receive das task response count mismatch", K(count), K(op_results_.count()));
   }
-  for (int64_t i = 0; OB_SUCC(ret) && i < count; i ++) {
-    if (OB_ISNULL(op_results_.at(i))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("op result is nullptr", K(ret), K_(op_results));
-    } else if (OB_FAIL(serialization::decode(buf, data_len, pos, *op_results_.at(i)))) {
+  while (op_results_.count() > count) {
+    op_results_.pop_back();
+  }
+  OB_ASSERT(op_results_.count() == count);
+  for (int64_t i = 0; OB_SUCC(ret) && i < count; i++) {
+    if (OB_FAIL(serialization::decode(buf, data_len, pos, *op_results_.at(i)))) {
       LOG_WARN("fail to decode array item", K(ret), K(i), K(count));
     }
   }
@@ -424,16 +466,7 @@ OB_DEF_SERIALIZE_SIZE(ObDASTaskResp)
 
 int ObDASTaskResp::add_op_result(ObIDASTaskResult *op_result)
 {
-  // we currently only support single task per ObDASTaskResp.
-  // TODO(roland.qk):remove this assert check after we enable DAS task aggregation.
-  OB_ASSERT(op_results_.count() == 0);
   return op_results_.push_back(op_result);
-}
-
-ObIDASTaskResult *ObDASTaskResp::get_op_result()
-{
-  OB_ASSERT(op_results_.count() == 1);
-  return op_results_.at(0);
 }
 
 OB_SERIALIZE_MEMBER(ObIDASTaskResult, task_id_);
@@ -515,7 +548,10 @@ int DASOpResultIter::get_next_rows(int64_t &count, int64_t capacity)
         //remote task will change datum ptr, need to mark this flag
         //in order to let the next local task reset datum ptr before get_next_rows
         wild_datum_info_->exprs_ = &scan_op->get_result_outputs();
-        wild_datum_info_->max_output_rows_ = max(count, wild_datum_info_->max_output_rows_);
+        //Now in the group scan op, we implement jump read.
+        //We may touch more rows than count return.
+        //So we need to reset all of ptr in the output expr datum.
+        wild_datum_info_->max_output_rows_ = max(capacity, wild_datum_info_->max_output_rows_);
       }
     }
   } else {

@@ -33,6 +33,11 @@ public:
   {
     return common::murmurhash(&user_id_, sizeof(user_id_), tenant_id_);
   };
+  int hash(uint64_t &hash_val) const
+  {
+    hash_val = hash();
+    return OB_SUCCESS;
+  };
   int compare(const ObTenantUserKey& r) const
   {
     int cmp = 0;
@@ -117,17 +122,21 @@ public:
   int apply_for_tenant_conn_resource(const uint64_t tenant_id, const ObPrivSet &priv,
                      const uint64_t max_tenant_connections);
   void release_tenant_conn_resource(const uint64_t tenant_id);
+  int get_tenant_cur_connections(const uint64_t tenant_id,
+                                 bool &tenant_exists,
+                                 uint64_t &cur_connections);
   int get_or_insert_user_resource(
       const uint64_t tenant_id,
       const uint64_t user_id,
       const uint64_t max_user_connections,
       const uint64_t max_connections_per_hour,
-      ObConnectResource *&user_res, bool &has_insert);
+      ObConnectResource *&user_res, bool &has_insert, bool &user_conn_increased);
   int increase_user_connections_count(
       const uint64_t max_user_connections,
       const uint64_t max_connections_per_hour,
       const ObString &user_name,
-      ObConnectResource *user_res);
+      ObConnectResource *user_res,
+      bool &user_conn_increased);
   int on_user_connect(const uint64_t tenant_id,
                       const uint64_t user_id,
                       const ObPrivSet &priv,

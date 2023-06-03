@@ -37,10 +37,9 @@ extern bool USE_CO_LATCH;
   do {                              \
   } while(0)
 
-#if !PERF_MODE
-#define TRY_LOCK_RECORD_STAT(latch_id, spin_cnt, ret, enable)                     \
+#define TRY_LOCK_RECORD_STAT(latch_id, spin_cnt, ret)                             \
   do {                                                                            \
-    if (enable) {                                                                 \
+    if (lib::is_diagnose_info_enabled()) {                                        \
       ObDiagnoseTenantInfo *di = ObDiagnoseTenantInfo::get_local_diagnose_info(); \
       if (NULL != di) {                                                           \
         ObLatchStat &latch_stat = di->get_latch_stats().items_[latch_id];         \
@@ -53,37 +52,30 @@ extern bool USE_CO_LATCH;
       }                                                                           \
     }                                                                             \
   } while(0)
-#else
-#define TRY_LOCK_RECORD_STAT(latch_id, spin_cnt, ret, enable)
-#endif
 
-#if !PERF_MODE
-#define LOCK_RECORD_STAT(latch_id, waited, spin_cnt, yield_cnt, enable)                               \
-  do {                                                                                                \
-    if (enable) {                                                                                     \
-      ObDiagnoseTenantInfo *di = ObDiagnoseTenantInfo::get_local_diagnose_info();                     \
-      if (NULL != di) {                                                                               \
-        ObLatchStat &latch_stat = di->get_latch_stats().items_[latch_id];                             \
-        ++latch_stat.gets_;                                                                           \
-        latch_stat.spin_gets_ += spin_cnt;                                                            \
-        latch_stat.sleeps_ += yield_cnt;                                                              \
-        if (OB_UNLIKELY(waited)) {                                                                    \
-          ++latch_stat.misses_;                                                                       \
-          ObDiagnoseSessionInfo *dsi = ObDiagnoseSessionInfo::get_local_diagnose_info();              \
-          if (NULL != dsi) {                                                                          \
-            latch_stat.wait_time_ += dsi->get_curr_wait().wait_time_;                                 \
-            if (dsi->get_curr_wait().wait_time_ > 1000 * 1000) {                                      \
-              COMMON_LOG(WARN, "The Latch wait too much time, ",                                      \
-                  K(dsi->get_curr_wait()), KCSTRING(lbt()));                                          \
-            }                                                                                         \
-          }                                                                                           \
-        }                                                                                             \
-      }                                                                                               \
-    }                                                                                                 \
+#define LOCK_RECORD_STAT(latch_id, waited, spin_cnt, yield_cnt)                            \
+  do {                                                                                     \
+    if (lib::is_diagnose_info_enabled()) {                                                 \
+      ObDiagnoseTenantInfo *di = ObDiagnoseTenantInfo::get_local_diagnose_info();          \
+      if (NULL != di) {                                                                    \
+        ObLatchStat &latch_stat = di->get_latch_stats().items_[latch_id];                  \
+        ++latch_stat.gets_;                                                                \
+        latch_stat.spin_gets_ += spin_cnt;                                                 \
+        latch_stat.sleeps_ += yield_cnt;                                                   \
+        if (OB_UNLIKELY(waited)) {                                                         \
+          ++latch_stat.misses_;                                                            \
+          ObDiagnoseSessionInfo *dsi = ObDiagnoseSessionInfo::get_local_diagnose_info();   \
+          if (NULL != dsi) {                                                               \
+            latch_stat.wait_time_ += dsi->get_curr_wait().wait_time_;                      \
+            if (dsi->get_curr_wait().wait_time_ > 1000 * 1000) {                           \
+              COMMON_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "The Latch wait too much time, ", \
+                  K(dsi->get_curr_wait()), KCSTRING(lbt()));                               \
+            }                                                                              \
+          }                                                                                \
+        }                                                                                  \
+      }                                                                                    \
+    }                                                                                      \
   } while(0)
-#else
-#define LOCK_RECORD_STAT(latch_id, waited, spin_cnt, yield_cnt, enable)
-#endif
 
 struct ObLatchWaitMode
 {
@@ -112,6 +104,7 @@ public:
   inline uint32_t get_wid();
   int64_t to_string(char* buf, const int64_t buf_len);
   void enable_record_stat(bool enable) { record_stat_ = enable; }
+  bool need_record_stat() const { return record_stat_; }
 
 private:
   OB_INLINE uint64_t low_try_lock(const int64_t max_spin_cnt, const uint32_t lock_value);
@@ -206,8 +199,11 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObLatchWaitQueue);
 };
 
+class TCRWLock;
+
 class ObLatch
 {
+  friend class TCRWLock;
 public:
   ObLatch();
   ~ObLatch();
@@ -228,7 +224,34 @@ public:
   inline bool is_wrlocked_by(const uint32_t *puid = NULL) const;
   inline uint32_t get_wid() const;
   int64_t to_string(char* buf, const int64_t buf_len) const;
-
+  void enable_record_stat(bool enable) { record_stat_ = enable; }
+  bool need_record_stat() const { return record_stat_; }
+  uint32_t val() const { return lock_; }
+  OB_INLINE static int reg_lock(uint32_t* latch_addr)
+  {
+    int ret = -1;
+    ret = (max_lock_slot_idx++) % ARRAYSIZEOF(current_locks);
+    current_locks[ret] = latch_addr;
+    return ret;
+  }
+  OB_INLINE static int unreg_lock(uint32_t* latch_addr)
+  {
+    int ret = -1;
+    UNUSED(latch_addr);
+    //if (max_lock_slot_idx > 0
+    //    && latch_addr == current_locks[(max_lock_slot_idx - 1) % ARRAYSIZEOF(current_locks)]) {
+    //    ret = (--max_lock_slot_idx % ARRAYSIZEOF(current_locks));
+    //    current_locks[ret] = nullptr;
+    //}
+    return ret;
+  }
+  OB_INLINE static void clear_lock()
+  {
+    max_lock_slot_idx = 0;
+  }
+  static thread_local uint32_t* current_locks[16];
+  static thread_local uint32_t* current_wait;
+  static thread_local int8_t max_lock_slot_idx;
 private:
   template<typename LowTryLock>
   OB_INLINE int low_lock(
@@ -260,6 +283,7 @@ private:
   static const uint32_t WAIT_MASK = 1<<31;
   static const uint32_t MAX_READ_LOCK_CNT = 1<<24;
   volatile uint32_t lock_;
+  bool record_stat_;
 };
 
 struct ObLDLockType
@@ -311,6 +335,11 @@ public:
     : node_(nullptr) {}
   void reset();
   int64_t to_string(char*, const int64_t) const { return 0; }
+  ObLDHandle &operator=(ObLDHandle &&other)
+  {
+    node_ = other.node_;
+    return *this;
+  }
   ObLDHandleNode *node_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObLDHandle);
@@ -368,14 +397,14 @@ public:
       : lock_(lock), ret_(OB_SUCCESS)
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.lock(latch_id)))) {
-      COMMON_LOG(ERROR, "lock error", K(latch_id), K(ret_));
+      COMMON_LOG_RET(ERROR, ret_, "lock error", K(latch_id), K(ret_));
     }
   }
   ~ObLatchMutexGuard()
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock()))) {
-        COMMON_LOG(ERROR, "unlock error", K(ret_));
+        COMMON_LOG_RET(ERROR, ret_, "unlock error", K(ret_));
       }
     }
   }
@@ -395,14 +424,14 @@ public:
         ret_(OB_SUCCESS)
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.rdlock(latch_id)))) {
-      COMMON_LOG(ERROR, "lock error, ", K(latch_id), K(ret_));
+      COMMON_LOG_RET(ERROR, ret_, "lock error, ", K(latch_id), K(ret_));
     }
   }
   ~ObLatchRGuard()
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock()))) {
-        COMMON_LOG(ERROR, "unlock error, ", K(ret_));
+        COMMON_LOG_RET(ERROR, ret_, "unlock error, ", K(ret_));
       }
     }
   }
@@ -423,14 +452,14 @@ public:
         ret_(OB_SUCCESS)
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.wrlock(latch_id)))) {
-      COMMON_LOG(ERROR, "lock error, ", K(latch_id), K(ret_));
+      COMMON_LOG_RET(ERROR, ret_, "lock error, ", K(latch_id), K(ret_));
     }
   }
   ~ObLatchWGuard()
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock()))) {
-        COMMON_LOG(ERROR, "unlock error, ", K(ret_));
+        COMMON_LOG_RET(ERROR, ret_, "unlock error, ", K(ret_));
       }
     }
   }
@@ -453,6 +482,7 @@ OB_INLINE uint64_t ObLatchMutex::low_try_lock(const int64_t max_spin_cnt, const 
   for (; spin_cnt < max_spin_cnt; ++spin_cnt) {
     if (0 == lock_.val()) {
       if (ATOMIC_BCAS(&lock_.val(), 0, lock_value)) {
+        IGNORE_RETURN ObLatch::reg_lock((uint32_t*)(&lock_.val()));
         break;
       }
     }
@@ -514,6 +544,7 @@ inline int ObLatch::LowTryRDLock::operator()(volatile uint32_t *latch,
       conflict = false;
       if (ATOMIC_BCAS(latch, lock, lock + 1)) {
         ret = OB_SUCCESS;
+        IGNORE_RETURN reg_lock((uint32_t*)latch);
       }
     } else {
       conflict = true;
@@ -536,6 +567,7 @@ inline int ObLatch::LowTryWRLock::operator()(volatile uint32_t *latch,
     conflict = false;
     if (ATOMIC_BCAS(latch, lock, (lock | (WRITE_MASK | uid)))) {
       ret = OB_SUCCESS;
+      IGNORE_RETURN reg_lock((uint32_t*)latch);
     }
   } else {
     conflict = true;

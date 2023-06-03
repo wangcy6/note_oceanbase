@@ -186,7 +186,7 @@ int ObExprResultTypeUtil::get_round_result_type(ObObjType &type,
 
     if (OB_UNLIKELY(!ob_is_valid_obj_type(type))) {
       ret = OB_ERR_INVALID_TYPE_FOR_OP;
-      LOG_WARN("unsupported type for round", K(ret), K(type1), K(lbt()));
+      LOG_WARN("unsupported type for round", K(ret), K(type), K(type1), K(lbt()));
     }
   } else {
     type = ROUND_RESULT_TYPE[type1];
@@ -717,6 +717,10 @@ int ObExprResultTypeUtil::deduce_max_string_length_oracle(const ObDataTypeCastPa
           length = static_cast<ObLength>(ObCharset::strlen_char(out.get_collation_type(),
                                                                 out.get_string_ptr(),
                                                                 out.get_string_len()));
+          if (!ObCharset::is_valid_collation(out.get_collation_type())) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected const value cast result", K(ret), K(out), K(orig_obj), K(target_type), K(cast_mode));
+          }
         } else {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("invalid length_semantics", K(length_semantics), K(ret));
@@ -755,6 +759,14 @@ int ObExprResultTypeUtil::deduce_max_string_length_oracle(const ObDataTypeCastPa
           // LS_BYTE to LS_CHAR
           length /= ObCharset::get_charset(target_type.get_collation_type())->mbminlen;
         }
+      }
+    } else if (orig_type.is_user_defined_sql_type() || orig_type.is_ext()) {
+      // udt types like xml can cast to string, the accuracy in pl extend is used for udt id
+      if (LS_CHAR == length_semantics) {
+        int64_t mbminlen = ObCharset::get_charset(target_type.get_collation_type())->mbminlen;
+        length = OB_MAX_VARCHAR_LENGTH_KEY / mbminlen;
+      } else {
+        length = OB_MAX_VARCHAR_LENGTH_KEY; // issue 49536718: CREATE INDEX index ON table (UPPER(c1));
       }
     } else {
       int64_t ascii_bytes = 0;

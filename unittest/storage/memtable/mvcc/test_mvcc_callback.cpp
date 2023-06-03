@@ -63,7 +63,7 @@ public:
     if (bit >= 100000) {
       ob_abort();
     } else if (1 == set_[bit]) {
-      TRANS_LOG(ERROR, "set in unexpected", K(bit));
+      TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "set in unexpected", K(bit));
       ob_abort();
     } else {
       set_[bit] = 1;
@@ -77,11 +77,11 @@ public:
     for (int i = 0; i < 100000; i++) {
       if (set_[i] != other.set_[i]) {
         if (set_[i] == 1) {
-          TRANS_LOG(ERROR, "different bit set", K(i),
+          TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "different bit set", K(i),
                     "set_[i]", "1",
                     "other.set_[i]", "0");
         } else {
-          TRANS_LOG(ERROR, "different bit set", K(i),
+          TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "different bit set", K(i),
                     "set_[i]", "0",
                     "other.set_[i]", "1");
         }
@@ -149,17 +149,28 @@ public:
     return cb;
   }
 
+<<<<<<< HEAD
   void create_and_append_callback(ObMemtable *mt,
                                   bool need_submit_log = true,
                                   bool need_fill_redo = true,
                                   share::SCN scn = share::SCN::max_scn())
   {
+=======
+  ObITransCallback *create_and_append_callback(ObMemtable *mt,
+                                               bool need_submit_log = true,
+                                               bool need_fill_redo = true,
+                                               share::SCN scn = share::SCN::max_scn())
+    {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     ObMockTxCallback *cb = create_callback(mt,
                                            need_submit_log,
                                            need_fill_redo,
                                            scn);
     EXPECT_NE(NULL, (long)cb);
-    EXPECT_EQ(OB_SUCCESS, callback_list_.append_callback(cb));
+    EXPECT_EQ(OB_SUCCESS, callback_list_.append_callback(cb, false/*for_replay*/));
+    cb->need_submit_log_ = need_submit_log;
+    cb->need_fill_redo_ = need_fill_redo;
+    return cb;
   }
 
   ObMemtable *create_memtable()
@@ -225,6 +236,38 @@ int ObMockTxCallback::calc_checksum(const share::SCN checksum_scn,
     TRANS_LOG(INFO, "no need to calc checksum", K(checksum_scn), K(scn_), K(seq_no_));
   }
   return OB_SUCCESS;
+}
+
+TEST_F(TestTxCallbackList, remove_callback_on_failure)
+{
+  ObMemtable *memtable = create_memtable();
+  share::SCN scn_1;
+  scn_1.convert_for_logservice(1);
+
+  create_and_append_callback(memtable,
+                             false, /*need_submit_log*/
+                             false, /*need_fill_redo*/
+                             scn_1);
+  auto cb1 = create_and_append_callback(memtable,
+                                        false, /*need_submit_log*/
+                                        true /*need_fill_redo*/);
+  auto cb2 = create_and_append_callback(memtable,
+                                        false, /*need_submit_log*/
+                                        true /*need_fill_redo*/);
+  create_and_append_callback(memtable,
+                             false, /*need_submit_log*/
+                             true /*need_fill_redo*/);
+
+  ObCallbackScope scope;
+  int64_t removed_cnt = 0;
+  scope.start_ = ObITransCallbackIterator(cb1);
+  scope.end_ = ObITransCallbackIterator(cb2);
+
+  EXPECT_EQ(false, scope.is_empty());
+  EXPECT_EQ(OB_SUCCESS, callback_list_.sync_log_fail(scope, removed_cnt));
+
+  EXPECT_EQ(2, removed_cnt);
+  EXPECT_EQ(2, callback_list_.get_length());
 }
 
 TEST_F(TestTxCallbackList, remove_callback_by_tx_commit)
@@ -326,20 +369,14 @@ TEST_F(TestTxCallbackList, remove_callback_by_release_memtable)
 
   EXPECT_EQ(9, callback_list_.get_length());
 
-  EXPECT_EQ(OB_SUCCESS,
-            callback_list_.remove_callbacks_for_remove_memtable(memtable2));
-
-  EXPECT_EQ(7, callback_list_.get_length());
-  EXPECT_EQ(2, mgr_.get_callback_remove_for_remove_memtable_count());
-
-  EXPECT_EQ(OB_SUCCESS,
-            callback_list_.remove_callbacks_for_remove_memtable(memtable1));
-
-  EXPECT_EQ(5, callback_list_.get_length());
-  EXPECT_EQ(4, mgr_.get_callback_remove_for_remove_memtable_count());
+  memtable::ObMemtableSet memtable_set;
+  EXPECT_EQ(OB_SUCCESS, memtable_set.create(24));
+  EXPECT_EQ(OB_SUCCESS, memtable_set.set_refactored((uint64_t)(memtable2)));
+  EXPECT_EQ(OB_SUCCESS, memtable_set.set_refactored((uint64_t)(memtable1)));
+  EXPECT_EQ(OB_SUCCESS, memtable_set.set_refactored((uint64_t)(memtable3)));
 
   EXPECT_EQ(OB_SUCCESS,
-            callback_list_.remove_callbacks_for_remove_memtable(memtable3));
+            callback_list_.remove_callbacks_for_remove_memtable(&memtable_set, scn_1/*not used*/));
 
   EXPECT_EQ(4, callback_list_.get_length());
   EXPECT_EQ(5, mgr_.get_callback_remove_for_remove_memtable_count());
@@ -787,18 +824,29 @@ TEST_F(TestTxCallbackList, checksum_remove_memtable_and_tx_end)
 
   EXPECT_EQ(9, callback_list_.get_length());
 
+<<<<<<< HEAD
   EXPECT_EQ(OB_SUCCESS, callback_list_.remove_callbacks_for_remove_memtable(memtable2));
   EXPECT_EQ(true, is_checksum_equal(5, checksum_));
   EXPECT_EQ(scn_3, callback_list_.checksum_scn_);
+=======
+  memtable::ObMemtableSet memtable_set;
+  EXPECT_EQ(OB_SUCCESS, memtable_set.create(24));
+  EXPECT_EQ(OB_SUCCESS, memtable_set.set_refactored((uint64_t)(memtable2)));
+  EXPECT_EQ(OB_SUCCESS, memtable_set.set_refactored((uint64_t)(memtable1)));
+  EXPECT_EQ(OB_SUCCESS, memtable_set.set_refactored((uint64_t)(memtable3)));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
-  EXPECT_EQ(OB_SUCCESS, callback_list_.remove_callbacks_for_remove_memtable(memtable3));
+  EXPECT_EQ(OB_SUCCESS, callback_list_.remove_callbacks_for_remove_memtable(&memtable_set, scn_1/*not used*/));
   EXPECT_EQ(true, is_checksum_equal(5, checksum_));
   EXPECT_EQ(scn_3, callback_list_.checksum_scn_);
+<<<<<<< HEAD
 
 
   EXPECT_EQ(OB_SUCCESS, callback_list_.remove_callbacks_for_remove_memtable(memtable1));
   EXPECT_EQ(true, is_checksum_equal(5, checksum_));
   EXPECT_EQ(scn_3, callback_list_.checksum_scn_);
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   EXPECT_EQ(OB_SUCCESS, callback_list_.tx_calc_checksum_all());
   EXPECT_EQ(true, is_checksum_equal(9, checksum_));
@@ -1010,6 +1058,8 @@ TEST_F(TestTxCallbackList, checksum_all_and_tx_end_test) {
   ObFunction<bool()> remove_memtable_op =
     [&]() -> bool {
       ObMemtable *mt = mts[ObRandom::rand(0, mt_cnt-1)];
+      share::SCN scn_1;
+      scn_1.convert_for_logservice(1);
       bool enable = false;
       for (ObITransCallback* it = need_submit_head->next_;
            it != &(callback_list_.head_);
@@ -1023,8 +1073,11 @@ TEST_F(TestTxCallbackList, checksum_all_and_tx_end_test) {
       }
 
       if (enable) {
+        memtable::ObMemtableSet memtable_set;
+        EXPECT_EQ(OB_SUCCESS, memtable_set.create(24));
+        EXPECT_EQ(OB_SUCCESS, memtable_set.set_refactored((uint64_t)(mt)));
         EXPECT_EQ(OB_SUCCESS,
-                  callback_list_.remove_callbacks_for_remove_memtable(mt));
+                  callback_list_.remove_callbacks_for_remove_memtable(&memtable_set, scn_1/*not used*/));
       }
 
       return enable;
@@ -1112,6 +1165,20 @@ TEST_F(TestTxCallbackList, checksum_all_and_tx_end_test) {
 
 namespace memtable
 {
+void ObMemtableCtx::callback_free(ObITransCallback *cb)
+{
+  if (OB_ISNULL(cb)) {
+    TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "cb is null, unexpected error", KP(cb), K(*this));
+  } else if (cb->is_table_lock_callback()) {
+    free_table_lock_callback(cb);
+  } else {
+    ATOMIC_INC(&callback_free_count_);
+    TRANS_LOG(DEBUG, "callback release succ", KP(cb), K(*this), K(lbt()));
+    ctx_cb_allocator_.free(cb);
+    cb = NULL;
+  }
+}
+
 int ObTxCallbackList::remove_callbacks_for_fast_commit(bool &has_remove)
 {
   int ret = OB_SUCCESS;
@@ -1139,19 +1206,27 @@ int ObTxCallbackList::remove_callbacks_for_fast_commit(bool &has_remove)
   return ret;
 }
 
-int ObTxCallbackList::remove_callbacks_for_remove_memtable(ObIMemtable *memtable_for_remove)
+int ObTxCallbackList::remove_callbacks_for_remove_memtable(
+  const memtable::ObMemtableSet *memtable_set,
+  const share::SCN)
 {
   int ret = OB_SUCCESS;
   SpinLockGuard guard(latch_);
 
   ObRemoveSyncCallbacksWCondFunctor functor(
     // condition for remove
-    [memtable_for_remove](ObITransCallback *callback) -> bool {
-      if (callback->get_memtable() == memtable_for_remove) {
-        return true;
+    [memtable_set](ObITransCallback *callback) -> bool {
+      int ret = OB_SUCCESS;
+      int bool_ret = true;
+      if (OB_HASH_EXIST == (ret = memtable_set->exist_refactored((uint64_t)callback->get_memtable()))) {
+        bool_ret = true;
+      } else if (OB_HASH_NOT_EXIST == ret) {
+        bool_ret = false;
       } else {
-        return false;
+        // We have no idea to handle the error
+        ob_abort();
       }
+      return bool_ret;
     }, // condition for stop
     [](ObITransCallback *) -> bool {
       return false;
@@ -1165,7 +1240,7 @@ int ObTxCallbackList::remove_callbacks_for_remove_memtable(ObIMemtable *memtable
     callback_mgr_.add_release_memtable_callback_remove_cnt(functor.get_remove_cnt());
     ensure_checksum_(functor.get_checksum_last_scn());
     if (functor.get_remove_cnt() > 0) {
-      TRANS_LOG(INFO, "remove callbacks for remove memtable", KP(memtable_for_remove),
+      TRANS_LOG(INFO, "remove callbacks for remove memtable", KP(memtable_set),
                 K(functor), K(*this));
     }
   }

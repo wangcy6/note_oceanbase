@@ -22,6 +22,8 @@
 #include "share/schema/ob_schema_cache.h"
 #include "share/schema/ob_schema_store.h"
 #include "share/inner_table/ob_inner_table_schema.h"
+#include "share/schema/ob_ddl_trans_controller.h"
+#include "share/schema/ob_ddl_epoch.h"
 
 namespace oceanbase
 {
@@ -40,6 +42,7 @@ namespace schema
 {
 
 static const int64_t MAX_CACHED_VERSION_NUM = 4;
+
 // singleton class
 // concurrency control for schema manager constructing tasks.
 class ObSchemaConstructTask
@@ -139,7 +142,6 @@ public:
   // 1. tenant_schema_version is the schema_version of the corresponding tenant
   // 2. sys_schema_version is the schema_version of the system tenant. For system tenants,
   //  the value will be reset to tenant_schema_version
-  // https://yuque.antfin-inc.com/ob/rootservice/gxom1e
   virtual int get_tenant_schema_guard(const uint64_t tenant_id,
                                       ObSchemaGetterGuard &guard,
                                       int64_t tenant_schema_version = common::OB_INVALID_VERSION,
@@ -193,12 +195,15 @@ public:
       common::ObIArray<uint64_t> &table_ids);
 
   // link table.
-  int fetch_link_table_schema(const ObDbLinkSchema &dblink_schema,
+  int fetch_link_table_schema(const ObDbLinkSchema *dblink_schema,
                               const common::ObString &database_name,
                               const common::ObString &table_name,
                               common::ObIAllocator &allocator,
                               ObTableSchema *&table_schema,
-                              uint32_t sessid);
+                              sql::ObSQLSessionInfo *session_info,
+                              const ObString &dblink_name,
+                              bool is_reverse_link,
+                              uint64_t *current_scn);
 
   // get the latest schema version
   // if core_schema_version = false, return user schema version
@@ -216,11 +221,15 @@ public:
       int64_t &baseline_schema_version);
   int get_new_schema_version(uint64_t tenant_id, int64_t &schema_version);
   int get_tenant_mem_info(const uint64_t &tenant_id, common::ObIArray<ObSchemaMemory> &tenant_mem_infos);
-  int get_tenant_slot_info(common::ObIAllocator &allocator, const uint64_t &tenant_id, 
+  int get_tenant_slot_info(common::ObIAllocator &allocator, const uint64_t &tenant_id,
                            common::ObIArray<ObSchemaSlot> &tenant_slot_infos);
   int get_schema_store_tenants(common::ObIArray<uint64_t> &tenant_ids);
   bool check_schema_store_tenant_exist(const uint64_t &tenant_id);
 
+  int get_tenant_broadcast_consensus_version(const uint64_t tenant_id,
+                                             int64_t &consensus_version);
+  int set_tenant_broadcast_consensus_version(const uint64_t tenant_id,
+                                             const int64_t consensus_version);
   virtual int set_tenant_received_broadcast_version(const uint64_t tenant_id, const int64_t version);
   virtual int set_last_refreshed_schema_info(const ObRefreshSchemaInfo &schema_info);
   int update_baseline_schema_version(const uint64_t tenant_id, const int64_t baseline_schema_version);
@@ -230,6 +239,8 @@ public:
   bool is_sys_full_schema() const;
 
   bool is_tenant_full_schema(const uint64_t tenant_id) const;
+
+  bool is_tenant_not_refreshed(const uint64_t tenant_id);
 
   // sql should retry when tenant is normal but never refresh schema successfully.
   bool is_schema_error_need_retry(
@@ -253,6 +264,12 @@ public:
   int check_if_tenant_has_been_dropped(
       const uint64_t tenant_id,
       bool &is_dropped);
+  int check_if_tenant_schema_has_been_refreshed(
+    const uint64_t tenant_id,
+    bool &is_refreshed);
+  int check_is_creating_standby_tenant(
+    const uint64_t tenant_id,
+    bool &is_creating_standby);
   int check_outline_exist_with_name(const uint64_t tenant_id,
       const uint64_t database_id,
       const common::ObString &outline_name,
@@ -269,7 +286,8 @@ public:
       uint64_t &synonym_id) ;
   int check_udf_exist(const uint64_t tenant_id,
       const common::ObString &name,
-      bool &exist);
+      bool &exist,
+      uint64_t &udf_id);
   int check_sequence_exist(const uint64_t tenant_id,
       const uint64_t database_id,
       const common::ObString &name,
@@ -332,9 +350,12 @@ public:
       const uint64_t tenant_id,
       int64_t &schema_version);
 
+  ObDDLTransController &get_ddl_trans_controller() { return ddl_trans_controller_; }
+  ObDDLEpochMgr &get_ddl_epoch_mgr() { return ddl_epoch_mgr_; }
 //this friend class only for backup
 friend class tools::ObAgentTaskGenerator;
 friend class tools::ObAgentTaskWorker;
+friend class ObDDLEpochMgr;
 
 protected:
   ObMultiVersionSchemaService();
@@ -445,6 +466,8 @@ private:
   int64_t init_version_cnt_;
   int64_t init_version_cnt_for_liboblog_;
   ObSchemaStoreMap schema_store_map_;
+  ObDDLTransController ddl_trans_controller_;
+  ObDDLEpochMgr ddl_epoch_mgr_;
 
   DISALLOW_COPY_AND_ASSIGN(ObMultiVersionSchemaService);
 };

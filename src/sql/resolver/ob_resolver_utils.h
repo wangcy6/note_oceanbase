@@ -132,6 +132,11 @@ public:
   static int check_function_table_column_exist(const TableItem &table_item,
                                                ObResolverParams &params,
                                                const ObString &column_name);
+  static int check_json_table_column_exists(const TableItem &table_item,
+                                           ObResolverParams &params,
+                                           const ObString &column_name,
+                                           bool& exists);
+
   static int resolve_extended_type_info(const ParseNode &str_list_node,
                                         ObIArray<ObString>& type_info_array);
   // type_infos is %ori_cs_type, need convert to %cs_type first
@@ -258,7 +263,8 @@ public:
   static int resolve_sp_name(ObSQLSessionInfo &session_info,
                              const ParseNode &sp_name_node,
                              ObString &db_name,
-                             ObString &sp_name);
+                             ObString &sp_name,
+                             bool need_db_name = true);
   static int resolve_synonym_object_recursively(ObSchemaChecker &schema_checker,
                                                 ObSynonymChecker &synonym_checker,
                                                 uint64_t tenant_id,
@@ -274,23 +280,33 @@ public:
                                          const ParseNode *node,
                                          ObQualifiedName &q_name,
                                          const ObSQLSessionInfo &session_info);
+
+  static int set_parallel_info(sql::ObSQLSessionInfo &session_info,
+                               share::schema::ObSchemaGetterGuard &schema_guard,
+                               ObRawExpr &expr,
+                               bool &contain_select_stmt);
+
   static int resolve_external_symbol(common::ObIAllocator &allocator,
-                                                      sql::ObRawExprFactory &expr_factory,
-                                                      sql::ObSQLSessionInfo &session_info,
-                                                      share::schema::ObSchemaGetterGuard &schema_guard,
-                                                      common::ObMySQLProxy *sql_proxy,
-                                                      ExternalParams *extern_param_info,
-                                                      pl::ObPLBlockNS *ns,
-                                                      ObQualifiedName &q_name,
-                                                      ObIArray<ObQualifiedName> &columns,
-                                                      ObIArray<ObRawExpr*> &real_exprs,
-                                                      ObRawExpr *&expr,
-                                                      bool is_check_mode = false,
-                                                      bool is_sql_scope = false);
+                                     sql::ObRawExprFactory &expr_factory,
+                                     sql::ObSQLSessionInfo &session_info,
+                                     share::schema::ObSchemaGetterGuard &schema_guard,
+                                     common::ObMySQLProxy *sql_proxy,
+                                     ExternalParams *extern_param_info,
+                                     pl::ObPLBlockNS *ns,
+                                     ObQualifiedName &q_name,
+                                     ObIArray<ObQualifiedName> &columns,
+                                     ObIArray<ObRawExpr*> &real_exprs,
+                                     ObRawExpr *&expr,
+                                     bool is_prepare_protocol = false,
+                                     bool is_check_mode = false,
+                                     bool is_sql_scope = false);
   static int resolve_external_param_info(ExternalParams &param_info,
                                          ObRawExprFactory &expr_factory,
                                          int64_t &prepare_param_count,
                                          ObRawExpr *&expr);
+
+  static int revert_external_param_info(ExternalParams &param_info,
+                                        ObRawExpr *expr);
 
    /**
    * @brief  从parser结果中解析出语句type
@@ -328,12 +344,20 @@ public:
                            const ObSQLMode mode,
                            bool is_from_pl = false);
 
+  static int set_string_val_charset(ObIAllocator &allocator,
+                                    ObObjParam &val,
+                                    ObString &charset,
+                                    ObObj &result_val,
+                                    bool is_strict_mode,
+                                    bool return_ret);
+
   static int resolve_data_type(const ParseNode &type_node,
                                const common::ObString &ident_name,
                                common::ObDataType &data_type,
                                const int is_oracle_mode/*1:Oracle, 0:MySql */,
                                const bool is_for_pl_type,
                                const ObSessionNLSParams &nls_session_param,
+                               uint64_t tenant_id,
                                const bool convert_real_type_to_decimal = false);
 
   static int resolve_str_charset_info(const ParseNode &type_node,
@@ -526,15 +550,8 @@ public:
   static bool is_restore_user(ObSQLSessionInfo &session_info);
   static bool is_drc_user(ObSQLSessionInfo &session_info);
   static int set_sync_ddl_id_str(ObSQLSessionInfo *session_info, common::ObString &ddl_id_str);
-  static int resolve_udf_name(ObSchemaChecker &schema_checker,
-                              const ObSQLSessionInfo &session_info,
-                              const ObUDFInfo &udf_info,
-                              common::ObString &db_name,
-                              common::ObString &pkg_name,
-                              common::ObString &udf_name);
-  static int resolve_udf(const ParseNode *node,
-		                     const common::ObNameCaseMode case_mode,
-                         ObUDFInfo& udf_info);
+  static int resolve_udf_name_by_parse_node(
+    const ParseNode *node, const common::ObNameCaseMode case_mode, ObUDFInfo& udf_info);
   // for create table with fk in oracle mode
   static int check_dup_foreign_keys_exist(
              const common::ObSArray<obrpc::ObCreateForeignKeyArg> &fk_args);
@@ -588,6 +605,8 @@ public:
       const share::schema::ObColumnSchemaV2 *column = NULL);
   static int get_columns_name_from_index_table_schema(const share::schema::ObTableSchema &index_table_schema,
                                                       ObIArray<ObString> &index_columns_name);
+  static int transform_sys_func_to_objaccess(
+    common::ObIAllocator *allocator, const ParseNode *sys_func, ParseNode *&obj_access);
   static int transform_func_sys_to_udf(common::ObIAllocator *allocator,
                                        const ParseNode *func_sys,
                                        const common::ObString &db_name,
@@ -700,6 +719,36 @@ public:
                                                      const ObExprResType &column_type,
                                                      const ObString &column_name,
                                                      ObObj &part_value);
+  static ObRawExpr *find_file_column_expr(ObIArray<ObRawExpr *> &pseudo_exprs, int64_t table_id, int64_t column_idx);
+  static int calc_file_column_idx(const ObString &column_name, uint64_t &file_column_idx);
+  static int build_file_column_expr(ObRawExprFactory &expr_factory,
+                                    const ObSQLSessionInfo &session_info,
+                                    const uint64_t table_id,
+                                    const common::ObString &table_name,
+                                    const common::ObString &column_name,
+                                    int64_t column_idx,
+                                    ObRawExpr *&expr,
+                                    ObCharsetType cs_type);
+  static int resolve_external_table_column_def(ObRawExprFactory &expr_factory,
+                                               const ObSQLSessionInfo &session_info,
+                                               const ObQualifiedName &q_name,
+                                               common::ObIArray<ObRawExpr*> &real_exprs,
+                                               ObRawExpr *&expr);
+  static bool is_external_file_column_name(const common::ObString &name);
+
+  static int resolve_file_format_string_value(const ParseNode *node,
+                                              const ObCharsetType &format_charset,
+                                              ObResolverParams &params,
+                                              ObString &result_value);
+  static int get_generated_column_expr_temp(TableItem *table_item,
+                                            ObIArray<ObRawExpr *> &gen_col_depend, ObIArray<ObString> &gen_col_names,
+                                            ObIArray<ObColumnSchemaV2 *> &gen_col_schema,
+                                            ObSqlSchemaGuard *schema_guard,
+                                            common::ObIAllocator &allocator,
+                                            ObRawExprFactory &expr_factory,
+                                            ObSQLSessionInfo &session_info,
+                                            ObDataTypeCastParams &dtc_params);
+  static bool is_expr_can_be_used_in_table_function(const ObRawExpr &expr);
 private:
   static int try_convert_to_unsiged(const ObExprResType restype,
                                     ObRawExpr& src_expr,

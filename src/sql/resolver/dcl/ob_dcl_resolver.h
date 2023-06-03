@@ -28,6 +28,11 @@ public:
   virtual ~ObDCLResolver()
   {
   }
+  static int mask_password_for_passwd_node(ObIAllocator *allocator,
+                                           const common::ObString &src,
+                                           const ParseNode *passwd_node,
+                                           common::ObString &masked_sql,
+                                           bool skip_enclosed_char = false);
 protected:
   int check_and_convert_name(common::ObString &db, common::ObString &table);
   int check_password_strength(common::ObString &password, common::ObString &user_name);
@@ -40,6 +45,13 @@ protected:
                                      int64_t profile_id,
                                      common::ObString &password, 
                                      common::ObString &user_name);
+  int check_dcl_on_inner_user(const ObItemType &type,
+                              const uint64_t &session_user_id,
+                              const ObString &user_name,
+                              const ObString &host_name);
+  int check_dcl_on_inner_user(const ObItemType &type,
+                              const uint64_t &session_user_id,
+                              const uint64_t &user_id);
   static int mask_password_for_single_user(ObIAllocator *allocator,
                                            const common::ObString &src,
                                            const ParseNode *user_node,
@@ -50,10 +62,6 @@ protected:
                                      const ParseNode *users,
                                      int64_t pwd_idx,
                                      common::ObString &masked_sql);
-  static int mask_password_for_passwd_node(ObIAllocator *allocator,
-                                           const common::ObString &src,
-                                           const ParseNode *passwd_node,
-                                           common::ObString &masked_sql);
   enum ObPasswordPolicy {LOW = 0, MEDIUM};
   static const char password_mask_ = '*';
 private:

@@ -94,7 +94,6 @@ int ObMvccEngine::try_compact_row_when_mvcc_read_(const SCN &snapshot_version,
   } else {
     ObRowLatchGuard guard(row.latch_);
     if (OB_FAIL(row.row_compact(memtable_,
-                                true/*for_replay*/,
                                 snapshot_version,
                                 engine_allocator_))) {
       TRANS_LOG(WARN, "row compact error", K(ret), K(snapshot_version));
@@ -105,7 +104,6 @@ int ObMvccEngine::try_compact_row_when_mvcc_read_(const SCN &snapshot_version,
 
 int ObMvccEngine::get(ObMvccAccessCtx &ctx,
                       const ObQueryFlag &query_flag,
-                      const bool skip_compact,
                       const ObMemtableKey *parameter_key,
                       ObMemtableKey *returned_key,
                       ObMvccValueIterator &value_iter)
@@ -137,8 +135,7 @@ int ObMvccEngine::get(ObMvccAccessCtx &ctx,
     if (OB_FAIL(value_iter.init(ctx,
                                 returned_key,
                                 value,
-                                query_flag,
-                                skip_compact))) {
+                                query_flag))) {
       TRANS_LOG(WARN, "ObMvccValueIterator init fail", KR(ret));
     }
   }
@@ -203,6 +200,7 @@ int ObMvccEngine::scan(
 }
 
 int ObMvccEngine::estimate_scan_row_count(
+    const transaction::ObTransID &tx_id,
     const ObMvccScanRange &range,
     ObPartitionEst &part_est) const
 {
@@ -215,6 +213,7 @@ int ObMvccEngine::estimate_scan_row_count(
     TRANS_LOG(WARN, "invalid param");
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(query_engine_->estimate_row_count(
+              tx_id,
               range.start_key_,  !range.border_flag_.inclusive_start(),
               range.end_key_,    !range.border_flag_.inclusive_end(),
               part_est.logical_row_count_, part_est.physical_row_count_))) {
@@ -307,7 +306,12 @@ int ObMvccEngine::create_kv(
 }
 
 int ObMvccEngine::mvcc_write(ObIMemtableCtx &ctx,
+<<<<<<< HEAD
                              const SCN snapshot_version,
+=======
+                             const concurrent_control::ObWriteFlag write_flag,
+                             const transaction::ObTxSnapshot &snapshot,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                              ObMvccRow &value,
                              const ObTxNodeArg &arg,
                              ObMvccWriteResult &res)
@@ -318,7 +322,8 @@ int ObMvccEngine::mvcc_write(ObIMemtableCtx &ctx,
   if (OB_FAIL(build_tx_node_(ctx, arg, node))) {
     TRANS_LOG(WARN, "build tx node failed", K(ret), K(ctx), K(arg));
   } else if (OB_FAIL(value.mvcc_write(ctx,
-                                      snapshot_version,
+                                      write_flag,
+                                      snapshot,
                                       *node,
                                       res))) {
     if (OB_TRY_LOCK_ROW_CONFLICT != ret &&

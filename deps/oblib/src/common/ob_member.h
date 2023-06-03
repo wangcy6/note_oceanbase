@@ -17,6 +17,7 @@
 #include "lib/net/ob_addr.h"
 #include "lib/utility/ob_print_utils.h"
 #include "lib/ob_define.h"
+#include "lib/string/ob_sql_string.h"
 #include "common/ob_region.h"
 #include "lib/json/ob_yson.h"
 
@@ -45,7 +46,7 @@ public:
   int assign(const ObMember &other);
 
   TO_STRING_KV(K_(server), K_(timestamp), K_(flag));
-  TO_YSON_KV(Y_(server), OB_ID(t), timestamp_, Y_(flag));
+  TO_YSON_KV(OB_Y_(server), OB_ID(t), timestamp_, OB_Y_(flag));
   OB_UNIS_VERSION(1);
 protected:
   common::ObAddr server_;
@@ -66,6 +67,19 @@ inline bool operator==(const ObMember &lhs, const ObMember &rhs)
 inline bool operator<(const ObMember &lhs, const ObMember &rhs)
 {
   return lhs.server_ < rhs.server_;
+}
+
+inline int member_to_string(const common::ObMember &member, ObSqlString &member_buf)
+{
+  int ret = OB_SUCCESS;
+  member_buf.reset();
+  char ip_port[MAX_IP_PORT_LENGTH];
+  if (OB_FAIL(member.get_server().ip_port_to_string(ip_port, sizeof(ip_port)))) {
+    COMMON_LOG(WARN, "convert server to string failed", K(ret), K(member));
+  } else if (OB_FAIL(member_buf.append_fmt("%.*s:%ld", static_cast<int>(sizeof(ip_port)), ip_port, member.get_timestamp()))) {
+    COMMON_LOG(WARN, "failed to append ip_port to string", K(ret), K(member));
+  }
+  return ret;
 }
 
 class ObReplicaMember : public ObMember

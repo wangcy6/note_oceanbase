@@ -76,7 +76,7 @@ bool TenantTransID::is_valid() const
   return tenant_id_ != common::OB_INVALID_TENANT_ID && trans_id_ > 0;
 }
 
-PartTransID::PartTransID(const TenantLSID &tls_id, const transaction::ObTransID &trans_id) :
+PartTransID::PartTransID(const logservice::TenantLSID &tls_id, const transaction::ObTransID &trans_id) :
     tls_id_(tls_id), trans_id_(trans_id)
 {}
 
@@ -105,6 +105,12 @@ uint64_t PartTransID::hash() const
   hash_val = murmurhash(&hash_val, sizeof(hash_val), trans_id_);
 
   return hash_val;
+}
+
+int PartTransID::hash(uint64_t &hash_val) const
+{
+  hash_val = hash();
+  return OB_SUCCESS;
 }
 
 } // end namespace libobcdc

@@ -28,40 +28,35 @@ private:
   class MallocWrapper: public common::ObMalloc
   {
   public:
-    explicit MallocWrapper(const char *label): allocator_(label), alloc_cnt_(0) {}
+    explicit MallocWrapper(): allocator_(NULL), alloc_cnt_(0) {}
     virtual ~MallocWrapper()
     {
       if (OB_UNLIKELY(alloc_cnt_ != 0)) {
-        OB_LOG(WARN, "memory expanded in cby execution.", K(alloc_cnt_));
+        OB_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "memory expanded in cby execution.", K(alloc_cnt_));
       }
     }
     void *alloc(const int64_t sz)
     {
-      void *mem = allocator_.alloc(sz);
+      void *mem = allocator_->alloc(sz);
       alloc_cnt_ = nullptr == mem ? alloc_cnt_ : alloc_cnt_ + 1;
       return mem;
     }
     void *alloc(const int64_t sz, const common::ObMemAttr &attr)
     {
-      void *mem = allocator_.alloc(sz, attr);
+      void *mem = allocator_->alloc(sz, attr);
       alloc_cnt_ = nullptr == mem ? alloc_cnt_ : alloc_cnt_ + 1;
       return mem;
     }
     void free(void *ptr)
     {
       --alloc_cnt_;
-      allocator_.free(ptr);
+      allocator_->free(ptr);
     }
-    void set_tenant_id(int64_t tenant_id)
-    {
-      allocator_.set_tenant_id(tenant_id);
-    }
-    void set_ctx_id(int64_t ctx_id)
-    {
-      allocator_.set_ctx_id(ctx_id);
+    void set_allocator(common::ObIAllocator &alloc) {
+      allocator_ = &alloc;
     }
   private:
-    common::ObArenaAllocator allocator_;
+    common::ObIAllocator *allocator_;
     int64_t alloc_cnt_;
   };
 
@@ -75,7 +70,7 @@ public:
       right_prior_exprs_(NULL),
       eval_ctx_(NULL),
 //      connect_by_root_row_(NULL),
-      allocator_(ObModIds::OB_CONNECT_BY_PUMP),
+      allocator_(),
       is_inited_(false),
       cur_level_(1),
       never_meet_cycle_(true),
@@ -134,15 +129,19 @@ private:
     ~ObHashColumn()
     {}
 
-    uint64_t hash() const
+    int hash(uint64_t &hash_val) const
     {
+      int ret = OB_SUCCESS;
       if (hash_val_ == 0) {
-        hash_val_ = inner_hash();
+        if (OB_FAIL(inner_hash(hash_val_))) {
+          LOG_WARN("fail to do hash", K(ret));
+        }
       }
-      return hash_val_;
+      hash_val = hash_val_;
+      return ret;
     }
 
-    uint64_t inner_hash() const;
+    int inner_hash(uint64_t &result) const;
 
     bool operator ==(const ObHashColumn &other) const;
 
@@ -166,7 +165,7 @@ private:
     ObChunkDatumStore::Iterator *iterator_;
     HashTableCell *tuple_;
     bool use_hash_;     // tuple is valid if use_hash_
-    int init(ObConnectByOpPump &connect_by_pump, const ObArray<ObExpr *> &hash_probe_exprs);
+    int init(ObConnectByOpPump &connect_by_pump, const ExprFixedArray &hash_probe_exprs);
     int get_next_row(const ObChunkDatumStore::StoredRow *&row);
     int get_next_row(const ObIArray<ObExpr *> &exprs, ObEvalCtx &eval_ctx);
   };
@@ -290,20 +289,21 @@ public:
   int get_top_pump_node(PumpNode *&node);
   int get_sys_path(uint64_t sys_connect_by_path_id, ObString &parent_path);
   int concat_sys_path(uint64_t sys_connect_by_path_id, const ObString &cur_path);
-  int calc_hash_value(const ObArray<ObExpr *> &hash_exprs, uint64_t &hash_value);
+  int calc_hash_value(const ExprFixedArray &exprs, uint64_t &hash_value);
   int build_hash_table(ObIAllocator &alloc);
 
 private:
 //  int alloc_prior_row_cells(uint64_t row_count);
-  int push_back_node_to_stack(PumpNode &node);
+  int push_back_node_to_stack(PumpNode &node, bool &is_push);
   int calc_prior_and_check_cycle(PumpNode &node, bool set_refactored, PumpNode *left_node);
   int check_cycle(const ObChunkDatumStore::StoredRow *row, bool set_refactored);
   int check_child_cycle(PumpNode &node, PumpNode *left_node);
-  int free_pump_node(PumpNode &node);
+  void free_pump_node(PumpNode &node);
   int alloc_iter(PumpNode &node);
   int free_pump_node_stack(ObIArray<PumpNode> &stack);
   void set_row_store_constructed() { datum_store_constructed_ = true; }
   bool get_row_store_constructed() { return datum_store_constructed_; }
+  void set_allocator(common::ObIAllocator &alloc) { allocator_.set_allocator(alloc); }
 
 private:
   static const int64_t SYS_PATH_BUFFER_INIT_SIZE = 128;

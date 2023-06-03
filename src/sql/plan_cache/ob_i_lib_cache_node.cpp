@@ -40,7 +40,7 @@ int ObILibCacheNode::init(ObILibCacheCtx &ctx, const ObILibCacheObject *cache_ob
 void ObILibCacheNode::free_cache_obj_array()
 {
   if (OB_ISNULL(lib_cache_)) {
-    LOG_WARN("lib cache is invalid");
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "lib cache is invalid");
   } else {
     ObLCObjectManager &mgr = lib_cache_->get_cache_obj_mgr();
     SpinWLockGuard lock_guard(co_list_lock_);
@@ -153,7 +153,7 @@ int ObILibCacheNode::lock(bool is_rdlock)
 int ObILibCacheNode::update_node_stat(ObILibCacheCtx &ctx)
 {
   int ret = OB_SUCCESS;
-  ATOMIC_STORE(&(node_stat_.last_active_timestamp_), ObTimeUtility::current_time());
+  ATOMIC_STORE(&(node_stat_.last_active_timestamp_), ObClockGenerator::getClock());
   ATOMIC_INC(&(node_stat_.execute_count_));
   return ret;
 }

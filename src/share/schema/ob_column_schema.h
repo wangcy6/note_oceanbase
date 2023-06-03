@@ -70,6 +70,8 @@ public:
   inline void set_schema_version(const int64_t schema_version) { schema_version_ = schema_version; }
   inline void set_rowkey_position(const int64_t rowkey_position) { rowkey_position_ = rowkey_position; }
   inline void set_order_in_rowkey(const common::ObOrderType order_in_rowkey) { order_in_rowkey_ = order_in_rowkey; }
+  inline void set_udt_set_id(const uint64_t id) { udt_set_id_ = id; }
+  inline void set_sub_data_type(const uint64_t sub_type) { sub_type_ = sub_type; }
 
   int set_part_key_pos(const int64_t part_key_pos);
   inline int64_t get_part_key_pos() const
@@ -98,10 +100,11 @@ public:
   //is table PARTITION_LEVEL_TWO partition key column
   inline bool is_subpart_key_column() const { return part_pos_.subpart_key_pos_ > 0; }
   bool is_prefix_column() const;
-  bool is_func_idx_column(const bool is_oracle_mode) const;
+  bool is_func_idx_column() const;
   inline void set_data_type(const common::ColumnType type) { meta_type_.set_type(type); }
   inline void set_meta_type(const common::ObObjMeta type) { meta_type_ = type; }
   inline void set_accuracy(const common::ObAccuracy &accuracy) { accuracy_ = accuracy; }
+  inline void set_data_length(const int64_t length) { set_data_length(static_cast<int32_t>(length)); } //TODO(xiaofeng.lby): fix it later
   inline void set_data_length(const int32_t length) { accuracy_.set_length(length); }
   inline void set_data_precision(const int16_t precision) { accuracy_.set_precision(precision); }
   inline void set_length_semantics(const int16_t value) { accuracy_.set_length_semantics(value); }
@@ -143,12 +146,18 @@ public:
   bool has_cascaded_column_id(uint64_t column_id) const;
   int get_cascaded_column_ids(common::ObIArray<uint64_t> &column_ids) const;
   const ColumnReferenceSet *get_column_ref_set() const { return column_ref_idxs_; }
-
+  inline void set_srs_id(const uint64_t srs_id) { srs_id_ = srs_id; } // srs_id_ = struct{geotype + reserved + srid}
+  inline void set_geo_col_id(const uint64_t col_id) { geo_col_id_ = col_id; }
+  inline void set_srid(const uint32_t srid) { srs_info_.srid_ = srid; }
+  inline void set_geo_type(const common::ObGeoType geo_type) { srs_info_.geo_type_ = static_cast<uint8_t>(geo_type); }
+  int set_geo_type(const int32_t type_val);
   //get methods
   inline uint64_t get_tenant_id() const { return tenant_id_; }
   inline uint64_t get_table_id() const { return table_id_; }
   inline uint64_t get_column_id() const { return column_id_; }
   inline uint64_t& get_column_id() { return column_id_; }
+  inline uint64_t get_udt_set_id() const { return udt_set_id_; }
+  inline uint64_t get_sub_data_type() const { return sub_type_; }
   inline int64_t get_schema_version() const { return schema_version_; }
   inline int64_t get_rowkey_position() const { return rowkey_position_; }
   inline int64_t get_index_position() const { return index_position_; }
@@ -163,20 +172,32 @@ public:
   inline int16_t get_data_precision() const { return accuracy_.get_precision(); }
   inline int16_t get_data_scale() const { return accuracy_.get_scale(); }
   inline int16_t get_length_semantics() const { return accuracy_.get_length_semantics();}
+  inline uint64_t get_srs_id() const { return srs_id_; } // srs_id_ = struct{geotype + reserved + srid}
+  inline uint64_t get_geo_col_id() const { return geo_col_id_; }
+  inline uint32_t get_srid() const { return srs_info_.srid_; }
+  inline common::ObGeoType get_geo_type() const { return static_cast<common::ObGeoType>(srs_info_.geo_type_); }
   // Be careful with this interface, is_nullable_ is set only in Mysql mode and
   // for primary key and identity column in Oracle mode.
 	// is_nullable() is usually used in Mysql mode, also used when schema interacts with inner table.
   // Following function is_not_null_for_read and is_not_null_for_write is more practical.
-	// More info: https://yuque.antfin-inc.com/ob/ooiw0v/dgfec2 Chapter 3.4
+	// More info:
   inline bool is_nullable() const { return is_nullable_; }
   inline bool is_zero_fill() const { return is_zero_fill_; }
   inline bool is_autoincrement() const { return is_autoincrement_; }
   inline bool is_hidden() const { return is_hidden_; }
   inline bool is_string_type() const { return meta_type_.is_string_type(); }
   inline bool is_json() const { return meta_type_.is_json(); }
+  inline bool is_geometry() const { return meta_type_.is_geometry(); }
   inline bool is_raw() const { return meta_type_.is_raw(); }
-  inline common::ObCharsetType get_charset_type() const { return charset_type_;}
-  inline common::ObCollationType get_collation_type() const { return meta_type_.get_collation_type();}
+
+  inline bool is_xmltype() const {
+    return ((meta_type_.is_ext() || meta_type_.is_user_defined_sql_type()) && sub_type_ == T_OBJ_XML)
+           || meta_type_.is_xml_sql_type();
+  }
+  inline bool is_extend() const { return meta_type_.is_ext(); }
+  inline bool is_udt_hidden_column() const { return get_udt_set_id() > 0 && is_hidden(); }
+  inline common::ObCharsetType get_charset_type() const { return charset_type_; }
+  inline common::ObCollationType get_collation_type() const { return meta_type_.get_collation_type(); }
   inline const common::ObObj &get_orig_default_value()  const { return orig_default_value_; }
   inline const common::ObObj &get_cur_default_value()  const { return cur_default_value_; }
   inline common::ObObj &get_cur_default_value() { return cur_default_value_; }
@@ -191,7 +212,7 @@ public:
   inline uint64_t get_sequence_id() const { return sequence_id_; }
   inline int64_t get_encoding_type() const { return encoding_type_; }
 
-  inline int64_t get_cte_generate_column_projector_offset() const { return get_column_id();}
+  inline int64_t get_cte_generate_column_projector_offset() const { return get_column_id() - common::OB_APP_MIN_COLUMN_ID;}
   // true: primary key/hidden primary key(pk_increment/cluster_id/parition_id)/partitioned key of no-pk tables
   inline bool is_rowkey_column() const { return rowkey_position_ > 0; }
   // true: primary key/hidden primary key(pk_increment/cluster_id/parition_id)
@@ -201,6 +222,7 @@ public:
     return rowkey_position_ > 0 && !is_heap_alter_rowkey_column();
   }
   inline bool is_index_column() const { return index_position_ > 0; }
+  inline bool is_spatial_index_column() const { return has_generated_column_deps() && is_geometry(); }
   // true:
   //  - columns which are stored in SSTable
   //  - generated columns which are using for partitioned key of no-pk tables
@@ -214,11 +236,12 @@ public:
   inline bool is_default_on_null_identity_column() const { return column_flags_ & DEFAULT_ON_NULL_IDENTITY_COLUMN_FLAG; }
   inline bool is_cte_generated_column() const { return column_flags_ & CTE_GENERATED_COLUMN_FLAG; }
   inline bool is_default_expr_v2_column() const { return column_flags_ & DEFAULT_EXPR_V2_COLUMN_FLAG; }
-  inline bool is_generated_column() const { return is_virtual_generated_column() || is_stored_generated_column(); }
+  inline bool is_generated_column() const { return (is_virtual_generated_column() || is_stored_generated_column()); }
   inline bool is_identity_column() const { return is_always_identity_column() || is_default_identity_column() || is_default_on_null_identity_column(); }
   inline bool is_generated_column_using_udf() const { return /*is_generated_column() && global index table clean the virtual gen col flag*/ !!(column_flags_ & GENERATED_COLUMN_UDF_EXPR); }
   // to check whether storing column in index table is specified by user.
   inline bool is_user_specified_storing_column() const { return column_flags_ & USER_SPECIFIED_STORING_COLUMN_FLAG; }
+  inline bool is_default_srid() const { return UINT32_MAX == srs_info_.srid_; }
   inline void set_column_flags(int64_t flags) { column_flags_ = flags; }
   inline void erase_generated_column_flags()
   {
@@ -233,6 +256,8 @@ public:
     del_column_flag(DEFAULT_ON_NULL_IDENTITY_COLUMN_FLAG);
   }
   inline bool is_fulltext_column() const { return column_flags_ & GENERATED_CTXCAT_CASCADE_FLAG; }
+  inline bool is_spatial_generated_column() const { return column_flags_ & SPATIAL_INDEX_GENERATED_COLUMN_FLAG; }
+  inline bool is_spatial_cellid_column() const { return is_spatial_generated_column() && get_data_type() == common::ObUInt64Type; }
   inline bool has_generated_column_deps() const { return column_flags_ & GENERATED_DEPS_CASCADE_FLAG; }
   inline bool is_primary_vp_column() const { return column_flags_ & PRIMARY_VP_COLUMN_FLAG; }
   inline bool is_aux_vp_column() const { return column_flags_ & AUX_VP_COLUMN_FLAG; }
@@ -332,6 +357,17 @@ private:
   uint64_t next_column_id_;
   int64_t encoding_type_; // for test, no need serialization
   uint64_t sequence_id_; // for identity column, used for find a sequence schema; store in orig_default_value_
+  union {
+    struct {
+      uint32_t geo_type_ : 5;
+      uint32_t reserved_: 27;
+      uint32_t srid_ : 32;
+    } srs_info_;
+    uint64_t geo_col_id_;
+    uint64_t srs_id_;
+  };
+  uint64_t udt_set_id_;
+  uint64_t sub_type_;
 };
 
 inline int32_t ObColumnSchemaV2::get_data_length() const

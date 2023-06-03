@@ -27,6 +27,7 @@
 #include "sql/dtl/ob_op_metric.h"
 #include "observer/ob_server_struct.h"
 #include "lib/compress/ob_compress_util.h"
+#include "share/detect/ob_detectable_id.h"
 
 namespace oceanbase {
 
@@ -108,7 +109,8 @@ public:
   virtual int send(const ObDtlMsg &msg, int64_t timeout_ts,
       ObEvalCtx *eval_ctx = nullptr, bool is_eof = false) = 0;
   virtual int feedup(ObDtlLinkedBuffer *&buffer) = 0;
-  virtual int attach(ObDtlLinkedBuffer *&linked_buffer, bool is_firt_buffer_cached = false) = 0;
+  virtual int attach(ObDtlLinkedBuffer *&linked_buffer, bool is_firt_buffer_cached = false,
+                     bool inc_recv_buf_cnt = true) = 0;
   virtual int flush(bool wait=true, bool wait_response = true) = 0;
 
   virtual bool is_empty() const = 0;
@@ -226,6 +228,9 @@ public:
   void set_interm_result(bool flag) { use_interm_result_ = flag; }
   bool use_interm_result() { return use_interm_result_; }
 
+  void set_enable_channel_sync(bool enable_channel_sync) { enable_channel_sync_ = enable_channel_sync; }
+  uint64_t enable_channel_sync() const { return enable_channel_sync_; }
+
   OB_INLINE void set_loop_index(int64_t loop_idx) { loop_idx_ = loop_idx; }
   OB_INLINE int64_t get_loop_index() { return loop_idx_; }
 
@@ -247,6 +252,10 @@ public:
 
   bool ignore_error() { return ignore_error_; }
   void set_ignore_error(bool flag) { ignore_error_ = flag; }
+
+  void set_register_dm_info(common::ObRegisterDmInfo &register_dm_info) { register_dm_info_ = register_dm_info; }
+  const common::ObRegisterDmInfo &get_register_dm_info() { return register_dm_info_; }
+
   virtual int push_buffer_batch_info() = 0;
 protected:
   common::ObThreadCond cond_;
@@ -274,6 +283,9 @@ protected:
   int64_t batch_id_;
   bool is_px_channel_;
   bool ignore_error_;
+  // for single dfo dispatch scene, the process of using intermediate results is at the rpc processor end
+  // the add the ObRegisterDmInfo in dtl channel and send to processor for register check item into dm
+  common::ObRegisterDmInfo register_dm_info_;
 
   int64_t loop_idx_;
 
@@ -281,6 +293,8 @@ protected:
 
   DTLChannelOwner owner_mod_;
   int64_t thread_id_;
+  // choose new dtl channel sync or first buffer cache
+  bool enable_channel_sync_;
 
 public:
   // ObDtlChannel is link base, so it add extra link

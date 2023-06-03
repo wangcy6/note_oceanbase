@@ -67,7 +67,11 @@ struct ObSessionParam final
 {
 public:
   ObSessionParam()
+<<<<<<< HEAD
     : sql_mode_(nullptr), tz_info_wrap_(nullptr), ddl_info_(), is_load_data_exec_(false), use_external_session_(false), nls_formats_{}
+=======
+    : sql_mode_(nullptr), tz_info_wrap_(nullptr), ddl_info_(), is_load_data_exec_(false), use_external_session_(false), consumer_group_id_(0), nls_formats_{}
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   {}
   ~ObSessionParam() = default;
 public:
@@ -76,6 +80,10 @@ public:
   ObSessionDDLInfo ddl_info_;
   bool is_load_data_exec_;
   bool use_external_session_; // need init remote inner sql conn with sess getting from sess mgr
+<<<<<<< HEAD
+=======
+  int64_t consumer_group_id_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   common::ObString nls_formats_[common::ObNLSFormatEnum::NLS_MAX];
 };
 
@@ -171,19 +179,25 @@ public:
                          const common::ObString &conn_str,
                          const common::ObString &cluster_str,
                          const sqlclient::dblink_param_ctx &param_ctx);
-  int acquire_dblink(uint64_t dblink_id, sqlclient::DblinkDriverProto dblink_type, sqlclient::ObISQLConnection *&dblink_conn, uint32_t sessid = 0, int64_t timeout_sec = 0);
+  int acquire_dblink(uint64_t dblink_id,
+                     sqlclient::DblinkDriverProto dblink_type,
+                     const sqlclient::dblink_param_ctx &param_ctx,
+                     sqlclient::ObISQLConnection *&dblink_conn,
+                     uint32_t sessid = 0,
+                     int64_t sql_request_level = 0,
+                     const char *set_sql_mode_cstr = NULL);
   int release_dblink(/*uint64_t dblink_id,*/sqlclient::DblinkDriverProto dblink_type, sqlclient::ObISQLConnection *dblink_conn, uint32_t sessid = 0);
-  int dblink_read(const uint64_t dblink_id, sqlclient::DblinkDriverProto dblink_type, ReadResult &result,
-                  const char *sql, int &dblink_errno,
-                  const char *&dblink_errmsg, uint32_t sessid = 0);
   int dblink_read(sqlclient::ObISQLConnection *dblink_conn, ReadResult &result, const char *sql);
+  int dblink_write(sqlclient::ObISQLConnection *dblink_conn, int64_t &affected_rows, const char *sql);
   int rollback(sqlclient::ObISQLConnection *dblink_conn);
   int switch_dblink_conn_pool(sqlclient::DblinkDriverProto type, sqlclient::ObISQLConnectionPool *&dblink_conn_pool);
   int set_dblink_pool_charset(uint64_t dblink_id);
   inline sqlclient::ObDbLinkConnectionPool *get_dblink_conn_pool() { return link_pool_; }
+  static int execute_init_sql(sqlclient::ObISQLConnection *dblink_conn, int link_type,
+                              const char *set_sql_mode_cstr = NULL);
 private:
-  int prepare_enviroment(sqlclient::ObISQLConnection *dblink_conn, int link_type);
-  int execute_init_sql(sqlclient::ObISQLConnection *dblink_conn, int link_type);
+  int prepare_enviroment(sqlclient::ObISQLConnection *dblink_conn, int link_type,
+                         const char *set_sql_mode_cstr = NULL);
   sqlclient::ObDbLinkConnectionPool *link_pool_;
 };
 

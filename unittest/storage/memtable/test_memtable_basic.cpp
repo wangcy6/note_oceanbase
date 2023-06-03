@@ -29,6 +29,14 @@
 #include "storage/tx/ob_trans_define_v4.h"
 #include "storage/memtable/mvcc/ob_mvcc_row.h"
 #include "share/scn.h"
+<<<<<<< HEAD
+=======
+#include "storage/ls/ob_ls.h"
+#include "storage/tx_storage/ob_ls_map.h"
+#include "share/schema/ob_column_schema.h"
+#include "storage/ob_storage_schema.h"
+#include "storage/tablet/ob_tablet_multi_source_data.h"
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 namespace oceanbase
 {
@@ -93,12 +101,28 @@ int ObMvccRow::check_double_insert_(const share::SCN ,
 {
   return OB_SUCCESS;
 }
+}
+
+namespace concurrent_control
+{
+int check_sequence_set_violation(const concurrent_control::ObWriteFlag ,
+                                 const int64_t ,
+                                 const ObTransID ,
+                                 const blocksstable::ObDmlFlag ,
+                                 const int64_t ,
+                                 const ObTransID ,
+                                 const blocksstable::ObDmlFlag ,
+                                 const int64_t )
+{
+  return OB_SUCCESS;
+}
+
 } // end memtable
 
 class TestMemtable : public testing::Test
 {
 public:
-  TestMemtable() : tenant_base_(1001),tablet_id_(1000),rowkey_cnt_(1) {}
+  TestMemtable() : tenant_base_(1),tablet_id_(1000),rowkey_cnt_(1) { freezer_.init(&ls_); }
   void SetUp() override {
     share::ObTenantEnv::set_tenant(&tenant_base_);
     // mock columns
@@ -120,8 +144,10 @@ public:
     table_key.scn_range_.end_scn_ = share::SCN::max_scn();
     int64_t schema_version  = 1;
     uint32_t freeze_clock = 0;
+    ObLSHandle ls_handle;
+    ls_handle.set_ls(ls_map_, ls_, ObLSGetMod::DATA_MEMTABLE_MOD);
 
-    return mt_table.init(table_key, nullptr, &freezer_, &memtable_mgr_, schema_version, freeze_clock);
+    return mt_table.init(table_key, ls_handle, &freezer_, &memtable_mgr_, schema_version, freeze_clock);
   }
   int mock_col_desc()
   {
@@ -171,12 +197,64 @@ public:
     return OB_SUCCESS;
   }
 
+  void prepare_schema(share::schema::ObTableSchema &table_schema)
+  {
+    int ret = OB_SUCCESS;
+    int64_t micro_block_size = 16 * 1024;
+    const uint64_t tenant_id = 1;
+    const uint64_t table_id = 777;
+    share::schema::ObColumnSchemaV2 column;
+
+    //generate data table schema
+    table_schema.reset();
+    ret = table_schema.set_table_name("test_merge_multi_version");
+    ASSERT_EQ(OB_SUCCESS, ret);
+    table_schema.set_tenant_id(tenant_id);
+    table_schema.set_tablegroup_id(1);
+    table_schema.set_database_id(1);
+    table_schema.set_table_id(table_id);
+    table_schema.set_rowkey_column_num(3);
+    table_schema.set_max_used_column_id(6);
+    table_schema.set_block_size(micro_block_size);
+    table_schema.set_compress_func_name("none");
+    table_schema.set_row_store_type(FLAT_ROW_STORE);
+    //init column
+    char name[OB_MAX_FILE_NAME_LENGTH];
+    memset(name, 0, sizeof(name));
+    const int64_t column_ids[] = {16,17,20,21,22,23,24,29};
+    for(int64_t i = 0; i < 6; ++i){
+      ObObjType obj_type = ObIntType;
+      const int64_t column_id = column_ids[i];
+
+      if (i == 1) {
+        obj_type = ObVarcharType;
+      }
+      column.reset();
+      column.set_table_id(table_id);
+      column.set_column_id(column_id);
+      sprintf(name, "test%020ld", i);
+      ASSERT_EQ(OB_SUCCESS, column.set_column_name(name));
+      column.set_data_type(obj_type);
+      column.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+      column.set_data_length(10);
+      if (i < 3) {
+        column.set_rowkey_position(i + 1);
+      } else {
+        column.set_rowkey_position(0);
+      }
+      COMMON_LOG(INFO, "add column", K(i), K(column));
+      ASSERT_EQ(OB_SUCCESS, table_schema.add_column(column));
+    }
+    COMMON_LOG(INFO, "dump stable schema", K(table_schema));
+  }
+
   void reset_iter_param()
   {
     iter_param_.reset();
     read_info_.reset();
   }
 public:
+  ObLS ls_;
   share::ObTenantBase tenant_base_;
   storage::ObFreezer freezer_;
   storage::ObTabletMemtableMgr memtable_mgr_;
@@ -188,6 +266,7 @@ public:
   ObTableReadInfo read_info_;
   ObArenaAllocator allocator_;
   MemtableIDMap ctx_map_;
+  ObLSMap ls_map_;
 };
 
 class RunCtxGuard
@@ -204,6 +283,7 @@ public:
     ObStoreCtx store_ctx;
     ObTxSnapshot snapshot;
     ObTxTableGuard tx_table_guard;
+    concurrent_control::ObWriteFlag write_flag;
     tx_table_guard.init((ObTxTable*)0x100);
     snapshot.version_.convert_for_gts(snapshot_version);
     store_ctx.mvcc_acc_ctx_.init_write(trans_ctx_,
@@ -214,7 +294,8 @@ public:
                                        tx_table_guard,
                                        snapshot,
                                        INT64_MAX,
-                                       INT64_MAX);
+                                       INT64_MAX,
+                                       write_flag);
     ObTableStoreIterator table_iter;
     store_ctx.table_iter_ = &table_iter;
     ObStoreRow write_row;
@@ -423,6 +504,53 @@ TEST_F(TestMemtable, multi_key)
   EXPECT_EQ(OB_SUCCESS, rg2.mem_ctx_.do_trans_end(true, val_900, val_900, 0));
   print(mvcc_row);
   print(mvcc_row2);
+}
+
+TEST_F(TestMemtable, test_unsync_cnt_for_multi_data)
+{
+  ObMemtable memtable;
+  EXPECT_EQ(OB_SUCCESS, init_memtable(memtable));
+  share::schema::ObTableSchema table_schema;
+  ObStorageSchema storage_schema;
+  bool is_callback = true;
+  bool for_replay = true;
+  share::SCN scn;
+
+  ASSERT_EQ(OB_SUCCESS, scn.convert_from_ts(100));
+  prepare_schema(table_schema);
+  ASSERT_EQ(OB_SUCCESS, storage_schema.init(allocator_, table_schema, lib::Worker::CompatMode::MYSQL));
+
+  storage_schema.set_sync_finish(false);
+  ASSERT_EQ(OB_SUCCESS, memtable.save_multi_source_data_unit(&storage_schema, scn, !for_replay, memtable::MemtableRefOp::INC_REF, !is_callback));
+  ASSERT_EQ(1, storage_schema.get_unsync_cnt_for_multi_data());
+
+  storage_schema.set_sync_finish(true);
+  ASSERT_EQ(OB_SUCCESS, memtable.save_multi_source_data_unit(&storage_schema, scn, !for_replay, memtable::MemtableRefOp::DEC_REF, is_callback));
+  ASSERT_EQ(0, storage_schema.get_unsync_cnt_for_multi_data());
+}
+
+TEST_F(TestMemtable, test_mds_commit_to_empty_memtable)
+{
+  ObMemtable memtable;
+  EXPECT_EQ(OB_SUCCESS, init_memtable(memtable));
+  ObTabletTxMultiSourceDataUnit tablet_status;
+  tablet_status.tablet_status_ = ObTabletStatus::NORMAL;
+  bool is_callback = true;
+  bool for_replay = true;
+  share::SCN scn;
+  scn.set_max();
+
+  ASSERT_EQ(OB_SUCCESS, memtable.save_multi_source_data_unit(&tablet_status, scn, !for_replay, memtable::MemtableRefOp::INC_REF, !is_callback));
+  ASSERT_EQ(1, tablet_status.get_unsync_cnt_for_multi_data());
+
+  memtable.key_.scn_range_.start_scn_.convert_for_gts(100);
+  memtable.key_.scn_range_.end_scn_.set_max();
+  memtable.max_end_scn_.set_min();
+  ASSERT_EQ(OB_SUCCESS, scn.convert_for_gts(102));
+  ASSERT_EQ(OB_SUCCESS, memtable.save_multi_source_data_unit(&tablet_status, scn, for_replay, memtable::MemtableRefOp::DEC_REF, is_callback));
+  ASSERT_EQ(0, tablet_status.get_unsync_cnt_for_multi_data());
+  ASSERT_EQ(OB_SUCCESS, scn.convert_for_gts(101));
+  ASSERT_EQ(scn, memtable.get_end_scn());
 }
 
 

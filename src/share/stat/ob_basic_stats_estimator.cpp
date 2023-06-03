@@ -16,13 +16,14 @@
 #include "share/stat/ob_opt_column_stat.h"
 #include "share/stat/ob_dbms_stats_utils.h"
 #include "sql/optimizer/ob_storage_estimator.h"
+#include "pl/sys_package/ob_dbms_stats.h"
 namespace oceanbase
 {
 namespace common
 {
 
-ObBasicStatsEstimator::ObBasicStatsEstimator(ObExecContext &ctx)
-  : ObStatsEstimator(ctx)
+ObBasicStatsEstimator::ObBasicStatsEstimator(ObExecContext &ctx, ObIAllocator &allocator)
+  : ObStatsEstimator(ctx, allocator)
 {}
 
 template<class T>
@@ -32,7 +33,7 @@ int ObBasicStatsEstimator::add_stat_item(const T &item)
   ObStatItem *cpy = NULL;
   if (!item.is_needed()) {
     // do nothing
-  } else if (OB_ISNULL(cpy = copy_stat_item(ctx_.get_allocator(), item))) {
+  } else if (OB_ISNULL(cpy = copy_stat_item(allocator_, item))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to copy stat item", K(ret));
   } else if (OB_FAIL(stat_items_.push_back(cpy))) {
@@ -47,47 +48,48 @@ int ObBasicStatsEstimator::estimate(const ObTableStatParam &param,
 {
   int ret = OB_SUCCESS;
   const ObIArray<ObColumnStatParam> &column_params = param.column_params_;
-  ObString no_rewrite("NO_REWRITE");
   ObString calc_part_id_str;
   ObOptTableStat tab_stat;
   ObOptStat src_opt_stat;
   src_opt_stat.table_stat_ = &tab_stat;
   ObOptTableStat *src_tab_stat = src_opt_stat.table_stat_;
   ObIArray<ObOptColumnStat*> &src_col_stats = src_opt_stat.column_stats_;
-  ObArenaAllocator allocator(ObModIds::OB_SQL_PARSER);
+  ObArenaAllocator allocator("ObBasicStats");
   ObSqlString raw_sql;
   int64_t duration_time = -1;
   // Note that there are dependences between different kinds of statistics
   //            1. RowCount should be added at the first
   //            2. NumDistinct should be estimated before TopKHist
   //            3. AvgRowLen should be added at the last
-  if (OB_UNLIKELY(dst_opt_stats.empty())) {
+  if (OB_UNLIKELY(dst_opt_stats.empty()) || OB_ISNULL(param.allocator_)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected empty", K(ret), K(dst_opt_stats.empty()));
+    LOG_WARN("get unexpected empty", K(ret), K(dst_opt_stats.empty()), K(param.allocator_));
   } else if (OB_FAIL(ObDbmsStatsUtils::init_col_stats(allocator,
                                                       column_params.count(),
                                                       src_col_stats))) {
     LOG_WARN("failed init col stats", K(ret));
-  } else if (OB_FAIL(add_hint(no_rewrite, ctx_.get_allocator()))) {
-    LOG_WARN("failed to add no_rewrite", K(ret));
+  } else if (OB_FAIL(fill_hints(allocator, param.tab_name_))) {
+    LOG_WARN("failed to fill hints", K(ret));
   } else if (OB_FAIL(add_from_table(param.db_name_, param.tab_name_))) {
     LOG_WARN("failed to add from table", K(ret));
-  } else if (OB_FAIL(fill_parallel_info(ctx_.get_allocator(), param.degree_))) {
+  } else if (OB_FAIL(fill_parallel_info(allocator, param.degree_))) {
     LOG_WARN("failed to add query sql parallel info", K(ret));
   } else if (OB_FAIL(ObDbmsStatsUtils::get_valid_duration_time(extra.start_time_,
                                                                param.duration_time_,
                                                                duration_time))) {
     LOG_WARN("failed to get valid duration time", K(ret));
-  } else if (OB_FAIL(fill_query_timeout_info(ctx_.get_allocator(), duration_time))) {
+  } else if (OB_FAIL(fill_query_timeout_info(*param.allocator_, duration_time))) {
     LOG_WARN("failed to fill query timeout info", K(ret));
+  } else if (OB_FAIL(fill_sample_info(allocator, param.sample_info_))) {
+    LOG_WARN("failed to fill sample info", K(ret));
   } else if (dst_opt_stats.count() > 1 &&
-             OB_FAIL(fill_group_by_info(ctx_.get_allocator(), param, extra, calc_part_id_str))) {
-    LOG_WARN("failed to add query sql partition info", K(ret));
+             OB_FAIL(fill_group_by_info(allocator, param, extra, calc_part_id_str))) {
+    LOG_WARN("failed to add group by info", K(ret));
   } else if (OB_FAIL(add_stat_item(ObStatRowCount(&param, src_tab_stat)))) {
     LOG_WARN("failed to add row count", K(ret));
   } else if (calc_part_id_str.empty()) {
-    if (OB_FAIL(fill_partition_info(ctx_.get_allocator(), param, extra))) {
-      LOG_WARN("failed to add query sql parallel info", K(ret));
+    if (!is_virtual_table(param.table_id_) && OB_FAIL(fill_partition_info(allocator, param, extra))) {
+      LOG_WARN("failed to add partition info", K(ret));
     } else if (OB_UNLIKELY(dst_opt_stats.count() != 1) ||
                OB_ISNULL(dst_opt_stats.at(0).table_stat_)) {
       ret = OB_ERR_UNEXPECTED;
@@ -106,7 +108,8 @@ int ObBasicStatsEstimator::estimate(const ObTableStatParam &param,
         OB_FAIL(add_stat_item(ObStatNumDistinct(col_param, src_col_stats.at(i), param.need_approx_ndv_))) ||
         OB_FAIL(add_stat_item(ObStatAvgLen(col_param, src_col_stats.at(i)))) ||
         OB_FAIL(add_stat_item(ObStatLlcBitmap(col_param, src_col_stats.at(i)))) ||
-        OB_FAIL(add_stat_item(ObStatTopKHist(col_param, src_tab_stat, src_col_stats.at(i))))) {
+        (extra.need_histogram_ &&
+         OB_FAIL(add_stat_item(ObStatTopKHist(col_param, src_tab_stat, src_col_stats.at(i)))))) {
       LOG_WARN("failed to add statistic item", K(ret));
     } else {/*do nothing*/}
   }
@@ -118,6 +121,8 @@ int ObBasicStatsEstimator::estimate(const ObTableStatParam &param,
     } else if (OB_FAIL(do_estimate(param.tenant_id_, raw_sql.string(), COPY_ALL_STAT,
                                    src_opt_stat, dst_opt_stats))) {
       LOG_WARN("failed to evaluate basic stats", K(ret));
+    } else if (OB_FAIL(refine_basic_stats(param, extra, dst_opt_stats))) {
+      LOG_WARN("failed to refine basic stats", K(ret));
     } else {
       LOG_TRACE("basic stats is collected", K(dst_opt_stats.count()));
     }
@@ -136,17 +141,19 @@ int ObBasicStatsEstimator::estimate_block_count(ObExecContext &ctx,
   ObSEArray<ObObjectID, 4> partition_ids;
   ObSEArray<EstimateBlockRes, 4> estimate_result;
   hash::ObHashMap<int64_t, int64_t> first_part_idx_map;
-  if (OB_FAIL(get_all_tablet_id_and_object_id(param,
-                                              tablet_ids,
-                                              partition_ids))) {
+  uint64_t table_id = share::is_oracle_mapping_real_virtual_table(param.table_id_) ?
+                              share::get_real_table_mappings_tid(param.table_id_) : param.table_id_;
+  if (is_virtual_table(table_id)) {//virtual table no need estimate block count
+    //do nothing
+  } else if (OB_FAIL(get_all_tablet_id_and_object_id(param, tablet_ids, partition_ids))) {
     LOG_WARN("failed to get all tablet id and object id", K(ret));
-   } else if (param.part_level_ == share::schema::PARTITION_LEVEL_TWO &&
-              OB_FAIL(first_part_tab_stats.prepare_allocate(param.all_part_infos_.count()))) {
+  } else if (param.part_level_ == share::schema::PARTITION_LEVEL_TWO &&
+             OB_FAIL(first_part_tab_stats.prepare_allocate(param.all_part_infos_.count()))) {
     LOG_WARN("failed to prepare allocate", K(ret));
   } else if (param.part_level_ == share::schema::PARTITION_LEVEL_TWO &&
              OB_FAIL(generate_first_part_idx_map(param.all_part_infos_, first_part_idx_map))) {
     LOG_WARN("failed to generate first part idx map", K(ret));
-  } else if (OB_FAIL(do_estimate_block_count(ctx, param.tenant_id_, param.table_id_, tablet_ids,
+  } else if (OB_FAIL(do_estimate_block_count(ctx, param.tenant_id_, table_id, tablet_ids,
                                              partition_ids, estimate_result))) {
     LOG_WARN("failed to do estimate block count", K(ret));
   } else {
@@ -337,7 +344,7 @@ int ObBasicStatsEstimator::get_tablet_locations(ObExecContext &ctx,
                                                 ObCandiTabletLocIArray &candi_tablet_locs)
 {
   int ret = OB_SUCCESS;
-  ObDASCtx &das_ctx = ctx.get_das_ctx();
+  ObDASLocationRouter &loc_router = ctx.get_das_ctx().get_location_router();
   ObSQLSessionInfo *session = ctx.get_my_session();
   if (OB_ISNULL(session) || OB_UNLIKELY(tablet_ids.count() != partition_ids.count())) {
     ret = OB_ERR_UNEXPECTED;
@@ -348,28 +355,19 @@ int ObBasicStatsEstimator::get_tablet_locations(ObExecContext &ctx,
       LOG_WARN("Partitoin location list prepare error", K(ret));
     } else {
       ObArenaAllocator allocator(ObModIds::OB_SQL_PARSER);
+      //This interface does not require the first_level_part_ids, so construct an empty array.
+      ObSEArray<ObObjectID, 8> first_level_part_ids;
       ObDASTableLocMeta loc_meta(allocator);
-      ObDASLocationRouter &loc_router = das_ctx.get_location_router();
-      share::ObLSLocation location;
       loc_meta.ref_table_id_ = ref_table_id;
-      for (int64_t i = 0; OB_SUCC(ret) && i < tablet_ids.count(); ++i) {
-        location.reset();
-        ObCandiTabletLoc &candi_tablet_loc = candi_tablet_locs.at(i);
-        if (OB_FAIL(loc_router.get(loc_meta, tablet_ids.at(i), location))) {
-          LOG_WARN("failed to get location", K(ret), K(loc_meta), K(tablet_ids.at(i)));
-        } else if (OB_FAIL(candi_tablet_loc.set_part_loc_with_only_readable_replica(
-                                                partition_ids.at(i),
-                                                tablet_ids.at(i), location,
-                                                session->get_retry_info().get_invalid_servers()))) {
-          LOG_WARN("fail to set partition location with only readable replica",
-                    K(ret),K(i), K(location), K(candi_tablet_locs), K(tablet_ids), K(partition_ids),
-                    K(session->get_retry_info().get_invalid_servers()));
-        } else {
-          LOG_TRACE("succeed to get partition location with only readable replica",
-                     K(location), K(candi_tablet_locs), K(tablet_ids), K(partition_ids),
-                     K(session->get_retry_info().get_invalid_servers()));
-        }
-      } // for end
+      loc_meta.table_loc_id_ = ref_table_id;
+      loc_meta.select_leader_ = 0;
+      if (OB_FAIL(loc_router.nonblock_get_candi_tablet_locations(loc_meta,
+                                                                 tablet_ids,
+                                                                 partition_ids,
+                                                                 first_level_part_ids,
+                                                                 candi_tablet_locs))) {
+        LOG_WARN("nonblock get candi tablet location failed", K(ret), K(loc_meta), K(partition_ids), K(tablet_ids));
+      }
     }
   }
   return ret;
@@ -378,20 +376,30 @@ int ObBasicStatsEstimator::get_tablet_locations(ObExecContext &ctx,
 int ObBasicStatsEstimator::estimate_modified_count(ObExecContext &ctx,
                                                    const uint64_t tenant_id,
                                                    const uint64_t table_id,
-                                                   int64_t &inc_modified_count)
+                                                   int64_t &result,
+                                                   const bool need_inc_modified_count/*default true*/)
 {
   int ret = OB_SUCCESS;
   ObSqlString select_sql;
   const int64_t obj_pos = 0;
-  ObObj inc_modified_obj;
+  ObObj result_obj;
   bool is_valid = true;
   if (OB_FAIL(ObDbmsStatsUtils::check_table_read_write_valid(tenant_id, is_valid))) {
     LOG_WARN("failed to check table read write valid", K(ret));
   } else if (!is_valid) {
     // do nothing
-  } else if (OB_FAIL(select_sql.append_fmt(
+  } else if (need_inc_modified_count &&
+             OB_FAIL(select_sql.append_fmt(
         "select cast(sum(inserts + updates + deletes) - sum(last_inserts + last_updates + " \
         "last_deletes) as signed) as inc_mod_count " \
+        "from %s where tenant_id = %lu and table_id = %lu;",
+        share::OB_ALL_MONITOR_MODIFIED_TNAME,
+        share::schema::ObSchemaUtils::get_extract_tenant_id(tenant_id, tenant_id),
+        share::schema::ObSchemaUtils::get_extract_schema_id(tenant_id, table_id)))) {
+    LOG_WARN("failed to append fmt", K(ret));
+  } else if (!need_inc_modified_count &&
+             OB_FAIL(select_sql.append_fmt(
+        "select cast(sum(inserts + updates + deletes) as signed) as modified_count " \
         "from %s where tenant_id = %lu and table_id = %lu;",
         share::OB_ALL_MONITOR_MODIFIED_TNAME,
         share::schema::ObSchemaUtils::get_extract_tenant_id(tenant_id, tenant_id),
@@ -409,16 +417,148 @@ int ObBasicStatsEstimator::estimate_modified_count(ObExecContext &ctx,
         LOG_WARN("failed to execute sql", K(ret));
       } else if (OB_FAIL(client_result->next())) {
         LOG_WARN("failed to get next result", K(ret));
-      } else if (OB_FAIL(client_result->get_obj(obj_pos, inc_modified_obj))) {
+      } else if (OB_FAIL(client_result->get_obj(obj_pos, result_obj))) {
         LOG_WARN("failed to get object", K(ret));
-      } else if (inc_modified_obj.is_null()) {
-        inc_modified_count = 0;
-      } else if (OB_UNLIKELY(!inc_modified_obj.is_integer_type())) {
+      } else if (result_obj.is_null()) {
+        result = 0;
+      } else if (OB_UNLIKELY(!result_obj.is_integer_type())) {
         ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("get unexpected obj type", K(ret), K(inc_modified_obj.get_type()));
+        LOG_WARN("get unexpected obj type", K(ret), K(result_obj.get_type()));
       } else {
-        inc_modified_count = inc_modified_obj.get_int();
-        LOG_TRACE("succeed to get estimate modified count", K(table_id), K(inc_modified_count));
+        result = result_obj.get_int();
+        LOG_TRACE("succeed to get estimate modified count", K(table_id), K(result),
+                                                            K(need_inc_modified_count));
+      }
+      int tmp_ret = OB_SUCCESS;
+      if (NULL != client_result) {
+        if (OB_SUCCESS != (tmp_ret = client_result->close())) {
+          LOG_WARN("close result set failed", K(ret), K(tmp_ret));
+          ret = COVER_SUCC(tmp_ret);
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObBasicStatsEstimator::estimate_row_count(ObExecContext &ctx,
+                                              const uint64_t tenant_id,
+                                              const uint64_t table_id,
+                                              int64_t &row_cnt)
+{
+  int ret = OB_SUCCESS;
+  row_cnt = 0;
+  ObSqlString select_sql;
+  bool is_valid = true;
+  if (OB_FAIL(ObDbmsStatsUtils::check_table_read_write_valid(tenant_id, is_valid))) {
+    LOG_WARN("failed to check table read write valid", K(ret));
+  } else if (!is_valid) {
+    // do nothing
+  } else if (OB_FAIL(select_sql.append_fmt(
+        "select cast(sum(inserts) - sum(deletes) as signed) as row_cnt " \
+        "from %s where tenant_id = %lu and table_id = %lu;",
+        share::OB_ALL_MONITOR_MODIFIED_TNAME,
+        share::schema::ObSchemaUtils::get_extract_tenant_id(tenant_id, tenant_id),
+        share::schema::ObSchemaUtils::get_extract_schema_id(tenant_id, table_id)))) {
+    LOG_WARN("failed to append fmt", K(ret));
+  } else {
+    ObCommonSqlProxy *sql_proxy = ctx.get_sql_proxy();
+    SMART_VAR(ObMySQLProxy::MySQLResult, proxy_result) {
+      sqlclient::ObMySQLResult *client_result = NULL;
+      ObSQLClientRetryWeak sql_client_retry_weak(sql_proxy);
+      ObObj row_cnt_obj;
+      const int64_t obj_pos = 0;
+      if (OB_FAIL(sql_client_retry_weak.read(proxy_result, tenant_id, select_sql.ptr()))) {
+        LOG_WARN("failed to execute sql", K(ret), K(select_sql));
+      } else if (OB_ISNULL(client_result = proxy_result.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("failed to execute sql", K(ret));
+      } else if (OB_FAIL(client_result->next())) {
+        if (ret == OB_ITER_END) {
+          ret = OB_SUCCESS;
+          row_cnt = 0;
+        } else {
+          LOG_WARN("failed to get next result", K(ret));
+        }
+      } else if (OB_FAIL(client_result->get_obj(obj_pos, row_cnt_obj))) {
+        LOG_WARN("failed to get object", K(ret));
+      } else if (row_cnt_obj.is_null()) {
+        row_cnt = 0;
+      } else if (OB_UNLIKELY(!row_cnt_obj.is_integer_type())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected obj type", K(ret), K(row_cnt_obj.get_type()));
+      } else {
+        row_cnt = row_cnt_obj.get_int();
+      }
+      LOG_TRACE("succeed to get table row count", K(table_id), K(row_cnt));
+      int tmp_ret = OB_SUCCESS;
+      if (NULL != client_result) {
+        if (OB_SUCCESS != (tmp_ret = client_result->close())) {
+          LOG_WARN("close result set failed", K(ret), K(tmp_ret));
+          ret = COVER_SUCC(tmp_ret);
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObBasicStatsEstimator::get_gather_table_duration(ObExecContext &ctx,
+                                                     const uint64_t tenant_id,
+                                                     const uint64_t table_id,
+                                                     int64_t &last_gather_duration)
+{
+  int ret = OB_SUCCESS;
+  last_gather_duration = 0;
+  ObSqlString select_sql;
+  bool is_valid = true;
+  if (OB_FAIL(ObDbmsStatsUtils::check_table_read_write_valid(tenant_id, is_valid))) {
+    LOG_WARN("failed to check table read write valid", K(ret));
+  } else if (!is_valid) {
+    // do nothing
+  } else if (OB_FAIL(select_sql.append_fmt(
+        "select cast((time_to_usec(end_time) - time_to_usec(start_time)) as signed) as last_gather_duration" \
+        " from %s where tenant_id = %lu and table_id = %lu and ret_code = 0 order by start_time desc limit 1;",
+        share::OB_ALL_TABLE_OPT_STAT_GATHER_HISTORY_TNAME,
+        share::schema::ObSchemaUtils::get_extract_tenant_id(tenant_id, tenant_id),
+        share::schema::ObSchemaUtils::get_extract_schema_id(tenant_id, table_id)))) {
+    LOG_WARN("failed to append fmt", K(ret));
+  } else {
+    ObCommonSqlProxy *sql_proxy = ctx.get_sql_proxy();
+    SMART_VAR(ObMySQLProxy::MySQLResult, proxy_result) {
+      sqlclient::ObMySQLResult *client_result = NULL;
+      ObSQLClientRetryWeak sql_client_retry_weak(sql_proxy);
+      ObObj obj;
+      const int64_t obj_pos = 0;
+      if (OB_FAIL(sql_client_retry_weak.read(proxy_result, gen_meta_tenant_id(tenant_id), select_sql.ptr()))) {
+        LOG_WARN("failed to execute sql", K(ret), K(select_sql));
+      } else if (OB_ISNULL(client_result = proxy_result.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("failed to execute sql", K(ret));
+      } else if (OB_FAIL(client_result->next())) {
+        if (ret == OB_ITER_END) {
+          ret = OB_SUCCESS;
+          last_gather_duration = 0;
+        } else {
+          LOG_WARN("failed to get result");
+        }
+      } else if (OB_FAIL(client_result->get_obj(obj_pos, obj))) {
+        LOG_WARN("failed to get object", K(ret));
+      } else if (obj.is_null()) {
+        last_gather_duration = 0;
+      } else if (OB_UNLIKELY(!obj.is_integer_type())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected obj type", K(ret), K(obj.get_type()));
+      } else {
+        last_gather_duration = obj.get_int();
+      }
+      LOG_TRACE("succeed to get last gather table duration", K(table_id), K(last_gather_duration));
+      int tmp_ret = OB_SUCCESS;
+      if (NULL != client_result) {
+        if (OB_SUCCESS != (tmp_ret = client_result->close())) {
+          LOG_WARN("close result set failed", K(ret), K(tmp_ret));
+          ret = COVER_SUCC(tmp_ret);
+        }
       }
     }
   }
@@ -701,9 +841,9 @@ int ObBasicStatsEstimator::gen_tablet_list(const ObTableStatParam &param,
 {
   int ret = OB_SUCCESS;
   ObSEArray<uint64_t, 4> tablet_ids;
-  if (param.need_global_ || param.need_approx_global_) {
+  if (param.global_stat_param_.need_modify_) {
     if (param.part_level_ == share::schema::ObPartitionLevel::PARTITION_LEVEL_ZERO) {
-      if (OB_UNLIKELY(param.global_tablet_id_ == 0)) {
+      if (OB_UNLIKELY(param.global_tablet_id_ == ObTabletID::INVALID_TABLET_ID)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected error", K(ret), K(param));
       } else if (OB_FAIL(tablet_ids.push_back(param.global_tablet_id_))) {
@@ -711,7 +851,7 @@ int ObBasicStatsEstimator::gen_tablet_list(const ObTableStatParam &param,
       }
     }
   }
-  if (OB_SUCC(ret) && param.need_part_ &&
+  if (OB_SUCC(ret) && param.part_stat_param_.need_modify_ &&
       param.part_level_ != share::schema::ObPartitionLevel::PARTITION_LEVEL_TWO) {
     for (int64_t i = 0; OB_SUCC(ret) && i < param.part_infos_.count(); ++i) {
       if (OB_FAIL(tablet_ids.push_back(param.part_infos_.at(i).tablet_id_.id()))) {
@@ -719,7 +859,7 @@ int ObBasicStatsEstimator::gen_tablet_list(const ObTableStatParam &param,
       }
     }
   }
-  if (OB_SUCC(ret) && param.need_subpart_) {
+  if (OB_SUCC(ret) && param.subpart_stat_param_.need_modify_) {
     for (int64_t i = 0; OB_SUCC(ret) && i < param.subpart_infos_.count(); ++i) {
       if (OB_FAIL(tablet_ids.push_back(param.subpart_infos_.at(i).tablet_id_.id()))) {
         LOG_WARN("failed to push back", K(ret));
@@ -785,6 +925,162 @@ int ObBasicStatsEstimator::generate_first_part_idx_map(const ObIArray<PartInfo> 
       if (OB_FAIL(first_part_idx_map.set_refactored(all_part_infos.at(i).part_id_, i))) {
         LOG_WARN("failed to set refactored", K(ret));
       } else {/*do nothing*/}
+    }
+  }
+  return ret;
+}
+
+/**
+ * @brief ObBasicStatsEstimator::refine_basic_stats
+ *   when the user specify estimate_percent is too small, the sample data isn't enough to describe the
+ * overall data distribution, So we need consider refine it, and reset the appropriate estimate_percent
+ * to regather basic stats.
+ */
+int ObBasicStatsEstimator::refine_basic_stats(const ObTableStatParam &param,
+                                              const ObExtraParam &extra,
+                                              ObIArray<ObOptStat> &dst_opt_stats)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(param.allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (sample_value_ >= 0.000001 && sample_value_ < 100.0) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < dst_opt_stats.count(); ++i) {
+      bool need_re_estimate = false;
+      ObExtraParam new_extra;
+      ObTableStatParam new_param;
+      ObSEArray<ObOptStat, 1> tmp_opt_stats;
+      ObBasicStatsEstimator basic_re_est(ctx_, *param.allocator_);
+      if (OB_FAIL(check_stat_need_re_estimate(param, extra, dst_opt_stats.at(i),
+                                              need_re_estimate, new_param, new_extra))) {
+        LOG_WARN("failed to check stat need re-estimate", K(ret));
+      } else if (!need_re_estimate) {
+        //do nothing
+      } else if (OB_FAIL(tmp_opt_stats.push_back(dst_opt_stats.at(i)))) {
+        LOG_WARN("failed to push back", K(ret));
+      } else if (OB_FAIL(basic_re_est.estimate(new_param, new_extra, tmp_opt_stats))) {
+        LOG_WARN("failed to estimate basic statistics", K(ret));
+      } else {
+        LOG_TRACE("Suceed to re-estimate stats", K(new_param), K(param));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObBasicStatsEstimator::check_stat_need_re_estimate(const ObTableStatParam &origin_param,
+                                                       const ObExtraParam &origin_extra,
+                                                       ObOptStat &opt_stat,
+                                                       bool &need_re_estimate,
+                                                       ObTableStatParam &new_param,
+                                                       ObExtraParam &new_extra)
+{
+  int ret = OB_SUCCESS;
+  need_re_estimate = false;
+  if (OB_ISNULL(opt_stat.table_stat_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected error", K(ret), K(opt_stat.table_stat_));
+  } else if (opt_stat.table_stat_->get_row_count() * sample_value_ / 100 >= MAGIC_MIN_SAMPLE_SIZE) {
+    //do nothing
+  } else if (OB_FAIL(new_param.assign(origin_param))) {
+    LOG_WARN("failed to assign", K(ret));
+  } else {
+    need_re_estimate = true;
+    int64_t total_row_count = opt_stat.table_stat_->get_row_count();
+    //1.set sample ratio
+    if (total_row_count <= MAGIC_SAMPLE_SIZE) {
+      new_param.sample_info_.is_sample_ = false;
+      new_param.sample_info_.sample_value_ = 0.0;
+      new_param.sample_info_.is_block_sample_ = false;
+    } else {
+      new_param.sample_info_.is_sample_ = true;
+      new_param.sample_info_.is_block_sample_ = false;
+      new_param.sample_info_.sample_value_ = (MAGIC_SAMPLE_SIZE * 100.0) / total_row_count;
+      new_param.sample_info_.sample_type_ = PercentSample;
+    }
+    //2.set partition info
+    new_extra.type_ = origin_extra.type_;
+    new_extra.start_time_ = origin_extra.start_time_;
+    new_extra.nth_part_ = origin_extra.nth_part_;
+    bool find_it = (new_extra.type_ == TABLE_LEVEL);
+    if (new_extra.type_ == PARTITION_LEVEL) {
+      for (int64_t i = 0; !find_it && i < new_param.part_infos_.count(); ++i) {
+        if (opt_stat.table_stat_->get_partition_id() == new_param.part_infos_.at(i).part_id_) {
+          find_it = true;
+          new_extra.nth_part_ = i;
+          new_param.part_name_ = new_param.part_infos_.at(i).part_name_;
+          new_param.is_subpart_name_ = false;
+        }
+      }
+    } else if (new_extra.type_ == SUBPARTITION_LEVEL) {
+      for (int64_t i = 0; !find_it && i < new_param.subpart_infos_.count(); ++i) {
+        if (opt_stat.table_stat_->get_partition_id() == new_param.subpart_infos_.at(i).part_id_) {
+          find_it = true;
+          new_extra.nth_part_ = i;
+          new_param.part_name_ = new_param.subpart_infos_.at(i).part_name_;
+          new_param.is_subpart_name_ = true;
+        }
+      }
+    }
+    if (!find_it) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected error", K(ret), K(new_param), KPC(opt_stat.table_stat_));
+    }
+    //3.reset opt stat
+    if (OB_SUCC(ret)) {
+      opt_stat.table_stat_->set_row_count(0);
+      opt_stat.table_stat_->set_avg_row_size(0);
+      for (int64_t i = 0; OB_SUCC(ret) && i < opt_stat.column_stats_.count(); ++i) {
+        if (OB_ISNULL(opt_stat.column_stats_.at(i))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("get unexpected error", K(ret));
+        } else {
+          ObObj null_val;
+          null_val.set_null();
+          opt_stat.column_stats_.at(i)->set_max_value(null_val);
+          opt_stat.column_stats_.at(i)->set_min_value(null_val);
+          opt_stat.column_stats_.at(i)->set_num_not_null(0);
+          opt_stat.column_stats_.at(i)->set_num_null(0);
+          opt_stat.column_stats_.at(i)->set_num_distinct(0);
+          opt_stat.column_stats_.at(i)->set_avg_len(0);
+          opt_stat.column_stats_.at(i)->set_llc_bitmap_size(ObOptColumnStat::NUM_LLC_BUCKET);
+          MEMSET(opt_stat.column_stats_.at(i)->get_llc_bitmap(), 0, ObOptColumnStat::NUM_LLC_BUCKET);
+          opt_stat.column_stats_.at(i)->get_histogram().reset();
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObBasicStatsEstimator::fill_hints(common::ObIAllocator &alloc,
+                                      const ObString &table_name)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(table_name.empty())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(table_name));
+  } else {
+    const char *fmt_str = "NO_REWRITE USE_PLAN_CACHE(NONE) DBMS_STATS FULL(%.*s)";
+    int64_t buf_len = table_name.length() + strlen(fmt_str);
+    char *buf = NULL;
+    if (OB_ISNULL(buf = static_cast<char *>(alloc.alloc(buf_len)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed to alloc memory", K(buf), K(buf_len));
+    } else {
+      int64_t real_len = sprintf(buf, fmt_str, table_name.length(), table_name.ptr());
+      if (OB_UNLIKELY(real_len < 0 || real_len > buf_len)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected error", K(real_len));
+      } else {
+        ObString hint_str;
+        hint_str.assign_ptr(buf, real_len);
+        if (OB_FAIL(add_hint(hint_str, alloc))) {
+          LOG_WARN("failed to add hint", K(ret));
+        } else {
+          LOG_TRACE("succeed to fill index info", K(hint_str));
+        }
+      }
     }
   }
   return ret;

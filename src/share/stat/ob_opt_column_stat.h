@@ -54,7 +54,7 @@ public:
                 char *buf,
                 const int64_t buf_len,
                 int64_t &pos);
-
+  int deep_copy(ObIAllocator &alloc, const ObHistBucket &src);
   int64_t deep_copy_size() const { return endpoint_value_.get_deep_copy_size(); }
 
   TO_STRING_KV(K_(endpoint_value),
@@ -72,7 +72,7 @@ class ObHistogram
 public:
   friend class ObOptColumnStat;
 
-  typedef ObArray<ObHistBucket> Buckets;
+  typedef ObArrayWrap<ObHistBucket> Buckets;
   enum class BoundType {
     LOWER,
     UPPER,
@@ -94,6 +94,8 @@ public:
   void reset();
 
   int deep_copy(const ObHistogram &src, char *buf, const int64_t buf_len, int64_t &pos);
+  int deep_copy(ObIAllocator &alloc, const ObHistogram &src);
+  int assign(const ObHistogram &other);
   int64_t deep_copy_size() const;
 
   bool is_valid() const
@@ -127,6 +129,10 @@ public:
   int64_t get_pop_count() const { return pop_count_; }
   void set_pop_count(int64_t pop_count) { pop_count_ = pop_count; }
 
+  int prepare_allocate_buckets(ObIAllocator &allocator, const int64_t bucket_size);
+  int add_bucket(const ObHistBucket &bucket);
+  int assign_buckets(const ObIArray<ObHistBucket> &buckets);
+
   void calc_density(ObHistType hist_type,
                     const int64_t row_count,
                     const int64_t pop_row_count,
@@ -149,8 +155,12 @@ protected:
 
 class ObOptColumnStat : public common::ObIKVCacheValue
 {
+  OB_UNIS_VERSION_V(1);
 public:
   static const int64_t MAX_OBJECT_SERIALIZE_SIZE = 512;
+  static const int64_t LARGE_NDV_NUMBER = 2LL << 61; // 2 << 64 is too large for int64_t, and 2 << 61 is enough for ndv
+  static const int64_t BUCKET_BITS = 10; // ln2(1024) = 10;
+  static const int64_t NUM_LLC_BUCKET =  (1 << BUCKET_BITS);
 
   struct Key : public common::ObIKVCacheKey
   {
@@ -174,6 +184,11 @@ public:
     uint64_t hash() const
     {
       return common::murmurhash(this, sizeof(Key), 0);
+    }
+    int hash(uint64_t &hash_val) const
+    {
+      hash_val = hash();
+      return OB_SUCCESS;
     }
     bool operator==(const ObIKVCacheKey &other) const
     {
@@ -219,7 +234,8 @@ public:
 
   explicit ObOptColumnStat(common::ObIAllocator &allocator);
 
-  ~ObOptColumnStat() { histogram_.reset(); }
+  ~ObOptColumnStat() { reset(); }
+  void reset();
 
   uint64_t get_table_id() const { return table_id_; }
   void set_table_id(uint64_t tid) { table_id_ = tid; }
@@ -231,9 +247,11 @@ public:
   void set_column_id(uint64_t cid) { column_id_ = cid; }
 
   const common::ObObj &get_max_value() const { return max_value_; }
+  common::ObObj &get_max_value() { return max_value_; }
   void set_max_value(const common::ObObj &max) { max_value_ = max; }
 
   const common::ObObj &get_min_value() const { return min_value_; }
+  common::ObObj &get_min_value() { return min_value_; }
   void set_min_value(const common::ObObj &min) { min_value_ = min; }
 
   int64_t get_num_distinct() const { return num_distinct_; }
@@ -245,21 +263,28 @@ public:
   void set_num_not_null(int64_t num_not_null) { num_not_null_ = num_not_null; }
   int64_t get_num_not_null() const { return num_not_null_; }
 
+  void add_num_null(int64_t num_null) { num_null_ += num_null; }
+
+  void add_num_not_null(int64_t num_not_null) { num_not_null_ += num_not_null; }
+
+  int64_t get_num_rows() const { return num_null_ + num_not_null_; }
+
   void set_avg_len(int64_t avg_len) { avg_length_ = avg_len; }
   int64_t get_avg_len() const { return avg_length_; }
+  // only used for osg
+  void calc_avg_len() { avg_length_ = (get_num_rows() != 0) ? int64_t(round(total_col_len_ * 1.0 / get_num_rows())) : 0; }
 
   int64_t get_stat_level() const { return object_type_; }
   void set_stat_level(int64_t object_type) { object_type_ = object_type; }
 
   const ObHistogram &get_histogram() const { return histogram_; }
   ObHistogram &get_histogram() { return histogram_; }
-
-  int add_bucket(int64_t repeat_count, const ObObj &value, int64_t num_elements);
   int64_t get_bucket_num() const { return histogram_.get_bucket_cnt(); }
 
   virtual int64_t size() const override;
   virtual int deep_copy(char *buf, const int64_t buf_len, ObIKVCacheValue *&value) const override;
   int deep_copy(const ObOptColumnStat &src, char *buf, const int64_t size, int64_t &pos);
+  int deep_copy(const ObOptColumnStat &value);
 
   int64_t get_last_analyzed() const { return last_analyzed_; }
   void set_last_analyzed(int64_t last) { last_analyzed_ = last; }
@@ -284,6 +309,11 @@ public:
         && num_null_ >= 0;
   }
 
+  void add_col_len(int64_t len) { total_col_len_ += len; }
+  int64_t get_total_col_len() const { return total_col_len_; }
+
+  int merge_column_stat(const ObOptColumnStat &other);
+
   common::ObCollationType get_collation_type() const { return cs_type_; }
   void set_collation_type(common::ObCollationType cs_type) { cs_type_ = cs_type; }
 
@@ -299,6 +329,7 @@ public:
                K_(num_not_null),
                K_(avg_length),
                K_(cs_type),
+               K_(total_col_len),
                K_(llc_bitmap_size),
                K_(llc_bitmap),
                K_(histogram));
@@ -323,6 +354,9 @@ protected:
   /** last analyzed time */
   int64_t last_analyzed_;
   common::ObCollationType cs_type_;
+  int64_t total_col_len_;
+  common::ObArenaAllocator inner_allocator_;
+  common::ObIAllocator &allocator_;
 };
 
 }

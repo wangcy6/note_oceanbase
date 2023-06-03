@@ -42,7 +42,7 @@ int ObCreateDbLinkResolver::resolve(const ParseNode &parse_tree)
       || OB_UNLIKELY(node->type_ != T_CREATE_DBLINK)
       || OB_UNLIKELY(node->num_child_ != DBLINK_NODE_COUNT)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("invalid parse tree", K(ret));
+    LOG_WARN("invalid parse tree", K(ret), KP(node), K(node->type_), K(T_CREATE_DBLINK), K(node->num_child_));
   } else if (OB_ISNULL(session_info_) || OB_ISNULL(schema_checker_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session info should not be null", K(ret));
@@ -57,6 +57,24 @@ int ObCreateDbLinkResolver::resolve(const ParseNode &parse_tree)
     create_dblink_stmt->set_tenant_id(session_info_->get_effective_tenant_id());
     create_dblink_stmt->set_user_id(session_info_->get_user_id());
     LOG_TRACE("debug dblink create", K(session_info_->get_database_id()));
+  }
+  if (!lib::is_oracle_mode() && OB_SUCC(ret)) {
+    uint64_t compat_version = 0;
+    uint64_t tenant_id = session_info_->get_effective_tenant_id();
+    if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, compat_version))) {
+      LOG_WARN("fail to get data version", KR(ret), K(tenant_id));
+    } else if (compat_version < DATA_VERSION_4_2_0_0) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("mysql dblink is not supported when MIN_DATA_VERSION is below DATA_VERSION_4_2_0_0", K(ret));
+    } else if (NULL != node->children_[IF_NOT_EXIST]) {
+      if (T_IF_NOT_EXISTS != node->children_[IF_NOT_EXIST]->type_) {
+        ret = OB_INVALID_ARGUMENT;
+        SQL_RESV_LOG(WARN, "invalid argument.",
+                      K(ret), K(node->children_[1]->type_));
+      } else {
+        create_dblink_stmt->set_if_not_exist(true);
+      }
+    }
   }
   if (OB_SUCC(ret)) {
     ObString dblink_name;
@@ -95,6 +113,18 @@ int ObCreateDbLinkResolver::resolve(const ParseNode &parse_tree)
       LOG_WARN("set tenant name failed", K(ret));
     }
   }
+  if (!lib::is_oracle_mode() && OB_SUCC(ret)) {
+    ObString database_name;
+    ParseNode *name_node = node->children_[DATABASE_NAME];
+    if (OB_ISNULL(name_node)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid parse tree", K(ret));
+    } else if (FALSE_IT(database_name.assign_ptr(name_node->str_value_, static_cast<int32_t>(name_node->str_len_)))) {
+      // do nothing
+    } else if (OB_FAIL(create_dblink_stmt->set_database_name(database_name))) {
+      LOG_WARN("set database name failed", K(ret));
+    }
+  }
   if (OB_SUCC(ret)) {
     ObString user_name;
     ParseNode *name_node = node->children_[USER_NAME];
@@ -119,12 +149,13 @@ int ObCreateDbLinkResolver::resolve(const ParseNode &parse_tree)
       LOG_WARN("set password failed", K(ret));
     }
   }
+  DriverType drv_type = DRV_OB;
   if (OB_SUCC(ret)) {
     ParseNode *driver = node->children_[OPT_DRIVER];
     if (OB_ISNULL(driver)) {
       create_dblink_stmt->set_driver_proto(0); // default proto is ob.
     } else {
-      DriverType drv_type = static_cast<DriverType>(driver->int16_values_[0]);
+      drv_type = static_cast<DriverType>(driver->int16_values_[0]);
       if (DRV_OB == drv_type) {
         create_dblink_stmt->set_driver_proto(0); // ob.
       } else if (DRV_OCI == drv_type) {
@@ -155,7 +186,11 @@ int ObCreateDbLinkResolver::resolve(const ParseNode &parse_tree)
       create_dblink_stmt->set_host_addr(host);
     }
   }
-  if (OB_SUCC(ret) && ObSchemaChecker::is_ora_priv_check()) {
+  if (OB_FAIL(ret)) {
+    //do nothing
+  } else if (lib::is_oracle_mode() && OB_FAIL(resolve_opt_reverse_link(node, create_dblink_stmt, drv_type))) {
+    LOG_WARN("failed to resolve optional reverse link", K(ret));
+  } else if (ObSchemaChecker::is_ora_priv_check()) {
     OZ (schema_checker_->check_ora_ddl_priv(
           session_info_->get_effective_tenant_id(),
           session_info_->get_priv_user_id(),
@@ -165,6 +200,91 @@ int ObCreateDbLinkResolver::resolve(const ParseNode &parse_tree)
           session_info_->get_effective_tenant_id(), session_info_->get_user_id());
   }
   LOG_INFO("resolve create dblink finish", K(ret));
+  return ret;
+}
+
+int ObCreateDbLinkResolver::resolve_opt_reverse_link(const ParseNode *node, sql::ObCreateDbLinkStmt *link_stmt, DriverType drv_type)
+{
+  int ret = OB_SUCCESS;
+  ParseNode *reverse_link_node = NULL;
+  if (OB_ISNULL(node) || OB_ISNULL(link_stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("null ptr", K(node), K(link_stmt), K(ret));
+  } else if (FALSE_IT(reverse_link_node = node->children_[OPT_REVERSE_LINK])) {
+  } else if (OB_ISNULL(reverse_link_node)) {
+    // nothing to do
+  } else if (DRV_OB != drv_type) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("only DBLINK_DRV_OB support reverse link", K(ret), K(drv_type));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "option reverse link");
+  } else if (T_REVERSE_DBLINK != reverse_link_node->type_ ||
+              REVERSE_DBLINK_NODE_COUNT != reverse_link_node->num_child_ ||
+              OB_ISNULL(reverse_link_node->children_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid parse tree", K(ret), K(T_REVERSE_DBLINK), K(reverse_link_node->type_), K(reverse_link_node->num_child_));
+  } else {
+    ObString reverse_user_name;
+    ParseNode *name_node = reverse_link_node->children_[REVERSE_LINK_USER_NAME];
+    if (OB_ISNULL(name_node)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid parse tree", K(ret));
+    } else if (FALSE_IT(reverse_user_name.assign_ptr(name_node->str_value_, static_cast<int32_t>(name_node->str_len_)))) {
+      // do nothing
+    } else {
+      link_stmt->set_reverse_user_name(reverse_user_name);
+    }
+
+    ObString reverse_tenant_name;
+    ParseNode *tenant_node = reverse_link_node->children_[REVERSE_LINK_TENANT_NAME];
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(tenant_node)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid parse tree", K(ret));
+    } else if (FALSE_IT(reverse_tenant_name.assign_ptr(tenant_node->str_value_, static_cast<int32_t>(tenant_node->str_len_)))) {
+      // do nothing
+    } else {
+      link_stmt->set_reverse_tenant_name(reverse_tenant_name);
+    }
+
+    ObString reverse_link_password;
+    ParseNode *pwd_node = reverse_link_node->children_[REVERSE_LINK_PASSWORD];
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(pwd_node)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid parse tree", K(ret));
+    } else if (FALSE_IT(reverse_link_password.assign_ptr(pwd_node->str_value_, static_cast<int32_t>(pwd_node->str_len_)))) {
+      // do nothing
+    } else {
+      link_stmt->set_reverse_password(reverse_link_password);
+    }
+
+    ObString reverse_link_cluster_name;
+    ParseNode *cluster_node = reverse_link_node->children_[REVERSE_LINK_OPT_CLUSTER];
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(cluster_node)) {
+      // do nothing
+    } else if (FALSE_IT(reverse_link_cluster_name.assign_ptr(cluster_node->str_value_, static_cast<int32_t>(cluster_node->str_len_)))) {
+      // do nothing
+    } else {
+      link_stmt->set_reverse_cluster_name(reverse_link_cluster_name);
+    }
+
+    ObAddr host;
+    ObString host_str;
+    ObString ip_port, conn_str;
+    ParseNode *host_node = NULL;
+    if (OB_ISNULL(reverse_link_node->children_[REVERSE_LINK_IP_PORT]) || OB_ISNULL(reverse_link_node->children_[REVERSE_LINK_IP_PORT]->children_) || OB_ISNULL(host_node = reverse_link_node->children_[REVERSE_LINK_IP_PORT]->children_[0])) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid parse tree", K(ret));
+    } else if (FALSE_IT(host_str.assign_ptr(host_node->str_value_, static_cast<int32_t>(host_node->str_len_)))) {
+    } else if (cut_host_string(host_str, ip_port, conn_str)) {
+      LOG_WARN("failed to cut host string", K(ret), K(host_str));
+    } else if (OB_FAIL(host.parse_from_string(ip_port))) {
+      LOG_WARN("parse ip port failed", K(ret), K(host_str), K(ip_port));
+    } else {
+      link_stmt->set_reverse_host_addr(host);
+    }
+  }
   return ret;
 }
 

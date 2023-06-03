@@ -35,10 +35,13 @@ public:
       const int64_t dest_table_id,
       const int64_t schema_version,
       const int64_t parallelism,
+      const int64_t consumer_group_id,
       const obrpc::ObAlterTableArg &alter_table_arg,
       const int64_t task_status = share::ObDDLTaskStatus::PREPARE,
       const int64_t snapshot_version = 0);
   virtual int process() override;
+  virtual void flt_set_task_span_tag() const override;
+  virtual void flt_set_status_span_tag() const override;
 private:
   static const int64_t OB_DROP_PRIMARY_KEY_TASK_VERSION = 1L;
 };

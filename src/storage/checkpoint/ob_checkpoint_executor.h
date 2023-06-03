@@ -13,7 +13,7 @@
 #ifndef OCEANBASE_STORAGE_OB_CHECKPOINT_EXECUTOR_H_
 #define OCEANBASE_STORAGE_OB_CHECKPOINT_EXECUTOR_H_
 
-#include "lib/lock/ob_spin_lock.h"
+#include "lib/lock/ob_spin_rwlock.h"           // SpinRWLock
 #include "logservice/ob_log_base_type.h"
 #include "logservice/ob_log_handler.h"
 #include "share/scn.h"
@@ -39,13 +39,22 @@ struct ObCheckpointVTInfo
 
 struct CheckpointDiagnoseInfo
 {
+<<<<<<< HEAD
+=======
+  CheckpointDiagnoseInfo() { reset(); }
+  ~CheckpointDiagnoseInfo() { reset(); }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   share::SCN checkpoint_;
   share::SCN min_rec_scn_;
   logservice::ObLogBaseType log_type_;
-
   TO_STRING_KV(K(checkpoint_),
                K(min_rec_scn_),
                K(log_type_));
+  void reset() {
+    checkpoint_.reset();
+    min_rec_scn_.reset();
+    log_type_ = logservice::ObLogBaseType::INVALID_LOG_BASE_TYPE;
+  }
 };
 
 class ObCheckpointExecutor
@@ -69,7 +78,12 @@ public:
 
   // the service will flush and advance checkpoint
   // after flush, checkpoint_scn will be equal or greater than recycle_scn
+<<<<<<< HEAD
   int advance_checkpoint_by_flush(share::SCN recycle_scn = share::SCN::invalid_scn());
+=======
+  int advance_checkpoint_by_flush(
+      share::SCN recycle_scn = share::SCN::invalid_scn());
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // for __all_virtual_checkpoint
   int get_checkpoint_info(ObIArray<ObCheckpointVTInfo> &checkpoint_array);
@@ -80,6 +94,8 @@ public:
 
   int diagnose(CheckpointDiagnoseInfo &diagnose_info) const;
 
+  int traversal_flush() const;
+
 private:
   static const int64_t CLOG_GC_PERCENT = 60;
 
@@ -89,7 +105,10 @@ private:
   // be used to avoid checkpoint concurrently,
   // no need to protect handlers_[] because ls won't be destroyed(hold lshandle)
   // when the public interfaces are invoked
-  mutable common::ObSpinLock lock_;
+  typedef common::SpinRWLock RWLock;
+  typedef common::SpinRLockGuard  RLockGuard;
+  typedef common::SpinWLockGuard  WLockGuard;
+  RWLock rwlock_;
 
   bool update_checkpoint_enabled_;
 };

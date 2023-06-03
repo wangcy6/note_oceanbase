@@ -83,7 +83,7 @@ private:
   {
     ObDList<ObTenantInfo> info_list_;
     SpinRWLock lock_;
-    ObTenantBucket() : info_list_(), lock_()
+    ObTenantBucket() : info_list_(), lock_(ObLatchIds::DEFAULT_BUCKET_LOCK)
     {
     }
     int get_the_node(const uint64_t tenant_id, ObTenantInfo *&node)
@@ -129,7 +129,7 @@ class ObTenantCpuShare
 {
 public:
   /* Return value: The number of px threads assigned to tenant_id tenant */
-  static int64_t calc_px_pool_share(uint64_t tenant_id, int64_t cpu_count);
+  static int64_t calc_px_pool_share(uint64_t tenant_id, int64_t min_cpu);
 };
 
 }

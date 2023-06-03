@@ -30,7 +30,9 @@ struct ObTableAssignment
   {
   }
   static int replace_assigment_expr(const common::ObIArray<ObAssignment> &assigns, ObRawExpr *&expr);
-  static int expand_expr(const common::ObIArray<ObAssignment> &assigns, ObRawExpr *&expr);
+  static int expand_expr(ObRawExprFactory &expr_factory,
+                         const common::ObIArray<ObAssignment> &assigns,
+                         ObRawExpr *&expr);
   uint64_t table_id_;
   common::ObSEArray<ObAssignment, 4> assignments_;
   TO_STRING_KV(K_(table_id),
@@ -44,6 +46,10 @@ public:
   virtual ~ObDelUpdResolver();
 
   ObDelUpdStmt *get_del_upd_stmt() { return static_cast<ObDelUpdStmt*>(stmt_); }
+
+  //set is json constraint type is strict or relax
+  const static uint8_t IS_JSON_CONSTRAINT_RELAX = 1;
+  const static uint8_t IS_JSON_CONSTRAINT_STRICT = 4;
 
 protected:
 
@@ -151,12 +157,13 @@ protected:
                                               ObIArray<ObRawExpr *> &value_list);
   int resolve_check_constraints(const TableItem* table_item,
                                 common::ObIArray<ObRawExpr*> &check_exprs);
-  int resolve_view_check_exprs(const TableItem* table_item,
+  int resolve_view_check_exprs(uint64_t table_id,
+                               const TableItem* table_item,
                                const bool cascaded,
                                common::ObIArray<ObRawExpr*> &check_exprs);
   int get_pullup_column_map(ObDMLStmt &stmt,
                             ObSelectStmt &sel_stmt,
-                            uint64_t base_ref_id,
+                            uint64_t table_id,
                             ObIArray<ObRawExpr *> &view_columns,
                             ObIArray<ObRawExpr *> &base_columns);
   
@@ -174,6 +181,9 @@ protected:
 
   int build_column_conv_function_with_default_expr(ObInsertTableInfo& table_info, const int64_t idx);
 
+  int build_column_conv_function_for_udt_column(ObInsertTableInfo& table_info,
+                                                const int64_t idx,
+                                                ObRawExpr *column_ref);
   int generate_autoinc_params(ObInsertTableInfo &table_info);
   int get_value_row_size(uint64_t &count);
 
@@ -213,6 +223,7 @@ protected:
   int create_session_row_label_expr(ObDmlTableInfo& table_info, uint64_t column_id, ObRawExpr *&expr);
   int add_select_items(ObSelectStmt &select_stmt, const ObIArray<SelectItem>& select_items);
   int add_select_list_for_set_stmt(ObSelectStmt &select_stmt);
+  int add_all_lob_columns_to_stmt(const TableItem &table_item, ObIArray<ObColumnRefRawExpr*> &column_exprs);
 protected:
   int generate_insert_table_info(const TableItem &table_item,
                                  ObInsertTableInfo &table_info,

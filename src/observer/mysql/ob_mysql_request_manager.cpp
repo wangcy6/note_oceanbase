@@ -22,6 +22,7 @@
 #include "lib/alloc/alloc_func.h"
 #include "lib/thread/thread_mgr.h"
 #include "lib/rc/ob_rc.h"
+#include "common/ob_clock_generator.h"
 #include "share/rc/ob_context.h"
 #include "observer/mysql/ob_mysql_request_manager.h"
 #include "observer/ob_server.h"
@@ -48,7 +49,7 @@ const int64_t ObMySQLRequestManager::EVICT_INTERVAL;
 ObMySQLRequestManager::ObMySQLRequestManager()
   : inited_(false), destroyed_(false), request_id_(0), mem_limit_(0),
     allocator_(), queue_(), task_(),
-    tenant_id_(OB_INVALID_TENANT_ID), tg_id_(-1)
+    tenant_id_(OB_INVALID_TENANT_ID), tg_id_(-1), stop_flag_(true)
 {
 }
 
@@ -68,10 +69,6 @@ int ObMySQLRequestManager::init(uint64_t tenant_id,
     ret = OB_INIT_TWICE;
   } else if (OB_FAIL(queue_.init(ObModIds::OB_MYSQL_REQUEST_RECORD, queue_size, tenant_id))) {
     SERVER_LOG(WARN, "Failed to init ObMySQLRequestQueue", K(ret));
-  } else if (OB_FAIL(TG_CREATE_TENANT(lib::TGDefIDs::ReqMemEvict, tg_id_))) {
-    SERVER_LOG(WARN, "create failed", K(ret));
-  } else if (OB_FAIL(TG_START(tg_id_))) {
-    SERVER_LOG(WARN, "init timer fail", K(ret));
   } else if (OB_FAIL(allocator_.init(SQL_AUDIT_PAGE_SIZE,
                                      ObModIds::OB_MYSQL_REQUEST_RECORD,
                                      tenant_id,
@@ -81,8 +78,6 @@ int ObMySQLRequestManager::init(uint64_t tenant_id,
     //check FIFO mem used and sql audit records every 1 seconds
     if (OB_FAIL(task_.init(this))) {
       SERVER_LOG(WARN, "fail to init sql audit time tast", K(ret));
-    } else if (OB_FAIL(TG_SCHEDULE(tg_id_, task_, EVICT_INTERVAL, true))) {
-      SERVER_LOG(WARN, "start eliminate task failed", K(ret));
     } else {
       mem_limit_ = max_mem_size;
       tenant_id_ = tenant_id;
@@ -96,6 +91,39 @@ int ObMySQLRequestManager::init(uint64_t tenant_id,
   return ret;
 }
 
+int ObMySQLRequestManager::start()
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    SERVER_LOG(WARN, "ObMySQLRequestManager is not inited", K(tenant_id_));
+  } else if (OB_FAIL(TG_CREATE_TENANT(lib::TGDefIDs::ReqMemEvict, tg_id_))) {
+    SERVER_LOG(WARN, "create failed", K(ret));
+  } else if (OB_FAIL(TG_START(tg_id_))) {
+    SERVER_LOG(WARN, "init timer fail", K(ret));
+  } else if (OB_FAIL(TG_SCHEDULE(tg_id_, task_, EVICT_INTERVAL, true))) {
+    SERVER_LOG(WARN, "start eliminate task failed", K(ret));
+  } else {
+    stop_flag_ = false;
+  }
+  return ret;
+}
+
+void ObMySQLRequestManager::stop()
+{
+  if (inited_ && !stop_flag_) {
+    TG_STOP(tg_id_);
+  }
+}
+
+void ObMySQLRequestManager::wait()
+{
+  if (inited_ && !stop_flag_) {
+    TG_WAIT(tg_id_);
+    stop_flag_ = true;
+  }
+}
+
 void ObMySQLRequestManager::destroy()
 {
   if (!destroyed_) {
@@ -105,6 +133,7 @@ void ObMySQLRequestManager::destroy()
     allocator_.destroy();
     inited_ = false;
     destroyed_ = true;
+    stop_flag_ = true;
   }
 }
 
@@ -123,7 +152,9 @@ void ObMySQLRequestManager::destroy()
  *11.tenant_name           varchar
  */
 
-int ObMySQLRequestManager::record_request(const ObAuditRecordData &audit_record, bool is_sensitive)
+int ObMySQLRequestManager::record_request(const ObAuditRecordData &audit_record,
+                                          const bool enable_query_response_time_stats,
+                                          bool is_sensitive)
 {
   int ret = OB_SUCCESS;
   if (!inited_) {
@@ -138,11 +169,13 @@ int ObMySQLRequestManager::record_request(const ObAuditRecordData &audit_record,
                      + audit_record.tenant_name_len_
                      + audit_record.user_name_len_
                      + audit_record.db_name_len_
-                     + audit_record.params_value_len_;
+                     + audit_record.params_value_len_
+                     + audit_record.rule_name_len_;
     if (NULL == (buf = (char*)alloc(total_size))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       if (REACH_TIME_INTERVAL(100 * 1000)) {
-        SERVER_LOG(WARN, "record concurrent fifoallocator alloc mem failed", K(total_size), K(ret));
+        SERVER_LOG(WARN, "record concurrent fifoallocator alloc mem failed",
+            K(audit_record.tenant_id_), K(total_size), K(ret));
       }
     } else {
       record = new(buf)ObMySQLRequestRecord();
@@ -160,6 +193,12 @@ int ObMySQLRequestManager::record_request(const ObAuditRecordData &audit_record,
         MEMCPY(buf + pos, audit_record.params_value_, audit_record.params_value_len_);
         record->data_.params_value_ = buf + pos;
         pos += audit_record.params_value_len_;
+      }
+      //deep copy rule name
+      if ((audit_record.rule_name_len_ > 0) && (NULL != audit_record.rule_name_)) {
+        MEMCPY(buf + pos, audit_record.rule_name_, audit_record.rule_name_len_);
+        record->data_.rule_name_ = buf + pos;
+        pos += audit_record.rule_name_len_;
       }
       //deep copy tenant_name
       if ((audit_record.tenant_name_len_ > 0) && (NULL != audit_record.tenant_name_)) {
@@ -182,19 +221,20 @@ int ObMySQLRequestManager::record_request(const ObAuditRecordData &audit_record,
         record->data_.db_name_ = buf + pos;
         pos += db_len;
       }
-      int64_t timestamp = common::ObTimeUtility::current_time();
-      //for find bug http://k3.alibaba-inc.com/issue/5689896?stat=1.5.1&toPage=1&versionId=1043200
+      //for find bug
       // only print this log if enable_perf_event is enable,
       // for `receive_ts_` might be invalid if `enable_perf_event` is false
       if (lib::is_diagnose_info_enabled()
-          && OB_UNLIKELY(timestamp - audit_record.exec_timestamp_.receive_ts_ > US_PER_HOUR)) {
+          && OB_UNLIKELY(ObClockGenerator::getClock() - audit_record.exec_timestamp_.receive_ts_ > US_PER_HOUR)) {
         SERVER_LOG(WARN, "record: query too slow ",
-                   "elapsed", timestamp - audit_record.exec_timestamp_.receive_ts_,
+                   "elapsed", ObClockGenerator::getClock() - audit_record.exec_timestamp_.receive_ts_,
                    "receive_ts", audit_record.exec_timestamp_.receive_ts_);
       }
 
       // query response time
-      observer::ObRSTCollector::get_instance().collect_query_response_time(audit_record.tenant_id_,audit_record.get_elapsed_time());
+      if (enable_query_response_time_stats) {
+        observer::ObRSTCollector::get_instance().collect_query_response_time(audit_record.tenant_id_,audit_record.get_elapsed_time());
+      }
 
       //push into queue
       if (OB_SUCC(ret)) {
@@ -227,13 +267,12 @@ int ObMySQLRequestManager::get_mem_limit(uint64_t tenant_id,
   ObArenaAllocator alloc;
   ObObj obj_val;
   int64_t mem_pct = 0;
-  const char* conf_name = "ob_sql_audit_percentage";
   if (OB_FAIL(ObBasicSessionInfo::get_global_sys_variable(tenant_id,
                                                           alloc,
                                                           ObDataTypeCastParams(),
-                                                          ObString(conf_name),
+                                                          ObString(OB_SV_SQL_AUDIT_PERCENTAGE),
                                                           obj_val))) {
-    LOG_WARN("failed to get global sys variable", K(ret), K(tenant_id), K(conf_name), K(obj_val));
+    LOG_WARN("failed to get global sys variable", K(ret), K(tenant_id), K(OB_SV_SQL_AUDIT_PERCENTAGE), K(obj_val));
   } else if (OB_FAIL(obj_val.get_int(mem_pct))) {
     LOG_WARN("failed to get int", K(ret), K(obj_val));
   } else if (mem_pct < 0 || mem_pct > 100) {
@@ -247,22 +286,35 @@ int ObMySQLRequestManager::get_mem_limit(uint64_t tenant_id,
   return ret;
 }
 
-int ObMySQLRequestManager::mtl_init(ObMySQLRequestManager* &req_mgr)
+int ObMySQLRequestManager::mtl_new(ObMySQLRequestManager* &req_mgr)
 {
   int ret = OB_SUCCESS;
-  req_mgr = OB_NEW(ObMySQLRequestManager, ObModIds::OB_MYSQL_REQUEST_RECORD);
+  req_mgr = OB_NEW(ObMySQLRequestManager, ObMemAttr(MTL_ID(), ObModIds::OB_MYSQL_REQUEST_RECORD));
   if (nullptr == req_mgr) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to alloc memory for ObMySQLRequestManager", K(ret));
+  }
+  return ret;
+}
+
+int ObMySQLRequestManager::mtl_init(ObMySQLRequestManager* &req_mgr)
+{
+  int ret = OB_SUCCESS;
+  if (nullptr == req_mgr) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ObMySQLRequestManager not alloc yet", K(ret));
   } else {
     uint64_t tenant_id = lib::current_resource_owner_id();
     int64_t mem_limit = lib::get_tenant_memory_limit(tenant_id);
-    int64_t queue_size = lib::is_mini_mode() ? MINI_MODE_MAX_QUEUE_SIZE : MAX_QUEUE_SIZE;
+    mem_limit = static_cast<int64_t>(static_cast<double>(mem_limit) * SQL_AUDIT_MEM_FACTOR);
+    bool use_mini_queue = lib::is_mini_mode() || MTL_IS_MINI_MODE() || is_meta_tenant(tenant_id);
+    int64_t queue_size = use_mini_queue ? MINI_MODE_MAX_QUEUE_SIZE : MAX_QUEUE_SIZE;
     if (OB_FAIL(req_mgr->init(tenant_id, mem_limit, queue_size))) {
       LOG_WARN("failed to init request manager", K(ret));
     } else {
       // do nothing
     }
+    LOG_INFO("mtl init finish", K(tenant_id), K(mem_limit), K(queue_size), K(ret));
   }
   if (OB_FAIL(ret) && req_mgr != nullptr) {
     // cleanup

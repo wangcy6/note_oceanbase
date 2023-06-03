@@ -12,6 +12,7 @@
 
 #ifndef OCEANBASE_LOGSERVICE_PALF_OPTIONS_
 #define OCEANBASE_LOGSERVICE_PALF_OPTIONS_
+#include "lib/compress/ob_compress_util.h"
 #include "share/ob_partition_modify.h"
 #include <stdint.h>
 namespace oceanbase
@@ -25,23 +26,23 @@ struct PalfDiskOptions
 {
   PalfDiskOptions() : log_disk_usage_limit_size_(-1),
                       log_disk_utilization_threshold_(-1),
-                      log_disk_utilization_limit_threshold_(-1)
+                      log_disk_utilization_limit_threshold_(-1),
+                      log_disk_throttling_percentage_(-1)
   {}
   ~PalfDiskOptions() { reset(); }
   static constexpr int64_t MB = 1024*1024ll;
   void reset();
   bool is_valid() const;
   bool operator==(const PalfDiskOptions &rhs) const;
+  PalfDiskOptions &operator=(const PalfDiskOptions &other);
   int64_t log_disk_usage_limit_size_;
   int log_disk_utilization_threshold_;
   int log_disk_utilization_limit_threshold_;
-  TO_STRING_KV(
-      "log_disk_size(MB)",
-      log_disk_usage_limit_size_/MB,
-      "log_disk_utilization_threshold(%)",
-      log_disk_utilization_threshold_,
-      "log_disk_utilization_limit_threshold(%)",
-      log_disk_utilization_limit_threshold_);
+  int64_t log_disk_throttling_percentage_;
+  TO_STRING_KV("log_disk_size(MB)", log_disk_usage_limit_size_ / MB,
+               "log_disk_utilization_threshold(%)", log_disk_utilization_threshold_,
+               "log_disk_utilization_limit_threshold(%)", log_disk_utilization_limit_threshold_,
+               "log_disk_throttling_percentage(%)", log_disk_throttling_percentage_);
 };
 
 
@@ -80,12 +81,14 @@ struct PalfAppendOptions
 //
 // RAW_WRITE: 该模式下, PALF不具备为待提交日志分配LSN和TS的能力
 //
-// FLASHBACK: 该模式下, PALF不具备日志写入能力
+// FLASHBACK: 该模式下, PALF不具备日志写入能力,且各副本间不响应拉日志请求
+// PREPARE_FLASHBACK: 该模式下，PALF不具备日志写入能力,各副本间可以互相同步日志
 enum class AccessMode {
   INVALID_ACCESS_MODE = 0,
   APPEND = 1,
   RAW_WRITE = 2,
   FLASHBACK = 3,
+  PREPARE_FLASHBACK = 4,
 };
 
 inline int access_mode_to_string(const AccessMode access_mode, char *str_buf_, const int64_t str_len)
@@ -97,17 +100,22 @@ inline int access_mode_to_string(const AccessMode access_mode, char *str_buf_, c
     strncpy(str_buf_, "RAW_WRITE", str_len);
   } else if (AccessMode::FLASHBACK == access_mode) {
     strncpy(str_buf_, "FLASHBACK", str_len);
+  } else if (AccessMode::PREPARE_FLASHBACK == access_mode) {
+    strncpy(str_buf_, "PREPARE_FLASHBACK", str_len);
   } else {
     ret = OB_INVALID_ARGUMENT;
   }
   return ret;
 }
 
+int get_access_mode(const common::ObString &str, AccessMode &mode);
+
 inline bool is_valid_access_mode(const AccessMode &access_mode)
 {
   return AccessMode::APPEND == access_mode
     || AccessMode::RAW_WRITE == access_mode
-    || AccessMode::FLASHBACK == access_mode;
+    || AccessMode::FLASHBACK == access_mode
+    || AccessMode::PREPARE_FLASHBACK == access_mode;
 }
 
 inline bool can_switch_access_mode_(const AccessMode &src_access_mode, const AccessMode &dst_access_mode)
@@ -119,14 +127,87 @@ inline bool can_switch_access_mode_(const AccessMode &src_access_mode, const Acc
   } else if (src_access_mode == dst_access_mode) {
     // can not switch to itself
     bool_ret = false;
-  } else if (src_access_mode == AccessMode::APPEND && dst_access_mode == AccessMode::FLASHBACK) {
+  } else if (src_access_mode == AccessMode::APPEND &&
+      (dst_access_mode == AccessMode::PREPARE_FLASHBACK || dst_access_mode == AccessMode::FLASHBACK)) {
     // can not switch from APPEND to FLASHBACK
     bool_ret = false;
-  } else if (src_access_mode == AccessMode::FLASHBACK && dst_access_mode == AccessMode::RAW_WRITE) {
+  } else if ((src_access_mode == AccessMode::PREPARE_FLASHBACK || src_access_mode == AccessMode::FLASHBACK) &&
+      dst_access_mode == AccessMode::RAW_WRITE) {
     // can not switch from FLASHBACK to RAW_WRITE
+    bool_ret = false;
+  } else if (src_access_mode == AccessMode::FLASHBACK && dst_access_mode == AccessMode::PREPARE_FLASHBACK) {
     bool_ret = false;
   }
   return bool_ret;
+}
+
+struct PalfTransportCompressOptions
+{
+public:
+  PalfTransportCompressOptions() :
+    enable_transport_compress_(false),
+    transport_compress_func_(ObCompressorType::INVALID_COMPRESSOR)
+  {}
+  ~PalfTransportCompressOptions() { reset(); }
+  void reset();
+  bool is_valid() const;
+  PalfTransportCompressOptions &operator=(const PalfTransportCompressOptions &other);
+public:
+  bool enable_transport_compress_;
+  ObCompressorType transport_compress_func_;
+  TO_STRING_KV(K(enable_transport_compress_),
+               K(transport_compress_func_));
+};
+
+struct PalfOptions
+{
+  PalfOptions() : disk_options_(),
+                  compress_options_(),
+                  rebuild_replica_log_lag_threshold_(0)
+  {}
+  ~PalfOptions() { reset(); }
+  void reset();
+  bool is_valid() const;
+  TO_STRING_KV(K(disk_options_),
+               K(compress_options_),
+               K(rebuild_replica_log_lag_threshold_));
+public:
+  PalfDiskOptions disk_options_;
+  PalfTransportCompressOptions compress_options_;
+  int64_t rebuild_replica_log_lag_threshold_;
+};
+
+struct PalfThrottleOptions
+{
+  public:
+  PalfThrottleOptions() {reset();}
+  ~PalfThrottleOptions() {reset();}
+  void reset();
+  bool is_valid() const;
+  bool operator==(const PalfThrottleOptions &rhs) const;
+  // size of available log disk when writing throttling triggered
+  inline int64_t get_available_size_after_limit() const;
+  inline bool need_throttling() const;
+  static constexpr int64_t MB = 1024*1024ll;
+  TO_STRING_KV("total_disk_space", total_disk_space_ / MB, K_(stopping_writing_percentage),
+               K_(trigger_percentage), "unrecyclable_disk_space(MB)", unrecyclable_disk_space_ / MB);
+public:
+  int64_t total_disk_space_;
+  int64_t stopping_writing_percentage_;
+  int64_t trigger_percentage_;
+  int64_t unrecyclable_disk_space_;
+};
+
+inline int64_t PalfThrottleOptions::get_available_size_after_limit() const
+{
+  return (total_disk_space_ * MAX(0, stopping_writing_percentage_ - trigger_percentage_)) / 100;
+}
+
+inline bool PalfThrottleOptions::need_throttling() const
+{
+  return trigger_percentage_> 0  && total_disk_space_ > 0
+      && (trigger_percentage_ < stopping_writing_percentage_)
+      && unrecyclable_disk_space_ > (total_disk_space_ * trigger_percentage_ / 100);
 }
 
 } // end namespace palf

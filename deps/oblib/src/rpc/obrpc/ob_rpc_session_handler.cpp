@@ -26,8 +26,9 @@ using namespace oceanbase::obrpc;
 ObRpcSessionHandler::ObRpcSessionHandler()
 {
   sessid_ = 0;
-  next_wait_map_.create(MAX_COND_COUNT, ObModIds::OB_HASH_BUCKET_NEXT_WAIT_MAP,
-                        ObModIds::OB_HASH_NODE_NEXT_WAIT_MAP);
+  ObMemAttr attr(OB_SERVER_TENANT_ID, ObModIds::OB_HASH_NODE_NEXT_WAIT_MAP);
+  SET_USE_500(attr);
+  next_wait_map_.create(MAX_COND_COUNT, attr, attr);
   max_waiting_thread_count_ = MAX_WAIT_THREAD_COUNT;
   waiting_thread_count_ = 0;
 
@@ -47,23 +48,23 @@ bool ObRpcSessionHandler::wakeup_next_thread(ObRequest &req)
   int64_t sessid = OB_INVALID_ID;
   if (OB_SUCCESS != (get_session_id(req, sessid))) {
     bret = false;
-    LOG_WARN("Get session id failed", K(bret));
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "Get session id failed", K(bret));
   } else {
     WaitObject wait_object;
     int hash_ret = next_wait_map_.get_refactored(sessid, wait_object);
     if (OB_SUCCESS != hash_ret) {
       // no thread wait for this packet;
       bret = false;
-      LOG_WARN("session not found", K(sessid));
+      LOG_WARN_RET(hash_ret, "session not found", K(sessid));
     } else {
       get_next_cond_(wait_object.thid_).lock();
       hash_ret = next_wait_map_.get_refactored(sessid, wait_object);
       if (OB_SUCCESS != hash_ret) {
         // no thread wait for this packet;
-        LOG_WARN("wakeup session but no thread wait", K(req));
+        LOG_WARN_RET(hash_ret, "wakeup session but no thread wait", K(req));
         bret = false;
       } else if (NULL != wait_object.req_) {
-        LOG_ERROR("previous stream request hasn't processed",
+        LOG_ERROR_RET(OB_ERR_UNEXPECTED, "previous stream request hasn't processed",
                   "request", *wait_object.req_);
         bret = false;
       } else {
@@ -72,7 +73,7 @@ bool ObRpcSessionHandler::wakeup_next_thread(ObRequest &req)
         int overwrite = 1;
         hash_ret = next_wait_map_.set_refactored(sessid, wait_object, overwrite);
         if (OB_SUCCESS != hash_ret) {
-          LOG_WARN("rewrite wait object fail", K(*wait_object.req_), K(hash_ret));
+          LOG_WARN_RET(hash_ret, "rewrite wait object fail", K(*wait_object.req_), K(hash_ret));
         }
         //Wake up the corresponding worker thread to start work
         get_next_cond_(wait_object.thid_).signal();
@@ -197,7 +198,7 @@ int ObRpcSessionHandler::wait_for_next_request(int64_t sessid,
         LOG_WARN("session wait thread id doesn't equal each other",
                  K(ret), K(sessid), K(thid), K(wait_object.thid_), K(ret));
       } else if (NULL == wait_object.req_) {
-        int32_t timeout_ms = static_cast<int32_t>(timeout / 1000);
+        int64_t timeout_ms = timeout / 1000;
         if (timeout_ms < DEFAULT_WAIT_TIMEOUT_MS) {
           timeout_ms = DEFAULT_WAIT_TIMEOUT_MS;
         } else {

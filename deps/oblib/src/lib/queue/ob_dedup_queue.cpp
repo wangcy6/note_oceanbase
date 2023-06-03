@@ -45,6 +45,7 @@ ObDedupQueue::ObDedupQueue() : is_inited_(false),
                                work_thread_num_(DEFAULT_THREAD_NUM),
                                thread_dead_threshold_(DEFALT_THREAD_DEAD_THRESHOLD),
                                hash_allocator_(allocator_),
+                               bucket_allocator_(&allocator_),
                                gc_queue_head_(NULL),
                                gc_queue_tail_(NULL),
                                thread_name_(nullptr)
@@ -56,7 +57,7 @@ ObDedupQueue::~ObDedupQueue()
   destroy();
 }
 
-int ObDedupQueue::init(int32_t thread_num /*= DEFAULT_THREAD_NUM*/,
+int ObDedupQueue::init(const int64_t thread_num /*= DEFAULT_THREAD_NUM*/,
                        const char* thread_name /*= NULL*/,
                        const int64_t queue_size /*= TASK_QUEUE_SIZE*/,
                        const int64_t task_map_size /*= TASK_MAP_SIZE*/,
@@ -89,7 +90,7 @@ int ObDedupQueue::init(int32_t thread_num /*= DEFAULT_THREAD_NUM*/,
       COMMON_LOG(WARN, "allocator init fail", K(page_size), K(label), K(tenant_id),
                 K(total_mem_limit), K(ret));
     } else if (OB_SUCCESS != (ret = task_map_.create(task_map_size, &hash_allocator_,
-                                                      ObModIds::OB_HASH_BUCKET_TASK_MAP))) {
+                                                      &bucket_allocator_))) {
       COMMON_LOG(WARN, "task_map create fail", K(ret));
     } else if (OB_SUCCESS != (ret = task_queue_.init(queue_size, &allocator_))) {
       COMMON_LOG(WARN, "task_queue init fail", K(ret));
@@ -192,14 +193,14 @@ IObDedupTask *ObDedupQueue::copy_task_(const IObDedupTask &task)
 {
   IObDedupTask *ret = NULL;
   if (IS_NOT_INIT) {
-    COMMON_LOG(WARN, "ObDedupQueue is not inited");
+    COMMON_LOG_RET(WARN, OB_NOT_INIT, "ObDedupQueue is not inited");
   } else {
     int64_t deep_copy_size = task.get_deep_copy_size();
     char *memory = NULL;
     if (NULL == (memory = (char *)allocator_.alloc(deep_copy_size))) {
-      COMMON_LOG(WARN, "alloc memory fail", K(deep_copy_size), K(task.get_type()));
+      COMMON_LOG_RET(WARN, OB_ALLOCATE_MEMORY_FAILED, "alloc memory fail", K(deep_copy_size), K(task.get_type()));
     } else if (NULL == (ret = task.deep_copy(memory, deep_copy_size))) {
-      COMMON_LOG(WARN, "deep copy task object fail", K(deep_copy_size), KP(memory));
+      COMMON_LOG_RET(WARN, OB_ERROR, "deep copy task object fail", K(deep_copy_size), KP(memory));
     } else {
       COMMON_LOG(DEBUG, "deep copy task succ", K(ret), KP(memory), K(deep_copy_size));
       ret->set_memory_ptr(memory);
@@ -217,9 +218,9 @@ IObDedupTask *ObDedupQueue::copy_task_(const IObDedupTask &task)
 void ObDedupQueue::destroy_task_(IObDedupTask *task)
 {
   if (IS_NOT_INIT) {
-    COMMON_LOG(WARN, "ObDedupQueue is not inited");
+    COMMON_LOG_RET(WARN, OB_NOT_INIT, "ObDedupQueue is not inited");
   } else if (OB_ISNULL(task)) {
-    COMMON_LOG(WARN, "invalid argument");
+    COMMON_LOG_RET(WARN, OB_INVALID_ARGUMENT, "invalid argument");
   } else {
     char *memory = task->get_memory_ptr();
     task->~IObDedupTask();
@@ -341,7 +342,7 @@ bool ObDedupQueue::gc_()
     if (OB_SUCCESS != hash_ret) {
       const int64_t type = task_list[i]->get_type();
       task_list[i]->unlock();
-      COMMON_LOG(WARN, "unexpected erase from task_map fail", K(hash_ret), K(type), K(task_list_size));
+      COMMON_LOG_RET(WARN, OB_ERR_UNEXPECTED, "unexpected erase from task_map fail", K(hash_ret), K(type), K(task_list_size));
     } else {
       task_list[i]->unlock();
       destroy_task_(task_list[i]);
@@ -365,7 +366,7 @@ void ObDedupQueue::run1()
     IObDedupTask *task2process = NULL;
     if (thread_pos < work_thread_num_) {
       if (OB_SUCCESS != (tmp_ret = task_queue_.pop(task2process)) && OB_UNLIKELY(tmp_ret != OB_ENTRY_NOT_EXIST)) {
-        COMMON_LOG(WARN, "task_queue_.pop error", K(tmp_ret), K(task2process));
+        COMMON_LOG_RET(WARN, tmp_ret, "task_queue_.pop error", K(tmp_ret), K(task2process));
       } else if (NULL != task2process) {
         thread_meta.on_process_start(task2process);
         task2process->process();
@@ -398,7 +399,7 @@ void ObDedupQueue::run1()
         if (0 == task_queue_.get_total()) {
           if (OB_SUCCESS != (tmp_ret = task_queue_sync_.wait(QUEUE_WAIT_TIME_MS))) {
             if (OB_TIMEOUT != tmp_ret) {
-              COMMON_LOG(WARN, "Fail to wait task queue sync, ", K(tmp_ret));
+              COMMON_LOG_RET(WARN, tmp_ret, "Fail to wait task queue sync, ", K(tmp_ret));
             }
           }
         }
@@ -408,7 +409,7 @@ void ObDedupQueue::run1()
       if (thread_pos >= work_thread_num_) {
         if (OB_SUCCESS != (tmp_ret = work_thread_sync_.wait(MAX_QUEUE_WAIT_TIME_MS))) {
           if (OB_TIMEOUT != tmp_ret) {
-            COMMON_LOG(WARN, "Fail to wait work thread sync, ", K(tmp_ret));
+            COMMON_LOG_RET(WARN, tmp_ret, "Fail to wait work thread sync, ", K(tmp_ret));
           }
         }
       }

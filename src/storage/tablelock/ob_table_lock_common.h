@@ -125,9 +125,9 @@ enum ObTableLockOpType : char
 {
   UNKNOWN_TYPE = 0,
   IN_TRANS_DML_LOCK = 1,  // will be unlock if we do callback
-  OUT_TRANS_LOCK, // will be unlock use OUT_TRANS_UNLOCK
-  OUT_TRANS_UNLOCK,
-  IN_TRANS_LOCK_TABLE_LOCK,
+  OUT_TRANS_LOCK = 2, // will be unlock use OUT_TRANS_UNLOCK
+  OUT_TRANS_UNLOCK = 3,
+  IN_TRANS_COMMON_LOCK = 4,
   MAX_VALID_LOCK_OP_TYPE,
 };
 
@@ -145,8 +145,8 @@ int lock_op_type_to_string(const ObTableLockOpType op_type,
     strncpy(str ,"OUT_TRANS_LOCK", str_len);
   } else if (OUT_TRANS_UNLOCK == op_type) {
     strncpy(str ,"OUT_TRANS_UNLOCK", str_len);
-  } else if (IN_TRANS_LOCK_TABLE_LOCK == op_type) {
-    strncpy(str ,"IN_TRANS_LOCK_TABLE_LOCK", str_len);
+  } else if (IN_TRANS_COMMON_LOCK == op_type) {
+    strncpy(str ,"IN_TRANS_COMMON_LOCK", str_len);
   } else {
     ret = OB_INVALID_ARGUMENT;
   }
@@ -193,9 +193,9 @@ bool is_out_trans_op_type(const ObTableLockOpType type)
 }
 
 static inline
-bool is_in_trans_lock_table_op_type(const ObTableLockOpType type)
+bool is_in_trans_common_lock_op_type(const ObTableLockOpType type)
 {
-  return (IN_TRANS_LOCK_TABLE_LOCK == type);
+  return (IN_TRANS_COMMON_LOCK == type);
 }
 
 static inline
@@ -215,8 +215,47 @@ enum class ObLockOBJType : char
   OBJ_TYPE_INVALID = 0,
   OBJ_TYPE_TABLE = 1, // table
   OBJ_TYPE_TABLET = 2, // tablet
+  OBJ_TYPE_COMMON_OBJ = 3, // common_obj
+  OBJ_TYPE_LS = 4,     // for ls
+  OBJ_TYPE_TENANT = 5, // for tenant
+  OBJ_TYPE_EXTERNAL_TABLE_REFRESH = 6, // for external table
   OBJ_TYPE_MAX
 };
+
+static inline
+int lock_obj_type_to_string(const ObLockOBJType obj_type,
+                            char *str,
+                            const int64_t str_len)
+{
+  int ret = OB_SUCCESS;
+  switch (obj_type) {
+  case ObLockOBJType::OBJ_TYPE_TABLE: {
+    strncpy(str, "TABLE", str_len);
+    break;
+  }
+  case ObLockOBJType::OBJ_TYPE_TABLET: {
+    strncpy(str, "TABLET", str_len);
+    break;
+  }
+  case ObLockOBJType::OBJ_TYPE_COMMON_OBJ: {
+    strncpy(str, "COMMON_OBJ", str_len);
+    break;
+  }
+  case ObLockOBJType::OBJ_TYPE_LS: {
+    strncpy(str, "LS", str_len);
+    break;
+  }
+  case ObLockOBJType::OBJ_TYPE_TENANT: {
+    strncpy(str, "TENANT", str_len);
+    break;
+  }
+  default: {
+    strncpy(str, "UNKNOWN", str_len);
+    break;
+  }
+  }
+  return ret;
+}
 
 static inline
 bool is_lock_obj_type_valid(const ObLockOBJType &type)
@@ -234,6 +273,7 @@ public:
     hash_value_(0) {}
   uint64_t hash() const
   { return hash_value_; }
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   uint64_t inner_hash() const
   {
     uint64_t hash_val = 0;
@@ -280,9 +320,11 @@ public:
   uint64_t obj_id_;
   uint64_t hash_value_;
 };
+int get_lock_id(const ObLockOBJType obj_type,
+                const uint64_t obj_id,
+                ObLockID &lock_id);
 int get_lock_id(const uint64_t table_id,
                 ObLockID &lock_id);
-
 int get_lock_id(const common::ObTabletID &tablet,
                 ObLockID &lock_id);
 typedef int64_t ObTableLockOwnerID;
@@ -359,7 +401,7 @@ public:
   {
     return (is_out_trans_op_type(op_type_) ||
             is_need_record_lock_mode_() ||
-            is_in_trans_lock_table_op_type(op_type_));
+            is_in_trans_common_lock_op_type(op_type_));
   }
   bool is_dml_lock_op() const
   {
@@ -368,7 +410,7 @@ public:
   bool need_wakeup_waiter() const
   {
     return (is_out_trans_op_type(op_type_) ||
-            is_in_trans_lock_table_op_type(op_type_));
+            is_in_trans_common_lock_op_type(op_type_));
   }
   bool operator ==(const ObTableLockOp &other) const;
 private:
@@ -430,7 +472,7 @@ typedef common::ObSimpleIterator<ObTableLockOp, ObSimpleIteratorModIds::OB_OBJ_L
 
 // the threshold of timeout interval which will enable the deadlock avoid.
 static const int64_t MIN_DEADLOCK_AVOID_TIMEOUT_US = 60 * 1000 * 1000; // 1 min
-bool is_deadlock_avoid_enabled(const int64_t expire_time);
+bool is_deadlock_avoid_enabled(const bool is_from_sql, const int64_t expire_time);
 
 } // tablelock
 } // transaction

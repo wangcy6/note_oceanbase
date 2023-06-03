@@ -41,23 +41,23 @@ namespace common
 
 TEST(ObDiagnoseSessionInfo, guard)
 {
-  EVENT_INC(ELECTION_CHANGE_LEAER_COUNT);
-  EXPECT_EQ(1, ObDITls<ObSessionDIBuffer>::get_instance()->get_tenant_id());
-  EXPECT_EQ(1, TENANT_EVENT_GET(ObStatEventIds::ELECTION_CHANGE_LEAER_COUNT));
+  EVENT_INC(SYS_TIME_MODEL_ENCRYPT_CPU);
+  EXPECT_EQ(1, GET_TSI(ObSessionDIBuffer)->get_tenant_id());
+  EXPECT_EQ(1, TENANT_EVENT_GET(ObStatEventIds::SYS_TIME_MODEL_ENCRYPT_CPU));
   {
     ObTenantStatEstGuard tenant_guard(2);
-    EVENT_INC(ELECTION_CHANGE_LEAER_COUNT);
-    EXPECT_EQ(2, ObDITls<ObSessionDIBuffer>::get_instance()->get_tenant_id());
-    EXPECT_EQ(1, TENANT_EVENT_GET(ObStatEventIds::ELECTION_CHANGE_LEAER_COUNT));
+    EVENT_INC(SYS_TIME_MODEL_ENCRYPT_CPU);
+    EXPECT_EQ(2, GET_TSI(ObSessionDIBuffer)->get_tenant_id());
+    EXPECT_EQ(1, TENANT_EVENT_GET(ObStatEventIds::SYS_TIME_MODEL_ENCRYPT_CPU));
     {
       ObTenantStatEstGuard tenant_guard(3);
-      EVENT_INC(ELECTION_CHANGE_LEAER_COUNT);
-      EXPECT_EQ(3, ObDITls<ObSessionDIBuffer>::get_instance()->get_tenant_id());
-      EXPECT_EQ(1, TENANT_EVENT_GET(ObStatEventIds::ELECTION_CHANGE_LEAER_COUNT));
+      EVENT_INC(SYS_TIME_MODEL_ENCRYPT_CPU);
+      EXPECT_EQ(3, GET_TSI(ObSessionDIBuffer)->get_tenant_id());
+      EXPECT_EQ(1, TENANT_EVENT_GET(ObStatEventIds::SYS_TIME_MODEL_ENCRYPT_CPU));
     }
-    EXPECT_EQ(2, ObDITls<ObSessionDIBuffer>::get_instance()->get_tenant_id());
+    EXPECT_EQ(2, GET_TSI(ObSessionDIBuffer)->get_tenant_id());
   }
-  EXPECT_EQ(1, ObDITls<ObSessionDIBuffer>::get_instance()->get_tenant_id());
+  EXPECT_EQ(1, GET_TSI(ObSessionDIBuffer)->get_tenant_id());
 }
 
 TEST(ObDISessionCache, multithread)
@@ -201,44 +201,6 @@ TEST(ObDiagnoseSessionInfo, normal)
       printf("scan sysstat time: %ld us\n", (end_time - begin_time));
     }
   }
-}
-
-class AtomicWaitEventTestRun : public cotesting::DefaultRunnable
-{
-public:
-  AtomicWaitEventTestRun() {}
-  ~AtomicWaitEventTestRun() {}
-  void run1() override
-  {
-    ObSessionStatEstGuard session_guard(1, 1);
-    lock_.wrlock();
-    usleep(10000); // 10ms
-    lock_.unlock();
-  }
-
-private:
-  SpinRWLock lock_;
-};
-
-TEST(ObDiagnoseSessionInfo, atomic_wait_event)
-{
-  ObSessionStatEstGuard session_guard(1, 1);
-  AtomicWaitEventTestRun test_run;
-  test_run.set_thread_count(2);
-  test_run.start();
-  test_run.wait();
-  ObDiagnoseSessionInfo *info = ObDiagnoseSessionInfo::get_local_diagnose_info();
-
-  ASSERT_TRUE(NULL != info);
-  ASSERT_EQ(1, info->get_tenant_id());
-
-  ObWaitEventStat *event_stat = info->get_event_stats().get(ObWaitEventIds::LATCH_WAIT_QUEUE_LOCK_WAIT);
-  ASSERT_TRUE(NULL != event_stat);
-  EXPECT_TRUE(0 < event_stat->total_waits_);
-
-  event_stat = info->get_event_stats().get(ObWaitEventIds::DEFAULT_SPIN_RWLOCK_WAIT);
-  ASSERT_TRUE(NULL != event_stat);
-  EXPECT_TRUE(0 < event_stat->total_waits_);
 }
 
 }

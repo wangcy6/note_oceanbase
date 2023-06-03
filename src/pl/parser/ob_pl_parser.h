@@ -38,7 +38,8 @@ public:
     : allocator_(allocator),
       connection_collation_(conn_collation)
   {}
-
+  int fast_parse(const ObString &stmt_block,
+                 ParseResult &parse_result);
   int parse(const common::ObString &stmt_block,
             const common::ObString &orig_stmt_block,
             ParseResult &parse_result,
@@ -60,8 +61,7 @@ private:
                       bool is_for_trigger,
                       bool is_dynamic,
                       bool is_inner_parse,
-                      bool &is_include_old_new_in_trigger,
-                      bool mysql_compatible_comment);
+                      bool &is_include_old_new_in_trigger);
   int parse_stmt_block(ObParseCtx &parse_ctx,
                        ObStmtNodeTree *&multi_stmt);
   int reconstruct_trigger_package(ObStmtNodeTree *&package_stmt,

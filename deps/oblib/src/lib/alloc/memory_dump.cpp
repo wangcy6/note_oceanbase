@@ -14,6 +14,7 @@
 
 #include "lib/alloc/memory_dump.h"
 #include <setjmp.h>
+#include "lib/alloc/ob_free_log_printer.h"
 #include "lib/signal/ob_signal_struct.h"
 #include "lib/rc/context.h"
 #include "lib/utility/utility.h"
@@ -21,6 +22,7 @@
 #include "lib/thread/thread_mgr.h"
 #include "lib/utility/ob_print_utils.h"
 #include "rpc/obrpc/ob_rpc_packet.h"
+#include "common/ob_clock_generator.h"
 
 namespace oceanbase
 {
@@ -28,11 +30,18 @@ using namespace lib;
 
 namespace common
 {
-void __attribute__((weak)) get_tenant_ids(uint64_t *ids, int cap, int &cnt)
+
+void get_tenant_ids(uint64_t *ids, int cap, int &cnt)
 {
+  auto *instance = ObMallocAllocator::get_instance();
   cnt = 0;
-  if (cap > 0) {
-    ids[cnt++] = OB_SERVER_TENANT_ID;
+  for (uint64_t tenant_id = 1; tenant_id <= instance->get_max_used_tenant_id() && cnt < cap; ++tenant_id) {
+    if (nullptr != instance->get_tenant_ctx_allocator(tenant_id,
+                                                      ObCtxIds::DEFAULT_CTX_ID) ||
+        nullptr != instance->get_tenant_ctx_allocator_unrecycled(tenant_id,
+                                                                 ObCtxIds::DEFAULT_CTX_ID)) {
+      ids[cnt++] = tenant_id;
+    }
   }
 }
 
@@ -60,7 +69,7 @@ void do_with_segv_catch(Function &&func, bool &has_segv, decltype(func()) &ret)
   } else if (1 == js) {
     has_segv = true;
   } else {
-    LOG_ERROR("unexpected error!!!", K(js));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "unexpected error!!!", K(js));
     ob_abort();
   }
   get_signal_handler() = handler_bak;
@@ -68,7 +77,8 @@ void do_with_segv_catch(Function &&func, bool &has_segv, decltype(func()) &ret)
 
 
 ObMemoryDump::ObMemoryDump()
-  : avaliable_task_set_((1 << TASK_NUM) - 1),
+  : task_mutex_(ObLatchIds::ALLOC_MEM_DUMP_TASK_LOCK),
+    avaliable_task_set_((1 << TASK_NUM) - 1),
     print_buf_(nullptr),
     dump_context_(nullptr),
     iter_lock_(),
@@ -91,7 +101,7 @@ ObMemoryDump &ObMemoryDump::get_instance()
 {
   static ObMemoryDump the_one;
   if (OB_UNLIKELY(!the_one.is_inited()) && REACH_TIME_INTERVAL(1 * 1000 * 1000)) {
-    LOG_WARN("memory dump not init");
+    LOG_WARN_RET(OB_NOT_INIT, "memory dump not init");
   }
   return the_one;
 }
@@ -127,6 +137,13 @@ int ObMemoryDump::init()
         w_stat_ = new (r_stat_ + 1) Stat();
         dump_context_ = context;
         is_inited_ = true;
+        if (OB_FAIL(r_stat_->malloc_sample_map_.create(1000, "MallocInfoMap",
+                                                       "MallocInfoMap"))) {
+          LOG_WARN("create memory info map for reading failed", K(ret));
+        } else if (OB_FAIL(w_stat_->malloc_sample_map_.create(1000, "MallocInfoMap",
+                                                              "MallocInfoMap"))) {
+          LOG_WARN("create memory info map for writing failed", K(ret));
+        }
       }
       if (OB_SUCC(ret)) {
         if (OB_FAIL(TG_SET_RUNNABLE_AND_START(TGDefIDs::MEMORY_DUMP, *this))) {
@@ -174,18 +191,29 @@ int ObMemoryDump::push(void *task)
   return ret;
 }
 
+int ObMemoryDump::load_malloc_sample_map(ObMallocSampleMap &malloc_sample_map)
+{
+  int ret = OB_SUCCESS;
+  ObLatchRGuard guard(iter_lock_, ObLatchIds::MEM_DUMP_ITER_LOCK);
+  auto &map = r_stat_->malloc_sample_map_;
+  for (auto it = map.begin(); OB_SUCC(ret) && it != map.end(); ++it) {
+    ret = malloc_sample_map.set_refactored(it->first, it->second);
+  }
+  return ret;
+}
+
 void ObMemoryDump::run1()
 {
   SANITY_DISABLE_CHECK_RANGE(); // prevent sanity_check_range
   int ret = OB_SUCCESS;
   lib::set_thread_name("MemoryDump");
-  static int64_t last_dump_ts = ObTimeUtility::current_time();
+  static int64_t last_dump_ts = common::ObClockGenerator::getClock();
   while (!has_set_stop()) {
     void *task = NULL;
     if (OB_SUCC(queue_.pop(task, 100 * 1000))) {
       handle(task);
     } else if (OB_ENTRY_NOT_EXIST == ret) {
-      int64_t current_ts = ObTimeUtility::current_time();
+      int64_t current_ts = common::ObClockGenerator::getClock();
       if (current_ts - last_dump_ts > STAT_LABEL_INTERVAL) {
         auto *task = alloc_task();
         if (OB_ISNULL(task)) {
@@ -198,6 +226,8 @@ void ObMemoryDump::run1()
           }
         }
         last_dump_ts = current_ts;
+      } else {
+        ob_usleep(current_ts - last_dump_ts);
       }
     }
   }
@@ -332,7 +362,7 @@ int print_object_meta(AChunk *chunk, ABlock *block, AObject *object, char *buf,
   int len = end ? (char*)end - (char*)label : sizeof(object->label_);
   ret = databuff_printf(buf, buf_len, pos,
                         "        object: %p, offset: %04d, in_use: %d, is_large: %d, nobjs: %04d," \
-                        " label: \'%.*s\', alloc_bytes: %d\n",
+                        " label: \'%.*s\', alloc_bytes: %u\n",
                         object, offset, object->in_use_, object->is_large_, object->nobjs_,
                         len, (char*)label, object->alloc_bytes_);
   return ret;
@@ -352,18 +382,15 @@ int label_stat(AChunk *chunk, ABlock *block, AObject *object,
     } else {
       hold = align_up2(chunk->alloc_bytes_ + ACHUNK_HEADER_SIZE, get_page_size());
     }
-    char label[AOBJECT_LABEL_SIZE + 1];
-    STRNCPY(label, object->label_, sizeof(label));
-    label[sizeof(label) - 1] = '\0';
-    int len = strlen(label);
-    ObString str(len, label);
     LabelItem *litem = nullptr;
-    LabelInfoItem *linfoitem = lmap.get(str);
+    auto key = std::make_pair(*(uint64_t*)object->label_, *((uint64_t*)object->label_ + 1));
+    LabelInfoItem *linfoitem = lmap.get(key);
+    int64_t bt_size = object->on_malloc_sample_ ? AOBJECT_BACKTRACE_SIZE : 0;
     if (NULL != linfoitem) {
       // exist
       litem = linfoitem->litem_;
       litem->hold_ += hold;
-      litem->used_ += object->alloc_bytes_;
+      litem->used_ += (object->alloc_bytes_ - bt_size);
       litem->count_++;
       if (chunk != linfoitem->chunk_) {
         litem->chunk_cnt_ += 1;
@@ -379,16 +406,39 @@ int label_stat(AChunk *chunk, ABlock *block, AObject *object,
         LOG_WARN("label cnt too large", K(ret), K(item_cap), K(item_used));
       } else {
         litem = &items[item_used++];
-        MEMCPY(litem->str_, label, len);
-        litem->str_[len] = '\0';
-        litem->str_len_ = len;
+        STRNCPY(litem->str_, object->label_, sizeof(litem->str_));
+        litem->str_[sizeof(litem->str_) - 1] = '\0';
+        litem->str_len_ = strlen(litem->str_);
         litem->hold_ = hold;
-        litem->used_ = object->alloc_bytes_;
+        litem->used_ = (object->alloc_bytes_ - bt_size);
         litem->count_ = 1;
         litem->block_cnt_ = 1;
         litem->chunk_cnt_ = 1;
-        ret = lmap.set_refactored(ObString(litem->str_len_, litem->str_), LabelInfoItem(litem, chunk, block));
+        ret = lmap.set_refactored(key, LabelInfoItem(litem, chunk, block));
       }
+    }
+  }
+  return ret;
+}
+
+int malloc_sample_stat(uint64_t tenant_id, uint64_t ctx_id,
+                       AObject *object, ObMallocSampleMap &malloc_sample_map)
+{
+  int ret = OB_SUCCESS;
+  if (object->in_use_ && object->on_malloc_sample_) {
+    int64_t offset = object->alloc_bytes_ - AOBJECT_BACKTRACE_SIZE;
+    ObMallocSampleKey key;
+    key.tenant_id_ = tenant_id;
+    key.ctx_id_ = ctx_id;
+    MEMCPY((char*)key.bt_, &object->data_[offset], AOBJECT_BACKTRACE_SIZE);
+    STRNCPY(key.label_, object->label_, sizeof(key.label_));
+    key.label_[sizeof(key.label_) - 1] = '\0';
+    ObMallocSampleValue *item = malloc_sample_map.get(key);
+    if (NULL != item) {
+      item->alloc_count_ += 1;
+      item->alloc_bytes_ += offset;
+    } else {
+      ret = malloc_sample_map.set_refactored(key, ObMallocSampleValue(1, offset));
     }
   }
   return ret;
@@ -409,6 +459,7 @@ void ObMemoryDump::handle(void *task)
     get_tenant_ids(tenant_ids_, MAX_TENANT_CNT, tenant_cnt);
     std::sort(tenant_ids_, tenant_ids_ + tenant_cnt);
     w_stat_->tcr_cnt_ = 0;
+    w_stat_->malloc_sample_map_.clear();
     int64_t item_used = 0;
     int64_t log_pos = 0;
     IGNORE_RETURN databuff_printf(log_buf_, LOG_BUF_LEN, log_pos,
@@ -421,8 +472,12 @@ void ObMemoryDump::handle(void *task)
     for (int tenant_idx = 0; tenant_idx < tenant_cnt; tenant_idx++) {
       uint64_t tenant_id = tenant_ids_[tenant_idx];
       for (int ctx_id = 0; ctx_id < ObCtxIds::MAX_CTX_ID; ctx_id++) {
-        auto *ta =
+        auto ta =
           ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(tenant_id, ctx_id);
+        if (nullptr == ta) {
+          ta = ObMallocAllocator::get_instance()->get_tenant_ctx_allocator_unrecycled(tenant_id,
+                                                                                      ctx_id);
+        }
         if (nullptr == ta) {
           continue;
         }
@@ -446,8 +501,9 @@ void ObMemoryDump::handle(void *task)
                     UNUSEDx(chunk, block);
                     return OB_SUCCESS;
                   },
-                  [tenant_id, &lmap, w_stat, &item_used]
+                  [tenant_id, ctx_id, &lmap, w_stat, &item_used]
                   (AChunk *chunk, ABlock *block, AObject *object) {
+                    int ret = OB_SUCCESS;
                     if (object->in_use_) {
                       bool expect = AOBJECT_TAIL_MAGIC_CODE ==
                         reinterpret_cast<uint64_t&>(object->data_[object->alloc_bytes_]);
@@ -460,9 +516,14 @@ void ObMemoryDump::handle(void *task)
                                   K(length), K(label));
                       }
                     }
-                    return label_stat(chunk, block, object, lmap,
+                    ret = label_stat(chunk, block, object, lmap,
                                       w_stat->up2date_items_, ARRAYSIZEOF(w_stat->up2date_items_),
                                       item_used);
+                    if (OB_SUCC(ret)) {
+                      ret = malloc_sample_stat(tenant_id, ctx_id,
+                                               object, w_stat->malloc_sample_map_);
+                    }
+                    return ret;
                   });
               if (OB_FAIL(ret)) {
                 LOG_WARN("parse_chunk_meta failed", K(ret), KP(chunk));
@@ -487,7 +548,7 @@ void ObMemoryDump::handle(void *task)
         if (segv_cnt > 128) {
           LOG_WARN("too many sigsegv, maybe there is a low-level bug", K(segv_cnt));
           segv_cnt_over = true;
-        } 
+        }
         if (OB_SUCC(ret) && (chunk_cnt != 0 || segv_cnt != 0)) {
           IGNORE_RETURN databuff_printf(log_buf_, LOG_BUF_LEN, log_pos,
                                         "%-15lu%-15d%-15d%-15ld%-15d\n",
@@ -516,6 +577,7 @@ void ObMemoryDump::handle(void *task)
       ObLatchWGuard guard(iter_lock_, common::ObLatchIds::MEM_DUMP_ITER_LOCK);
       std::swap(r_stat_, w_stat_);
     }
+    ObFreeLogPrinter::get_instance().disable_free_log();
   } else {
     int fd = -1;
     if (-1 == (fd = ::open(LOG_FILE,
@@ -552,11 +614,31 @@ void ObMemoryDump::handle(void *task)
         // chunk
         int cnt = 0;
         if (m_task->dump_all_) {
-          ret = ObMallocAllocator::get_instance()->get_chunks(chunks_, MAX_CHUNK_CNT, cnt);
+          int tenant_cnt = 0;
+          get_tenant_ids(tenant_ids_, MAX_TENANT_CNT, tenant_cnt);
+          std::sort(tenant_ids_, tenant_ids_ + tenant_cnt);
+          for (int tenant_idx = 0; tenant_idx < tenant_cnt; tenant_idx++) {
+            uint64_t tenant_id = tenant_ids_[tenant_idx];
+            for (int ctx_id = 0; ctx_id < ObCtxIds::MAX_CTX_ID; ctx_id++) {
+              auto ta =
+                ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(tenant_id, ctx_id);
+              if (nullptr == ta) {
+                ta = ObMallocAllocator::get_instance()->get_tenant_ctx_allocator_unrecycled(tenant_id,
+                                                                                            ctx_id);
+              }
+              if (nullptr != ta) {
+                ta->get_chunks(chunks_, MAX_CHUNK_CNT, cnt);
+              }
+            }
+          }
         } else if (m_task->dump_tenant_ctx_) {
-          auto *ta = ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(m_task->tenant_id_,
-                                                                                 m_task->ctx_id_);
-          if (ta != nullptr) {
+          auto ta = ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(m_task->tenant_id_,
+                                                                                m_task->ctx_id_);
+          if (nullptr == ta) {
+            ta = ObMallocAllocator::get_instance()->get_tenant_ctx_allocator_unrecycled(m_task->tenant_id_,
+                                                                                        m_task->ctx_id_);
+          }
+          if (nullptr != ta) {
             ta->get_chunks(chunks_, MAX_CHUNK_CNT, cnt);
           }
         } else {

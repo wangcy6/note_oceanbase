@@ -20,11 +20,11 @@ using namespace common;
 namespace transaction
 {
 // for participant
-// TODO, only persist redo and commit info
 // currently, this interface is equal to handle_2pc_prepare_request
 int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_request()
 {
   int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
   const ObTxState state = get_downstream_state();
 
   if (!is_sub2pc()) {
@@ -32,13 +32,9 @@ int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_request()
     TRANS_LOG(WARN, "unexpected operation", K(ret), K(*this));
   } else {
     switch (state) {
-      // TODO, new state may be required (coord state and part state)
       case ObTxState::INIT: {
         if (OB_FAIL(handle_2pc_prepare_redo_request_impl_())) {
           TRANS_LOG(WARN, "handle 2pc prepare request failed", K(ret), K(*this));
-        } else {
-          collected_.reset();
-          set_upstream_state(ObTxState::REDO_COMPLETE);
         }
         break;
       }
@@ -46,23 +42,28 @@ int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_request()
         if (ObTxState::REDO_COMPLETE == get_upstream_state() && all_downstream_collected_()) {
           // no need retransmit downstream msg
         } else {
-          if (OB_FAIL(retransmit_downstream_msg_())) {
-            TRANS_LOG(WARN, "retransmit downstream msg failed", KR(ret));
+          if (OB_TMP_FAIL(retransmit_downstream_msg_())) {
+            TRANS_LOG(WARN, "retransmit downstream msg failed", KR(tmp_ret));
           }
         }
-        // rewrite ret code
-        if (OB_FAIL(retransmit_upstream_msg_(ObTxState::REDO_COMPLETE))) {
-          TRANS_LOG(WARN, "retransmit upstream msg failed", KR(ret));
+        // if enter into prepare version and not finish, do not response
+        if (ObTxState::PREPARE == get_upstream_state()) {
+          TRANS_LOG(INFO, "prepare version is not finished", KR(ret));
+        } else {
+          if (OB_TMP_FAIL(retransmit_upstream_msg_(ObTxState::REDO_COMPLETE))) {
+            TRANS_LOG(WARN, "retransmit upstream msg failed", KR(tmp_ret));
+          }
         }
         break;
       }
       case ObTxState::PREPARE: {
-        if (OB_FAIL(retransmit_downstream_msg_())) {
-          TRANS_LOG(WARN, "retransmit downstream msg failed", KR(ret));
+        if (OB_TMP_FAIL(retransmit_downstream_msg_())) {
+          TRANS_LOG(WARN, "retransmit downstream msg failed", KR(tmp_ret));
         }
-        // rewrite ret code
-        if (OB_FAIL(retransmit_upstream_msg_(ObTxState::REDO_COMPLETE))) {
-          TRANS_LOG(WARN, "retransmit upstream msg failed", KR(ret));
+        if (OB_TMP_FAIL(retransmit_upstream_msg_(ObTxState::PREPARE))) {
+          TRANS_LOG(WARN, "retransmit upstream msg failed", KR(tmp_ret));
+        } else {
+          TRANS_LOG(INFO, "post prepare version response");
         }
         break;
       }
@@ -70,12 +71,12 @@ int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_request()
       case ObTxState::ABORT: {
         // Txn may go abort itself, so we need reply the response based on the state
         // to advance the two phase commit protocol as soon as possible
-        if (OB_FAIL(retransmit_downstream_msg_())) {
-          TRANS_LOG(WARN, "retransmit downstream msg failed", KR(ret));
+        if (OB_TMP_FAIL(retransmit_downstream_msg_())) {
+          TRANS_LOG(WARN, "retransmit downstream msg failed", KR(tmp_ret));
         }
         // rewrite ret code
-        if (OB_FAIL(retransmit_upstream_msg_(ObTxState::ABORT))) {
-          TRANS_LOG(WARN, "retransmit upstream msg failed", KR(ret));
+        if (OB_TMP_FAIL(retransmit_upstream_msg_(ObTxState::ABORT))) {
+          TRANS_LOG(WARN, "retransmit upstream msg failed", KR(tmp_ret));
         }
         break;
       }
@@ -107,14 +108,12 @@ int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_request_impl_()
     TRANS_LOG(WARN, "unexpected operation", K(ret), K(*this));
   } else if (is_2pc_logging()) {
     TRANS_LOG(INFO, "committer is under logging", K(ret), K(*this));
-  } else if (OB_TMP_FAIL(submit_log(ObTwoPhaseCommitLogType::OB_LOG_TX_COMMIT_INFO))) {
-    if (OB_BLOCK_FROZEN == tmp_ret) {
-      // memtable is freezing, can not submit log right now.
-    } else {
-      TRANS_LOG(WARN, "submit commit info log failed", K(tmp_ret), K(*this));
-    }
-  } else if (!is_root() && !is_leaf()) {
-    if (OB_TMP_FAIL(post_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REDO_REQ))) {
+  } else if (OB_FAIL(apply_2pc_msg_(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REDO_REQ))) {
+    TRANS_LOG(WARN, "apply msg failed", K(ret), KPC(this));
+  } else if (OB_FAIL(drive_self_2pc_phase(ObTxState::REDO_COMPLETE))) {
+    TRANS_LOG(WARN, "drive 2pc phase", K(ret), K(*this));
+  } else if (is_internal()) {
+    if (OB_TMP_FAIL(post_downstream_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REDO_REQ))) {
       TRANS_LOG(WARN, "post prepare redo msg failed", KR(tmp_ret), KPC(this));
     }
   }
@@ -122,7 +121,7 @@ int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_request_impl_()
   return ret;
 }
 
-int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_response(const uint8_t participant)
+int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_response(const int64_t participant)
 {
   int ret = OB_SUCCESS;
 
@@ -169,7 +168,7 @@ int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_response(const uint8_t p
   return ret;
 }
 
-int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_response_impl_(const uint8_t participant)
+int ObTxCycleTwoPhaseCommitter::handle_2pc_prepare_redo_response_impl_(const int64_t participant)
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
@@ -221,7 +220,7 @@ int ObTxCycleTwoPhaseCommitter::apply_commit_info_log()
   //} else if (OB_FAIL(set_2pc_state(ObTxState::REDO_COMPLETE))) {
   //  TRANS_LOG(ERROR, "set 2pc state failed", K(ret), K(*this), K(state));
   } else {
-    if (!is_root()
+    if ((is_internal() || is_leaf())
         && all_downstream_collected_()) {
       if (OB_TMP_FAIL(post_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REDO_RESP,
                                OB_C2PC_UPSTREAM_ID))) {
@@ -256,9 +255,8 @@ int ObTxCycleTwoPhaseCommitter::prepare_redo()
   } else {
     set_upstream_state(ObTxState::REDO_COMPLETE);
     collected_.reset();
-    if (OB_TMP_FAIL(post_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REDO_REQ))) {
+    if (OB_TMP_FAIL(post_downstream_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REDO_REQ))) {
       TRANS_LOG(WARN, "post prepare request failed", K(tmp_ret), K(*this));
-      ret = OB_SUCCESS;
     }
 
     // TODO, only submit commit info
@@ -276,45 +274,30 @@ int ObTxCycleTwoPhaseCommitter::prepare_redo()
 }
 
 // for coordinator
-// TODO, refine in 4.1
 // this interface is used for sub commit/rollback (two phase xa commit/rollback)
+// if already in second phase, return success
 int ObTxCycleTwoPhaseCommitter::continue_execution(const bool is_rollback)
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
   const ObTxState state = get_downstream_state();
-  bool no_need_submit_log = false;
-
-  if (ObTxState::REDO_COMPLETE != get_upstream_state()) {
+  if (is_2pc_logging()) {
+    TRANS_LOG(INFO, "committer is under logging", K(ret), K(*this));
+  } else if (ObTxState::REDO_COMPLETE < get_upstream_state()
+      || ObTxState::REDO_COMPLETE < get_downstream_state()) {
     TRANS_LOG(INFO, "already in second phase", K(ret), K(*this));
   } else {
     if (is_rollback) {
-      set_upstream_state(ObTxState::ABORT);
-      collected_.reset();
-      if (OB_FAIL(do_abort())) {
-        TRANS_LOG(ERROR, "do abort failed", K(ret));
-      } else if (OB_TMP_FAIL(post_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_ABORT_REQ))) {
+      if (OB_FAIL(drive_self_2pc_phase(ObTxState::ABORT))) {
+        TRANS_LOG(WARN, "do abort failed", K(ret));
+      } else if (OB_TMP_FAIL(post_downstream_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_ABORT_REQ))) {
         TRANS_LOG(WARN, "post abort request failed", K(tmp_ret), KPC(this));
       }
-      if (OB_TMP_FAIL(submit_log(ObTwoPhaseCommitLogType::OB_LOG_TX_ABORT))) {
-        TRANS_LOG(WARN, "submit abort log failed", K(tmp_ret), KPC(this));
-      }
     } else {
-      // TODO, switch state first if do preapre can be executed repeatedly
-      if (OB_FAIL(do_prepare(no_need_submit_log))) {
-        TRANS_LOG(ERROR, "do prepare failed", K(ret));
-      } else {
-        // switch coord state to prepare
-        set_upstream_state(ObTxState::PREPARE);
-        collected_.reset();
-        if (OB_TMP_FAIL(post_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REQ))) {
-          TRANS_LOG(WARN, "post prepare request failed", K(tmp_ret), KPC(this));
-        }
-        if (no_need_submit_log) {
-        } else if (OB_TMP_FAIL(submit_log(ObTwoPhaseCommitLogType::OB_LOG_TX_PREPARE))) {
-          /* failure of submitting prepare log is harmless, this action will be retried */
-          TRANS_LOG(WARN, "submit prepare log failed", K(tmp_ret), KPC(this));
-        }
+      if (OB_FAIL(drive_self_2pc_phase(ObTxState::PREPARE))) {
+        TRANS_LOG(WARN, "do prepare failed", K(ret));
+      } else if (OB_TMP_FAIL(post_downstream_msg(ObTwoPhaseCommitMsgType::OB_MSG_TX_PREPARE_REQ))) {
+        TRANS_LOG(WARN, "post prepare request failed", K(tmp_ret), KPC(this));
       }
     }
   }

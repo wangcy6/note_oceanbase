@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2021 OceanBase
+ * Copyright (c) 2021, 2022 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
  * You can use this software according to the terms and conditions of the Mulan PubL v2.
  * You may obtain a copy of Mulan PubL v2 at:
@@ -17,6 +17,7 @@
 #include "lib/ob_errno.h"
 #include "storage/ls/ob_ls.h"
 #include "storage/tx_storage/ob_ls_handle.h"
+#include "storage/tx_storage/ob_ls_service.h"
 
 using namespace oceanbase::share;
 using namespace oceanbase::common;
@@ -80,7 +81,7 @@ int ObLSIterator::get_next(ObLS *&ls)
           ret = OB_ITER_END;
         } else {
           if (OB_NOT_NULL(ls_map_->ls_buckets_[bucket_pos_])) {
-            share::ObQSyncLockReadGuard guard(ls_map_->buckets_lock_[bucket_pos_]);
+            ObQSyncLockReadGuard guard(ls_map_->buckets_lock_[bucket_pos_]);
             ls = ls_map_->ls_buckets_[bucket_pos_];
 
             while (OB_NOT_NULL(ls) && OB_SUCC(ret)) {
@@ -149,14 +150,14 @@ int ObLSMap::init(const int64_t tenant_id, ObIAllocator *ls_allocator)
   } else if (OB_ISNULL(ls_allocator)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret));
-  } else if (OB_ISNULL(buckets_lock_ = (share::ObQSyncLock*)ob_malloc(sizeof(share::ObQSyncLock) * BUCKETS_CNT, mem_attr))) {
+  } else if (OB_ISNULL(buckets_lock_ = (common::ObQSyncLock*)ob_malloc(sizeof(common::ObQSyncLock) * BUCKETS_CNT, mem_attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else if (OB_ISNULL(buf = ob_malloc(sizeof(ObLS*) * BUCKETS_CNT, mem_attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("Fail to allocate memory, ", K(ret), LITERAL_K(BUCKETS_CNT));
   } else {
     for (int64_t i = 0 ; i < BUCKETS_CNT; ++i) {
-      new(buckets_lock_ + i) share::ObQSyncLock();
+      new(buckets_lock_ + i) common::ObQSyncLock();
       if (OB_FAIL((buckets_lock_ + i)->init(mem_attr))) {
         LOG_WARN("buckets_lock_ init fail", K(ret), K(tenant_id));
         for (int64_t j = 0 ; j <= i; ++j) {
@@ -201,7 +202,7 @@ int ObLSMap::add_ls(
     LOG_WARN("ObLSMap not init", K(ret), K(ls_id));
   } else {
     int64_t pos = ls_id.hash() % BUCKETS_CNT;
-    share::ObQSyncLockWriteGuard guard(buckets_lock_[pos]);
+    ObQSyncLockWriteGuard guard(buckets_lock_[pos]);
     curr = ls_buckets_[pos];
     while (OB_NOT_NULL(curr)) {
       if (curr->get_ls_id() == ls_id) {
@@ -248,7 +249,7 @@ int ObLSMap::del_ls(const share::ObLSID &ls_id)
   } else {
     int64_t pos = ls_id.hash() % BUCKETS_CNT;
     //remove ls from map
-    share::ObQSyncLockWriteGuard guard(buckets_lock_[pos]);
+    ObQSyncLockWriteGuard guard(buckets_lock_[pos]);
     ls = ls_buckets_[pos];
     while (OB_NOT_NULL(ls)) {
       if (ls->get_ls_id() == ls_id) {
@@ -302,7 +303,7 @@ int ObLSMap::get_ls(const share::ObLSID &ls_id,
     LOG_WARN("ObLSMap not init", K(ret), K(ls_id));
   } else {
     pos = ls_id.hash() % BUCKETS_CNT;
-    share::ObQSyncLockReadGuard bucket_guard(buckets_lock_[pos]);
+    ObQSyncLockReadGuard bucket_guard(buckets_lock_[pos]);
     ls = ls_buckets_[pos];
     while (OB_NOT_NULL(ls)) {
       if (ls->get_ls_id() == ls_id) {
@@ -321,117 +322,29 @@ int ObLSMap::get_ls(const share::ObLSID &ls_id,
   return ret;
 }
 
-int ObLSMap::remove_duplicate_ls()
+int ObLSMap::get_all_ls_id(ObIArray<ObLSID> &ls_id_array)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(!is_inited_)) {
+  ObLS *ls = NULL;
+
+  if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
-    LOG_WARN("ObLSMap has not been inited", K(ret));
+    LOG_WARN("ObLSMap not init", K(ret));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < BUCKETS_CNT; ++i) {
-      share::ObQSyncLockWriteGuard bucket_guard(buckets_lock_[i]);
-      if (nullptr != ls_buckets_[i]) {
-        if (OB_FAIL(remove_duplicate_ls_in_linklist(ls_buckets_[i]))) {
-          LOG_WARN("fail to remove same ls in linklist", K(ret));
-        }
-      }
-    }
-  }
-  return ret;
-}
-
-int ObLSMap::choose_preserve_ls(ObLS *left_ls,
-                                       ObLS *right_ls,
-                                       ObLS *&result_ls)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(nullptr == left_ls || nullptr == right_ls)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), KP(left_ls), KP(right_ls));
-  } else {
-    const ObReplicaType left_replica_type = left_ls->get_replica_type();
-    const ObReplicaType right_replica_type = right_ls->get_replica_type();
-    if (ObReplicaTypeCheck::is_writable_replica(left_replica_type)) {
-      result_ls = left_ls;
-    } else if (ObReplicaTypeCheck::is_writable_replica(right_replica_type)) {
-      result_ls = right_ls;
-    } else if (ObReplicaTypeCheck::is_readonly_replica(left_replica_type)) {
-      result_ls = left_ls;
-    } else if (ObReplicaTypeCheck::is_readonly_replica(right_replica_type)) {
-      result_ls = right_ls;
-    } else {
-      result_ls = left_ls;
-    }
-  }
-  return ret;
-}
-
-int ObLSMap::remove_duplicate_ls_in_linklist(ObLS *&head)
-{
-  int ret = OB_SUCCESS;
-  common::hash::ObHashMap<ObLSID, ObLS *> effective_ls_map;
-  const int64_t MAX_LS_CNT_IN_BUCKET = 10L;
-  lib::ObLabel label("LS_TMP_MAP");
-  if (OB_UNLIKELY(!is_inited_)) {
-    ret = OB_NOT_INIT;
-    LOG_WARN("ObLSMap has not been inited", K(ret));
-  } else if (OB_ISNULL(head)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), KP(head));
-  } else if (OB_FAIL(effective_ls_map.create(MAX_LS_CNT_IN_BUCKET, label))) {
-    LOG_WARN("fail to create effetive ls hash map", K(ret));
-  } else {
-    ObLS *curr = head;
-    ObLS *next = nullptr;
-    bool has_same_ls = false;
-    while (OB_SUCC(ret) && curr != nullptr) {
-      ObLS *ls = nullptr;
-      next = static_cast<ObLS *>(curr->next_);
-      bool need_set = false;
-      if (OB_FAIL(effective_ls_map.get_refactored(curr->get_ls_id(), ls))) {
-        if (OB_HASH_NOT_EXIST == ret) {
-          if (OB_FAIL(effective_ls_map.set_refactored(curr->get_ls_id(), curr))) {
-            LOG_WARN("fail to set to effective ls map", K(ret));
-          }
-        }
-      } else {
-        ObLS *choose_ls = nullptr;
-        has_same_ls = true;
-        if (OB_FAIL(choose_preserve_ls(curr, ls, choose_ls))) {
-          LOG_WARN("fail to choose preserve ls", K(ret));
+    for (int64_t bucket_idx = 0 ; OB_SUCC(ret) && bucket_idx < BUCKETS_CNT; ++bucket_idx) {
+      ObQSyncLockReadGuard bucket_guard(buckets_lock_[bucket_idx]);
+      ls = ls_buckets_[bucket_idx];
+      while (OB_SUCC(ret) && OB_NOT_NULL(ls)) {
+        if (OB_FAIL(ls_id_array.push_back(ls->get_ls_id()))) {
+          LOG_WARN("failed to push back ls id", K(ret), KP(ls));
         } else {
-          if (choose_ls == curr) {
-            if (OB_FAIL(effective_ls_map.set_refactored(curr->get_ls_id(), choose_ls, true/*overwrite*/))) {
-              LOG_WARN("fail to set to effective ls map", K(ret));
-            } else {
-              del_ls_impl(ls);
-            }
-          } else {
-            del_ls_impl(curr);
-          }
+          ls = static_cast<ObLS *>(ls->next_);
         }
-      }
-      curr = next;
-    }
-    if (OB_SUCC(ret) && has_same_ls) {
-      ObLS *prev = nullptr;
-      for (ObHashMap<ObLSID, ObLS *>::iterator iter = effective_ls_map.begin(); iter != effective_ls_map.end(); ++iter) {
-        if (nullptr == prev) {
-          head = iter->second;
-          prev = head;
-        } else {
-          prev->next_ = iter->second;
-          prev = iter->second;
-        }
-      }
-      if (OB_SUCC(ret)) {
-        prev->next_ = nullptr;
-      }
-    }
-    effective_ls_map.destroy();
+      } // end of while
+    } // end of for
   }
   return ret;
 }
 
-}; // end namespace storage
+} // end namespace storage
 }; // end namespace oceanbase

@@ -69,7 +69,8 @@ ObLogTenant::~ObLogTenant()
   reset();
 }
 
-int ObLogTenant::init(const uint64_t tenant_id,
+int ObLogTenant::init(
+    const uint64_t tenant_id,
     const char *tenant_name,
     const int64_t start_tstamp_ns,
     const int64_t start_seq,
@@ -204,6 +205,7 @@ void ObLogTenant::reset()
   committer_cur_schema_version_ = OB_INVALID_VERSION;
   committer_next_trans_schema_version_ = OB_INVALID_VERSION;
   cf_handle_ = NULL;
+  ObMallocAllocator::get_instance()->recycle_tenant_allocator(tenant_id);
 }
 
 int ObLogTenant::alloc_global_trans_seq_and_schema_version_for_ddl(
@@ -376,7 +378,7 @@ int ObLogTenant::update_sys_ls_info(const PartTransTask &task)
   }
   // Only heartbeat and DDL transaction tasks are allowed
   else if (OB_UNLIKELY(! task.is_ddl_trans()
-        && ! task.is_ls_table_trans()
+        && ! task.is_ls_op_trans()
         && ! task.is_sys_ls_heartbeat())) {
     ret = OB_NOT_SUPPORTED;
     LOG_ERROR("task is not DDL trans task, or LS Table, or HEARTBEAT, not supported", KR(ret), K(task));
@@ -513,7 +515,7 @@ int ObLogTenant::start_drop_tenant_if_needed_(bool &need_drop_tenant)
 int ObLogTenant::drop_sys_ls_()
 {
   int ret = OB_SUCCESS;
-  TenantLSID sys_ls(tenant_id_, share::SYS_LS);
+  logservice::TenantLSID sys_ls(tenant_id_, share::SYS_LS);
 
   if (OB_FAIL(ls_mgr_.offline_ls(sys_ls))) {
     if (OB_ENTRY_NOT_EXIST == ret) {
@@ -552,7 +554,7 @@ const char *ObLogTenant::print_state(const int64_t state)
   return ret;
 }
 
-int ObLogTenant::inc_ls_count_on_serving(const TenantLSID &tls_id, bool &is_serving)
+int ObLogTenant::inc_ls_count_on_serving(const logservice::TenantLSID &tls_id, bool &is_serving)
 {
   int ret = OB_SUCCESS;
 
@@ -586,7 +588,7 @@ int ObLogTenant::inc_ls_count_on_serving(const TenantLSID &tls_id, bool &is_serv
   return ret;
 }
 
-int ObLogTenant::recycle_ls(const TenantLSID &tls_id, bool &tenant_can_be_dropped)
+int ObLogTenant::recycle_ls(const logservice::TenantLSID &tls_id, bool &tenant_can_be_dropped)
 {
   int ret = OB_SUCCESS;
 
@@ -824,7 +826,7 @@ void ObLogTenantGuard::revert_tenant()
   if (OB_NOT_NULL(tenant_) && OB_NOT_NULL(tenant_mgr)) {
     int revert_ret = tenant_mgr->revert_tenant(tenant_);
     if (OB_SUCCESS != revert_ret) {
-      LOG_ERROR("revert ObLogTenant fail", K(revert_ret), KPC(tenant_));
+      LOG_ERROR_RET(revert_ret, "revert ObLogTenant fail", K(revert_ret), KPC(tenant_));
     } else {
       tenant_ = NULL;
     }
@@ -893,10 +895,14 @@ int ObLogTenant::init_tz_info_(const uint64_t tenant_id)
   }
 
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(tz_info_map_->init(ObModIds::OB_HASH_BUCKET_TIME_ZONE_INFO_MAP))) {
+  } else if (OB_FAIL(tz_info_map_->init(ObMemAttr(OB_SERVER_TENANT_ID,
+                                                  ObModIds::OB_HASH_BUCKET_TIME_ZONE_INFO_MAP)))) {
     LOG_ERROR("fail to init tz_info_map_", K(tenant_id), KR(ret));
-  } else if (TCTX.timezone_info_getter_->init_tz_info_wrap(tenant_id, tz_info_map_version_,
-        *tz_info_map_, *tz_info_wrap_)) {
+  } else if (TCTX.timezone_info_getter_->init_tz_info_wrap(
+      tenant_id,
+      tz_info_map_version_,
+      *tz_info_map_,
+      *tz_info_wrap_)) {
     LOG_ERROR("fail to init tz info wrap", KR(ret), K(tenant_id));
   } else {
     // succ

@@ -289,8 +289,9 @@ int ObExprInetCommon::ip_to_str(ObString& ip_binary, bool& is_ip_format_invalid,
 }
 
 ObExprInetAton::ObExprInetAton(ObIAllocator& alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_INETATON, N_INETATON, 1, NOT_ROW_DIMENSION)
-{}
+    : ObFuncExprOperator(alloc, T_FUN_SYS_INETATON, N_INETATON, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprInetAton::~ObExprInetAton()
 {}
@@ -405,8 +406,9 @@ int ObExprInetAton::calc_inet_aton(const ObExpr& expr, ObEvalCtx& ctx, ObDatum& 
   return ret;
 }
 
-ObExprInet6Ntoa::ObExprInet6Ntoa(ObIAllocator& alloc) : ObStringExprOperator(alloc, T_FUN_SYS_INET6NTOA, N_INET6NTOA, 1)
-{}
+ObExprInet6Ntoa::ObExprInet6Ntoa(ObIAllocator& alloc) : ObStringExprOperator(alloc, T_FUN_SYS_INET6NTOA, N_INET6NTOA, 1, VALID_FOR_GENERATED_COL)
+{
+}
 
 ObExprInet6Ntoa::~ObExprInet6Ntoa()
 {}
@@ -498,8 +500,9 @@ int ObExprInet6Ntoa::calc_inet6_ntoa(const ObExpr& expr, ObEvalCtx& ctx, ObDatum
 }
 
 ObExprInet6Aton::ObExprInet6Aton(ObIAllocator& alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_INET6ATON, N_INET6ATON, 1, NOT_ROW_DIMENSION)
-{}
+    : ObFuncExprOperator(alloc, T_FUN_SYS_INET6ATON, N_INET6ATON, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprInet6Aton::~ObExprInet6Aton()
 {}
@@ -591,10 +594,10 @@ int ObExprInet6Aton::inet6_aton(const ObString& ip, bool& is_ip_format_invalid, 
         } else if (is_ip_format_invalid) {
           LOG_WARN("ip format invalid", K(ip));
         } else {
-          str_result.assign(result_buf, sizeof(in6_addr));
+          str_result.assign(result_buf, static_cast<int32_t>(sizeof(in6_addr)));
         }
       } else {
-        str_result.assign(result_buf, sizeof(in_addr));
+        str_result.assign(result_buf, static_cast<int32_t>(sizeof(in_addr)));
       }
     }
   }
@@ -602,8 +605,9 @@ int ObExprInet6Aton::inet6_aton(const ObString& ip, bool& is_ip_format_invalid, 
 }
 
 ObExprIsIpv4::ObExprIsIpv4(ObIAllocator& alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV4, N_IS_IPV4, 1, NOT_ROW_DIMENSION)
-{}
+    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV4, N_IS_IPV4, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprIsIpv4::~ObExprIsIpv4()
 {}
@@ -668,8 +672,9 @@ int ObExprIsIpv4::calc_is_ipv4(const ObExpr& expr, ObEvalCtx& ctx, ObDatum& expr
 }
 
 ObExprIsIpv4Mapped::ObExprIsIpv4Mapped(ObIAllocator& alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV4_MAPPED, N_IS_IPV4_MAPPED, 1, NOT_ROW_DIMENSION)
-{}
+    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV4_MAPPED, N_IS_IPV4_MAPPED, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprIsIpv4Mapped::~ObExprIsIpv4Mapped()
 {}
@@ -725,8 +730,9 @@ void ObExprIsIpv4Mapped::is_ipv4_mapped(T& result, const ObString& num_val)
 }
 
 ObExprIsIpv4Compat::ObExprIsIpv4Compat(ObIAllocator& alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV4_COMPAT, N_IS_IPV4_COMPAT, 1, NOT_ROW_DIMENSION)
-{}
+    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV4_COMPAT, N_IS_IPV4_COMPAT, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprIsIpv4Compat::~ObExprIsIpv4Compat()
 {}
@@ -782,8 +788,9 @@ void ObExprIsIpv4Compat::is_ipv4_compat(T& result, const ObString& num_val)
 }
 
 ObExprIsIpv6::ObExprIsIpv6(ObIAllocator& alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV6, N_IS_IPV6, 1, NOT_ROW_DIMENSION)
-{}
+    : ObFuncExprOperator(alloc, T_FUN_SYS_IS_IPV6, N_IS_IPV6, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprIsIpv6::~ObExprIsIpv6()
 {}

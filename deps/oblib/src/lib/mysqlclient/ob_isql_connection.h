@@ -32,7 +32,7 @@ class ObString;
 
 namespace sqlclient
 {
-
+class ObISQLConnection;
 class ObCommonServerConnectionPool
 {
 public:
@@ -41,6 +41,7 @@ public:
 
   //dblink
   virtual int free_dblink_session(uint32_t sessid) = 0;
+  virtual int release(common::sqlclient::ObISQLConnection *connection, const bool succ, uint32_t sessid = 0) = 0;
   TO_STRING_KV(K_(free_conn_count), K_(busy_conn_count));
 protected:
   volatile uint64_t free_conn_count_;
@@ -71,20 +72,38 @@ public:
 class ObISQLConnection
 {
 public:
-  ObISQLConnection()
-      :oracle_mode_(false),
-       is_init_remote_env_(false)
+  ObISQLConnection() :
+       oracle_mode_(false),
+       is_init_remote_env_(false),
+       dblink_id_(OB_INVALID_ID),
+       dblink_driver_proto_(-1),
+       sessid_(-1),
+       consumer_group_id_(0),
+       has_reverse_link_credentials_(false),
+       usable_(true),
+       last_set_sql_mode_cstr_(NULL),
+       last_set_sql_mode_cstr_buf_size_(0)
   {}
-  virtual ~ObISQLConnection() {}
+  virtual ~ObISQLConnection() {
+    allocator_.reset();
+    last_set_sql_mode_cstr_buf_size_ = 0;
+    last_set_sql_mode_cstr_ = NULL;
+  }
 
   // sql execute interface
   virtual int execute_read(const uint64_t tenant_id, const char *sql,
       ObISQLClient::ReadResult &res, bool is_user_sql = false,
+<<<<<<< HEAD
       bool is_from_pl = false,
       const common::ObAddr *sql_exec_addr = nullptr) = 0;
   virtual int execute_read(const int64_t cluster_id, const uint64_t tenant_id, const ObString &sql,
       ObISQLClient::ReadResult &res, bool is_user_sql = false,
       bool is_from_pl = false,
+=======
+      const common::ObAddr *sql_exec_addr = nullptr) = 0;
+  virtual int execute_read(const int64_t cluster_id, const uint64_t tenant_id, const ObString &sql,
+      ObISQLClient::ReadResult &res, bool is_user_sql = false,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       const common::ObAddr *sql_exec_addr = nullptr) = 0;
   virtual int execute_write(const uint64_t tenant_id, const char *sql,
       int64_t &affected_rows, bool is_user_sql = false,
@@ -102,15 +121,22 @@ public:
   virtual int get_session_variable(const ObString &name, int64_t &val) = 0;
   virtual int set_session_variable(const ObString &name, int64_t val) = 0;
 
-  // dblink
-  virtual ObCommonServerConnectionPool *get_common_server_pool() = 0;
-
   virtual int execute(const uint64_t tenant_id, ObIExecutor &executor)
   {
     UNUSED(tenant_id);
     UNUSED(executor);
     return OB_NOT_SUPPORTED;
   }
+
+
+  // dblink
+  virtual ObCommonServerConnectionPool *get_common_server_pool() = 0;
+  void set_dblink_id(uint64_t dblink_id) { dblink_id_ = dblink_id; }
+  uint64_t get_dblink_id() { return dblink_id_; }
+  void set_sessid(uint32_t sessid) { sessid_ = sessid; }
+  uint32_t get_sessid() { return sessid_; }
+  void set_dblink_driver_proto(int64_t dblink_driver_proto) { dblink_driver_proto_ = dblink_driver_proto; }
+  int64_t get_dblink_driver_proto() { return dblink_driver_proto_; }
 
   void set_mysql_compat_mode() { oracle_mode_ = false; }
   void set_oracle_compat_mode() { oracle_mode_ = true; }
@@ -123,10 +149,54 @@ public:
   virtual void set_use_external_session(bool v) { UNUSED(v); }
   virtual int64_t get_cluster_id() const { return common::OB_INVALID_ID; }
   void set_init_remote_env(bool flag) { is_init_remote_env_ = flag;}
-  bool get_init_remote_env() const { return is_init_remote_env_; }
+  int is_session_inited(const char * sql_mode_cstr, bool &is_inited) {
+    int ret = OB_SUCCESS;
+    is_inited = false;
+    int64_t sql_mode_len = 0;
+    if (lib::is_oracle_mode()) {
+      is_inited = is_init_remote_env_;
+    } else if (OB_ISNULL(sql_mode_cstr)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (FALSE_IT([&]{
+                              is_inited = (0 == ObString(sql_mode_cstr).compare(last_set_sql_mode_cstr_));
+                              sql_mode_len = STRLEN(sql_mode_cstr);
+                           }())) {
+    } else if (!is_inited) {
+      if (sql_mode_len >= last_set_sql_mode_cstr_buf_size_) {
+        void *buf = NULL;
+        if (OB_ISNULL(buf = allocator_.alloc((sql_mode_len * 2)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          last_set_sql_mode_cstr_ = (char *)buf;
+          last_set_sql_mode_cstr_buf_size_ = sql_mode_len * 2;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        MEMCPY(last_set_sql_mode_cstr_, sql_mode_cstr, sql_mode_len);
+        last_set_sql_mode_cstr_[sql_mode_len] = 0;
+      }
+    }
+    return ret;
+  }
+  void set_group_id(const int64_t v) {consumer_group_id_ = v; }
+  int64_t get_group_id() const {return consumer_group_id_; }
+  void set_reverse_link_creadentials(bool flag) { has_reverse_link_credentials_ = flag; }
+  bool get_reverse_link_creadentials() { return has_reverse_link_credentials_; }
+  void set_usable(bool flag) { usable_ = flag; }
+  bool usable() { return usable_; }
+  virtual int ping() { return OB_SUCCESS; }
 protected:
   bool oracle_mode_;
-  bool is_init_remote_env_; // for dblink, we have to init remote env with some sql
+  bool is_init_remote_env_; // for oracle dblink, we have to init remote env with some sql
+  uint64_t dblink_id_; // for dblink, record dblink_id of a connection used by dblink
+  int64_t dblink_driver_proto_; //for dblink, record DblinkDriverProto of a connection used by dblink
+  uint32_t sessid_;
+  int64_t consumer_group_id_; //for resource isolation
+  bool has_reverse_link_credentials_; // for dblink, mark if this link has credentials set
+  bool usable_;  // usable_ = false: connection is unusable, should not execute query again.
+  char *last_set_sql_mode_cstr_; // for mysql dblink to set sql mode
+  int64_t last_set_sql_mode_cstr_buf_size_;
+  common::ObArenaAllocator allocator_;
 };
 
 } // end namespace sqlclient

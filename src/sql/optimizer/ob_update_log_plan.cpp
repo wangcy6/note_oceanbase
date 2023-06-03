@@ -25,6 +25,7 @@
 #include "sql/optimizer/ob_join_order.h"
 #include "sql/optimizer/ob_opt_est_cost.h"
 #include "sql/optimizer/ob_log_subplan_filter.h"
+#include "sql/optimizer/ob_log_link_dml.h"
 #include "sql/rewrite/ob_transform_utils.h"
 #include "common/ob_smart_call.h"
 #include "sql/resolver/dml/ob_del_upd_resolver.h"
@@ -77,7 +78,7 @@ explain update t2 set j = (select i from t1 where rownum < 2) where i in (select
 */
 
 
-int ObUpdateLogPlan::generate_raw_plan()
+int ObUpdateLogPlan::generate_normal_raw_plan()
 {
   int ret = OB_SUCCESS;
   /**
@@ -93,6 +94,7 @@ int ObUpdateLogPlan::generate_raw_plan()
     bool need_limit = true;
     ObSEArray<OrderItem, 4> order_items;
     LOG_TRACE("start to allocate operators for ", "sql", optimizer_context_.get_query_ctx()->get_sql_stmt());
+    OPT_TRACE("generate plan for ", get_stmt());
     // step. generate access paths
     if (OB_FAIL(generate_plan_tree())) {
       LOG_WARN("failed to generate plan tree for plain select", K(ret));
@@ -193,9 +195,11 @@ int ObUpdateLogPlan::generate_raw_plan()
 
     // step. allocate update operator
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(prepare_dml_infos())) {
+      if (OB_FAIL(compute_dml_parallel())) {  // compute parallel before call prepare_dml_infos
+        LOG_WARN("failed to compute dml parallel", K(ret));
+      } else if (OB_FAIL(prepare_dml_infos())) {
         LOG_WARN("failed to prepare dml infos", K(ret));
-      } else if (get_optimizer_context().use_pdml()) {
+      } else if (use_pdml()) {
         // PDML计划
         if (OB_FAIL(candi_allocate_pdml_update())) {
           LOG_WARN("failed to allocate pdml update operator", K(ret));
@@ -270,6 +274,9 @@ int ObUpdateLogPlan::candi_allocate_update()
   ObSEArray<CandidatePlan, 8> update_plans;
   const bool force_no_multi_part = get_log_plan_hint().no_use_distributed_dml();
   const bool force_multi_part = get_log_plan_hint().use_distributed_dml();
+  OPT_TRACE("start generate normal update plan");
+  OPT_TRACE("force no multi part:", force_no_multi_part);
+  OPT_TRACE("force multi part:", force_multi_part);
   if (OB_FAIL(check_table_rowkey_distinct(index_dml_infos_))) {
     LOG_WARN("failed to check table rowkey distinct", K(ret));
   } else if (OB_FAIL(get_minimal_cost_candidates(candidates_.candidate_plans_,
@@ -387,6 +394,7 @@ int ObUpdateLogPlan::candi_allocate_pdml_update()
 {
   int ret = OB_SUCCESS;
   const ObUpdateStmt *update_stmt = NULL;
+  OPT_TRACE("start generate pdml update plan");
   if (OB_ISNULL(update_stmt = get_stmt()) ||
       OB_UNLIKELY(1 != update_stmt->get_update_table_info().count())) {
     ret = OB_ERR_UNEXPECTED;
@@ -410,14 +418,7 @@ int ObUpdateLogPlan::candi_allocate_pdml_update()
         //        INSERT INDEX (i2)
         //          DELETE INDEX (i2)
         //              ....
-        int64_t binlog_row_image = share::ObBinlogRowImage::FULL;
-        if (OB_FAIL(optimizer_context_.get_session_info()->get_binlog_row_image(binlog_row_image))) {
-          LOG_WARN("fail to get binlog row image", K(ret));
-        } else if (share::ObBinlogRowImage::FULL != binlog_row_image) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "when binlog_row_image is not set to FULL,"
-                         "parallel update with row movement");
-        } else if (OB_FAIL(split_update_index_dml_info(*index_dml_info,
+        if (OB_FAIL(split_update_index_dml_info(*index_dml_info,
                                                        index_delete_info,
                                                        index_insert_info))) {
           LOG_WARN("failed to create index delete info", K(ret));
@@ -463,21 +464,25 @@ int ObUpdateLogPlan::perform_vector_assign_expr_replacement(ObUpdateStmt *stmt)
 {
   int ret = OB_SUCCESS;
   ObUpdateTableInfo* table_info = nullptr;
+  ObSQLSessionInfo* session_info = optimizer_context_.get_session_info();
   if (OB_ISNULL(stmt) || OB_ISNULL(table_info = stmt->get_update_table_info().at(0))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("stmt is null", K(ret), K(stmt), K(table_info));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < table_info->assignments_.count(); ++i) {
       ObRawExpr *value = table_info->assignments_.at(i).expr_;
-      if (OB_FAIL(replace_alias_ref_expr(value))) {
+      bool replace_happened = false;
+      if (OB_FAIL(replace_alias_ref_expr(value, replace_happened))) {
         LOG_WARN("failed to replace alias ref expr", K(ret));
+      } else if (replace_happened && OB_FAIL(value->formalize(session_info))) {
+        LOG_WARN("failed to foramlize expr", K(ret));
       }
     }
   }
   return ret;
 }
 
-int ObUpdateLogPlan::replace_alias_ref_expr(ObRawExpr *&expr)
+int ObUpdateLogPlan::replace_alias_ref_expr(ObRawExpr *&expr, bool &replace_happened)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(expr)) {
@@ -490,10 +495,11 @@ int ObUpdateLogPlan::replace_alias_ref_expr(ObRawExpr *&expr)
       LOG_WARN("invalid alias expr", K(ret), K(*alias));
     } else {
       expr = alias->get_ref_expr();
+      replace_happened = true;
     }
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < expr->get_param_count(); ++i) {
-      if (OB_FAIL(replace_alias_ref_expr(expr->get_param_expr(i)))) {
+      if (OB_FAIL(replace_alias_ref_expr(expr->get_param_expr(i), replace_happened))) {
         LOG_WARN("failed to replace alias ref expr", K(ret));
       }
     }
@@ -625,7 +631,8 @@ int ObUpdateLogPlan::prepare_table_dml_info_special(const ObDmlTableInfo& table_
                                                   table_dml_info->ck_cst_exprs_.at(i),
                                                   table_dml_info->ck_cst_exprs_.at(i)))) {
         LOG_WARN("failed to copy schema expr", K(ret));
-      } else if (OB_FAIL(ObTableAssignment::expand_expr(update_info.assignments_,
+      } else if (OB_FAIL(ObTableAssignment::expand_expr(optimizer_context_.get_expr_factory(),
+                                                        update_info.assignments_,
                                                         table_dml_info->ck_cst_exprs_.at(i)))) {
         LOG_WARN("failed to create expanded expr", K(ret));
       }

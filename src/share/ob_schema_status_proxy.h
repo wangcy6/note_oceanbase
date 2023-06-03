@@ -48,7 +48,7 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObSchemaStatusUpdater);
 };
 
-// dodge the bug : https://aone.alibaba-inc.com/issue/17670392
+// dodge the bug :
 // all operation of __all_core_table must be single partition transaction
 class ObSchemaStatusProxy
 {
@@ -86,6 +86,9 @@ public:
     const share::schema::ObRefreshSchemaStatus &refresh_schema_status);
 
   int update_schema_status(const share::schema::ObRefreshSchemaStatus &cur_schema_status);
+  int load_refresh_schema_status(
+    const uint64_t refresh_tenant_id,
+    schema::ObRefreshSchemaStatus &refresh_schema_status);
 
 private:
   int check_inner_stat();

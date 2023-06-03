@@ -30,7 +30,7 @@ ObExprAutoincNextval::ObExprAutoincNextval(ObIAllocator &alloc)
                          T_FUN_SYS_AUTOINC_NEXTVAL,
                          N_AUTOINC_NEXTVAL,
                          ZERO_OR_ONE,
-                         NOT_ROW_DIMENSION)
+                         NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
   /* NextVal是一个人肉生成的FuncOp */
   disable_operand_auto_cast();
@@ -125,7 +125,7 @@ int ObExprAutoincNextval::check_and_cast(ObObj &result,
             is_to_generate = true;
           }
         } else {
-          // see: https://code.aone.alibaba-inc.com/oceanbase/oceanbase/codereview/2047802
+          // see:
           if (autoinc_param->is_ignore_) {
             is_to_generate = true;
           }
@@ -163,7 +163,7 @@ int ObExprAutoincNextval::check_and_cast(ObObj &result,
 // 这个函数要解决的问题是：当用户插入一个负数到 signed int 自增列时，
 // 要允许插入。需要一个机制来判断：用户插入的是负数。本函数就是解决这个问题
 //
-// 详细 MySQL 行为参考 ：https://yuque.antfin-inc.com/ob/sql/gmhw4x
+// 详细 MySQL 行为参考 ：
 //
 // 出参说明：
 // casted_value 用于设置到 ObPacket 的 lii_ 域，是一个 unsigned 值

@@ -24,7 +24,7 @@ using namespace share;
 /**
  * ------------------------------ObArchiveRoundState---------------------
  */
-const char *OB_ARCHIVE_ROUND_STATE_STR[] = {"INVALID", "PREPARE", "BEGINNING", "DOING", "INTERRUPTED", "STOPPING", "STOP", "MAX_STATUS"};
+const char *OB_ARCHIVE_ROUND_STATE_STR[] = {"INVALID", "PREPARE", "BEGINNING", "DOING", "INTERRUPTED", "STOPPING", "STOP", "SUSPENDING", "SUSPEND", "MAX_STATUS"};
 
 bool ObArchiveRoundState::is_valid() const
 {
@@ -1107,6 +1107,63 @@ int ObDestRoundSummary::add_ls_dest_round_summary(const ObLSDestRoundSummary &de
   round_id_ = dest_round_summary.round_id_;
   if (OB_FAIL(ls_round_list_.push_back(dest_round_summary))) {
     LOG_WARN("failed to push back ls dest round summary", K(ret), K(dest_round_summary));
+  }
+  return ret;
+}
+
+/**
+ * ------------------------------ObArchiveLSMetaType---------------------
+ */
+bool ObArchiveLSMetaType::is_valid() const
+{
+  return type_ > Type::INVALID_TYPE && type_ < Type::MAX_TYPE;
+}
+
+int ObArchiveLSMetaType::compare(const ObArchiveLSMetaType &other) const
+{
+  int ret = 0;
+  if (type_ == other.type_) {
+    ret = 0;
+  } else if (type_ > other.type_) {
+    ret = 1;
+  } else {
+    ret = -1;
+  }
+  return ret;
+}
+
+const char *ObArchiveLSMetaType::get_type_str() const
+{
+  const char *type_str = nullptr;
+  const char *meta_type_strs[] = {
+    "invalid",
+    "schema_meta",
+  };
+  STATIC_ASSERT(Type::MAX_TYPE == ARRAYSIZEOF(meta_type_strs), "type count mismatch");
+  if (type_ < Type::INVALID_TYPE || type_ >= Type::MAX_TYPE) {
+    type_str = "unknow";
+  } else {
+    type_str = meta_type_strs[type_];
+  }
+  return type_str;
+}
+
+int ObArchiveLSMetaType::get_next_type()
+{
+  int ret = OB_SUCCESS;
+  switch (type_) {
+    case Type::INVALID_TYPE: {
+      type_ = Type::SCHEMA_META;
+      break;
+    };
+    case Type::SCHEMA_META: {
+      ret = OB_ITER_END;
+      break;
+    };
+    case Type::MAX_TYPE: {
+      ret = OB_ITER_END;
+      break;
+    };
   }
   return ret;
 }

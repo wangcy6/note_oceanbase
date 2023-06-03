@@ -72,7 +72,7 @@ int ObEncryptKey<BUFSIZE>::assign(const ObEncryptKey &rhs)
 {
   int ret = common::OB_SUCCESS;
   str_.set_length(0);
-  int64_t rhs_len = rhs.get_content().length();
+  const int32_t rhs_len = rhs.get_content().length();
   if (OB_UNLIKELY(rhs_len != str_.write(rhs.get_content().ptr(), rhs_len))) {
     ret = OB_ERR_UNEXPECTED;
     SHARE_LOG(WARN, "key content is wrong", K(ret), K(rhs), K(rhs_len));
@@ -104,7 +104,7 @@ int ObEncryptKey<BUFSIZE>::set_content(const char *ptr, const int64_t len)
     ret = common::OB_INVALID_ARGUMENT;
   } else {
     str_.set_length(0);
-    str_.write(ptr, len);
+    str_.write(ptr, static_cast<int32_t>(len));
   }
   return ret;
 }
@@ -132,16 +132,14 @@ struct ObEncryptMeta
   int replace_tenant_id(const uint64_t real_tenant_id);
   bool is_valid_before_decrypt_table_key() const
   {
-    return OB_INVALID_ID != tenant_id_
-           && encrypt_algorithm_ > 0
+    return encrypt_algorithm_ > 0
            && master_key_version_ > 0
            && random_.size() > 0
            && encrypted_table_key_.size() > 0;
   }
   bool is_valid() const
   {
-    return OB_INVALID_ID != tenant_id_
-           && encrypt_algorithm_ > 0
+    return encrypt_algorithm_ > 0
            && master_key_version_ > 0
            && random_.size() > 0
            && master_key_.size() > 0

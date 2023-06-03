@@ -21,6 +21,7 @@
 #include "sql/engine/basic/ob_pushdown_filter.h"
 #include "storage/tx/ob_clog_encrypt_info.h"
 #include "storage/tx/ob_trans_define_v4.h"
+#include "sql/resolver/dml/ob_hint.h"
 
 namespace oceanbase
 {
@@ -129,6 +130,7 @@ public:
       : common::ObVTableScanParam(),
         trans_desc_(NULL),
         snapshot_(),
+        fb_read_tx_uncommitted_(false),
         tx_id_(),
         tx_lock_timeout_(-1),
         table_param_(NULL),
@@ -142,6 +144,7 @@ public:
 public:
   transaction::ObTxDesc *trans_desc_;      // transaction handle
   transaction::ObTxReadSnapshot snapshot_;
+  bool fb_read_tx_uncommitted_;
   transaction::ObTransID tx_id_;           // used when read-latest
   int64_t tx_lock_timeout_;
   const share::schema::ObTableParam *table_param_;
@@ -153,7 +156,11 @@ public:
   OB_INLINE virtual bool is_valid() const {
     return  snapshot_.valid_ && ObVTableScanParam::is_valid();
   }
+  OB_INLINE bool use_index_skip_scan() const {
+    return (1 == ss_key_ranges_.count()) && (!ss_key_ranges_.at(0).is_whole_range());
+  }
   bool is_thread_scope_;
+  ObRangeArray ss_key_ranges_;  // used for index skip scan, use as postfix range for ObVTableScanParam::key_ranges_
 
   DECLARE_VIRTUAL_TO_STRING;
 private:
@@ -177,7 +184,9 @@ struct ObDMLBaseParam
         encrypt_meta_(NULL),
         encrypt_meta_legacy_(),
         spec_seq_no_(-1),
-        snapshot_()
+        snapshot_(),
+        direct_insert_task_id_(0),
+        write_flag_()
   {
   }
 
@@ -205,7 +214,11 @@ struct ObDMLBaseParam
   int64_t spec_seq_no_;
   // transaction snapshot
   transaction::ObTxReadSnapshot snapshot_;
+  int64_t direct_insert_task_id_; // 0 means no direct insert
+  // write flag for inner write processing
+  concurrent_control::ObWriteFlag write_flag_;
   bool is_valid() const { return (timeout_ > 0 && schema_version_ >= 0); }
+  bool is_direct_insert() const { return (direct_insert_task_id_ > 0); }
   DECLARE_TO_STRING;
 };
 

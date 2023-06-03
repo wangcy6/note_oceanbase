@@ -24,6 +24,7 @@
 #include "sql/plan_cache/ob_plan_cache_util.h"
 #include "observer/omt/ob_tenant_config_mgr.h"
 #include "share/client_feedback/ob_feedback_partition_struct.h"
+#include "sql/dblink/ob_dblink_utils.h"
 
 namespace oceanbase
 {
@@ -65,12 +66,14 @@ struct LocationConstraint
     RightIsSuperior             // right contains all the elements in left set
   };
   enum ConstraintFlag {
-    NoExtraFlag       = 0,
-    IsMultiPartInsert = 1,
+    NoExtraFlag        = 0,
+    IsMultiPartInsert  = 1,
     // 分区裁剪后基表只涉及到一个一级分区
-    SinglePartition   = 1 << 1,
+    SinglePartition    = 1 << 1,
     // 分区裁剪后基表每个一级分区都只涉及一个二级分区
-    SingleSubPartition= 1 << 2
+    SingleSubPartition = 1 << 2,
+    // is duplicate table not in dml
+    DupTabNotInDML     = 1 << 3
   };
   TableLocationKey key_;
   ObTableLocationType phy_loc_type_;
@@ -89,6 +92,7 @@ struct LocationConstraint
   inline bool is_multi_part_insert() const { return constraint_flags_ & IsMultiPartInsert; }
   inline bool is_partition_single() const { return constraint_flags_ & SinglePartition; }
   inline bool is_subpartition_single() const { return constraint_flags_ & SingleSubPartition; }
+  inline bool is_dup_table_not_in_dml() const {return constraint_flags_ & DupTabNotInDML; }
 
   bool operator==(const LocationConstraint &other) const;
   bool operator!=(const LocationConstraint &other) const;
@@ -110,7 +114,10 @@ struct ObLocationConstraintContext
   };
 
   ObLocationConstraintContext()
-      : base_table_constraints_(), strict_constraints_(), non_strict_constraints_()
+      : base_table_constraints_(),
+        strict_constraints_(),
+        non_strict_constraints_(),
+        dup_table_replica_cons_()
   {
   }
   ~ObLocationConstraintContext()
@@ -120,7 +127,10 @@ struct ObLocationConstraintContext
                                         const ObPwjConstraint *right,
                                         InclusionType &inclusion_result);
 
-  TO_STRING_KV(K_(base_table_constraints), K_(strict_constraints), K_(non_strict_constraints));
+  TO_STRING_KV(K_(base_table_constraints),
+               K_(strict_constraints),
+               K_(non_strict_constraints),
+               K_(dup_table_replica_cons));
   // 基表location约束，包括TABLE_SCAN算子上的基表和INSERT算子上的基表
   ObLocationConstraint base_table_constraints_;
   // 严格partition wise join约束，要求同一个分组内的基表分区逻辑上和物理上都相等。
@@ -129,6 +139,9 @@ struct ObLocationConstraintContext
   // 严格partition wise join约束，要求用一个分组内的基表分区物理上相等。
   // 每个分组是一个array，保存了对应基表在base_table_constraints_中的偏移
   common::ObSEArray<ObPwjConstraint *, 8, common::ModulePageAllocator, true> non_strict_constraints_;
+  // constraints for duplicate table's replica selection
+  // if not found values in this array, just use local server's replica.
+  common::ObSEArray<ObDupTabConstraint, 1, common::ModulePageAllocator, true> dup_table_replica_cons_;
 };
 
 class ObIVtScannerableFactory;
@@ -136,7 +149,6 @@ class ObSQLSessionMgr;
 class ObSQLSessionInfo;
 class ObIVirtualTableIteratorFactory;
 class ObRawExpr;
-class planText;
 class ObSQLSessionInfo;
 
 class ObSelectStmt;
@@ -243,7 +255,6 @@ public:
   ObQueryRetryInfo()
     : inited_(false),
       is_rpc_timeout_(false),
-      invalid_servers_(),
       last_query_retry_err_(common::OB_SUCCESS),
       retry_cnt_(0),
       query_switch_leader_retry_timeout_ts_(0)
@@ -259,16 +270,10 @@ public:
     is_rpc_timeout_ = false;
     // 这里不能清除逐次重试累计的成员，如：invalid_servers_，last_query_retry_err_
   }
-  int merge(const ObQueryRetryInfo &other);
 
   bool is_inited() const { return inited_; }
   void set_is_rpc_timeout(bool is_rpc_timeout);
   bool is_rpc_timeout() const;
-  int add_invalid_server_distinctly(const common::ObAddr &invalid_server, bool print_info_log = false);
-  const common::ObIArray<common::ObAddr> &get_invalid_servers() const
-  {
-    return invalid_servers_;
-  }
   void set_last_query_retry_err(int last_query_retry_err)
   {
     last_query_retry_err_ = last_query_retry_err;
@@ -299,13 +304,12 @@ public:
   int64_t get_retry_cnt() const { return retry_cnt_; }
 
 
-  TO_STRING_KV(K_(inited), K_(is_rpc_timeout), K_(invalid_servers), K_(last_query_retry_err));
+  TO_STRING_KV(K_(inited), K_(is_rpc_timeout), K_(last_query_retry_err));
 
 private:
   bool inited_; // 这个变量用于写一些防御性代码，基本没用
   // 用于标记是否是rpc返回的timeout错误码（包括本地超时和回包中的超时错误码）
   bool is_rpc_timeout_;
-  common::ObArray<common::ObAddr> invalid_servers_;
   // 重试阶段可以将错误码的处理分为三类:
   // 1.重试到超时，将timeout返回给客户端;
   // 2.不再重试的错误码，直接将其返回给客客户端;
@@ -314,7 +318,7 @@ private:
   int last_query_retry_err_;
   // this value include local retry & packet retry
   int64_t retry_cnt_;
-  // for fast fail, https://yuque.antfin-inc.com/ob/product_functionality_review/xdiwhw
+  // for fast fail,
   int64_t query_switch_leader_retry_timeout_ts_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObQueryRetryInfo);
@@ -325,17 +329,26 @@ class ObSqlSchemaGuard
 public:
   ObSqlSchemaGuard()
   { reset(); }
+  ~ObSqlSchemaGuard()
+  { reset(); }
   void set_schema_guard(share::schema::ObSchemaGetterGuard *schema_guard)
   { schema_guard_ = schema_guard; }
   share::schema::ObSchemaGetterGuard *get_schema_guard() const
   { return schema_guard_; }
   void reset();
+  int get_dblink_schema(const uint64_t tenant_id,
+                        const uint64_t dblink_id,
+                        const share::schema::ObDbLinkSchema *&dblink_schema);
   int get_table_schema(uint64_t dblink_id,
                        const common::ObString &database_name,
                        const common::ObString &table_name,
                        const share::schema::ObTableSchema *&table_schema,
-                       uint32_t sessid = 0);
-
+                       sql::ObSQLSessionInfo *session_info,
+                       const ObString &dblink_name,
+                       bool is_reverse_link);
+  int set_link_table_schema(uint64_t dblink_id,
+                            const common::ObString &database_name,
+                            share::schema::ObTableSchema *table_schema);
   int get_table_schema(uint64_t table_id,
                        uint64_t ref_table_id,
                        const ObDMLStmt *stmt,
@@ -352,28 +365,35 @@ public:
   int get_column_schema(uint64_t table_id, uint64_t column_id,
                         const share::schema::ObColumnSchemaV2 *&column_schema,
                         bool is_link = false) const;
-  int get_table_schema_version(const uint64_t table_id, int64_t &schema_version, bool is_link = false) const;
+  int get_table_schema_version(const uint64_t table_id, int64_t &schema_version) const;
   int get_can_read_index_array(uint64_t table_id,
                                uint64_t *index_tid_array,
                                int64_t &size,
                                bool with_mv,
                                bool with_global_index = true,
                                bool with_domain_index = true,
-                               bool is_link = false);
+                               bool with_spatial_index = true);
   int get_link_table_schema(uint64_t table_id,
                             const share::schema::ObTableSchema *&table_schema) const;
   int get_link_column_schema(uint64_t table_id, const common::ObString &column_name,
                              const share::schema::ObColumnSchemaV2 *&column_schema) const;
   int get_link_column_schema(uint64_t table_id, uint64_t column_id,
                              const share::schema::ObColumnSchemaV2 *&column_schema) const;
+  int fetch_link_current_scn(uint64_t dblink_id, uint64_t tenant_id, ObSQLSessionInfo *session_info,
+                             uint64_t &current_scn);
+  // get current scn from dblink. return OB_INVALID_ID if remote server not support current_scn
+  int get_link_current_scn(uint64_t dblink_id, uint64_t tenant_id, ObSQLSessionInfo *session_info,
+                           uint64_t &current_scn);
 public:
   static TableItem *get_table_item_by_ref_id(const ObDMLStmt *stmt, uint64_t ref_table_id);
   static bool is_link_table(const ObDMLStmt *stmt, uint64_t table_id);
 private:
   share::schema::ObSchemaGetterGuard *schema_guard_;
-  common::ModulePageAllocator allocator_;
+  common::ObArenaAllocator allocator_;
   common::ObSEArray<const share::schema::ObTableSchema *, 1> table_schemas_;
   uint64_t next_link_table_id_;
+  // key is dblink_id, value is current scn.
+  common::hash::ObHashMap<uint64_t, uint64_t> dblink_scn_;
 };
 
 struct ObBaselineKey
@@ -386,14 +406,14 @@ struct ObBaselineKey
   : db_id_(db_id),
     constructed_sql_(constructed_sql),
     sql_id_(sql_id) {}
-  
+
   inline void reset()
   {
     db_id_ = common::OB_INVALID_ID;
     constructed_sql_.reset();
     sql_id_.reset();
   }
-  
+
   TO_STRING_KV(K_(db_id),
                K_(constructed_sql),
                K_(sql_id));
@@ -408,6 +428,7 @@ struct ObSpmCacheCtx
   ObSpmCacheCtx()
     : bl_key_()
   {}
+  inline void reset() { bl_key_.reset(); }
   ObBaselineKey bl_key_;
 };
 
@@ -426,15 +447,24 @@ public:
   void reset();
 
   bool handle_batched_multi_stmt() const { return multi_stmt_item_.is_batched_multi_stmt(); }
-  share::ObFeedbackRerouteInfo *get_reroute_info()
+  void reset_reroute_info() {
+    if (nullptr != reroute_info_) {
+      op_reclaim_free(reroute_info_);
+    }
+    reroute_info_ = NULL;
+  }
+  share::ObFeedbackRerouteInfo *get_or_create_reroute_info()
   {
     if (nullptr == reroute_info_) {
       reroute_info_ = op_reclaim_alloc(share::ObFeedbackRerouteInfo);
     }
     return reroute_info_;
   }
+  share::ObFeedbackRerouteInfo *get_reroute_info() {
+    return reroute_info_;
+  }
   // release dynamic allocated memory
-  // https://aone.alibaba-inc.com/issue/19749534
+  //
   void clear();
 public:
   ObMultiStmtItem multi_stmt_item_;
@@ -471,6 +501,9 @@ public:
   // 严格partition wise join约束，要求用一个分组内的基表分区物理上相等。
   // 每个分组是一个array，保存了对应基表在base_table_constraints_中的偏移
   common::ObFixedArray<ObPwjConstraint *, common::ObIAllocator> non_strict_constraints_;
+  // constraints for duplicate table's replica selection
+  // if not found values in this array, just use local server's replica.
+  common::ObFixedArray<ObDupTabConstraint, common::ObIAllocator> dup_table_replica_cons_;
 
   // wether need late compilation
   bool need_late_compile_;
@@ -488,16 +521,27 @@ public:
   common::ObIArray<ObPCParamEqualInfo> *all_equal_param_constraints_;
   common::ObDList<ObPreCalcExprConstraint> *all_pre_calc_constraints_;
   common::ObIArray<ObExprConstraint> *all_expr_constraints_;
+  common::ObIArray<ObPCPrivInfo> *all_priv_constraints_;
   bool is_ddl_from_primary_;//备集群从主库同步过来需要处理的ddl sql语句
   const sql::ObStmt *cur_stmt_;
   const ObPhysicalPlan *cur_plan_;
 
   bool can_reroute_sql_; // 是否可以重新路由
   bool is_sensitive_;    // 是否含有敏感信息，若有则不记入 sql_audit
+  bool is_protocol_weak_read_; // record whether proxy set weak read for this request in protocol flag
   common::ObFixedArray<int64_t, common::ObIAllocator> multi_stmt_rowkey_pos_;
   ObRawExpr *flashback_query_expr_;
   ObSpmCacheCtx spm_ctx_;
   bool is_execute_call_stmt_;
+  bool enable_sql_resource_manage_;
+  uint64_t res_map_rule_id_;
+  int64_t res_map_rule_param_idx_;
+  uint64_t res_map_rule_version_;
+  bool is_text_ps_mode_;
+  bool is_strict_defensive_check_;
+  uint64_t first_plan_hash_;
+  common::ObString first_outline_data_;
+  bool is_bulk_;
 private:
   share::ObFeedbackRerouteInfo *reroute_info_;
 };
@@ -522,7 +566,7 @@ public:
       anonymous_view_count_(0),
       all_user_variable_(),
       has_udf_(false),
-      has_pl_udf_(false),
+      disable_udf_parallel_(false),
       has_is_table_(false),
       reference_obj_tables_(),
       is_table_gen_col_with_udf_(false),
@@ -533,7 +577,11 @@ public:
       prepare_param_count_(0),
       is_prepare_stmt_(false),
       has_nested_sql_(false),
-      tz_info_(NULL)
+      tz_info_(NULL),
+      res_map_rule_id_(common::OB_INVALID_ID),
+      res_map_rule_param_idx_(common::OB_INVALID_INDEX),
+      root_stmt_(NULL),
+      udf_has_select_stmt_(false)
   {
   }
   TO_STRING_KV(N_PARAM_NUM, question_marks_count_,
@@ -557,7 +605,7 @@ public:
     anonymous_view_count_ = 0;
     all_user_variable_.reset();
     has_udf_ = false;
-    has_pl_udf_ = false;
+    disable_udf_parallel_ = false;
     has_is_table_ = false;
     sql_schema_guard_.reset();
     reference_obj_tables_.reset();
@@ -570,6 +618,10 @@ public:
     is_prepare_stmt_ = false;
     has_nested_sql_ = false;
     tz_info_ = NULL;
+    res_map_rule_id_ = common::OB_INVALID_ID;
+    res_map_rule_param_idx_ = common::OB_INVALID_INDEX;
+    root_stmt_ = NULL;
+    udf_has_select_stmt_ = false;
   }
 
   int64_t get_new_stmt_id() { return stmt_count_++; }
@@ -597,6 +649,7 @@ public:
   void set_has_nested_sql(bool has_nested_sql) { has_nested_sql_ = has_nested_sql; }
   void set_timezone_info(const common::ObTimeZoneInfo *tz_info) { tz_info_ = tz_info; }
   const common::ObTimeZoneInfo *get_timezone_info() const { return tz_info_; }
+
 public:
   static const int64_t CALCULABLE_EXPR_NUM = 1;
   typedef common::ObSEArray<ObHiddenColumnItem, CALCULABLE_EXPR_NUM, common::ModulePageAllocator, true> CalculableItems;
@@ -624,10 +677,11 @@ public:
   common::ObSArray<ObPCParamEqualInfo, common::ModulePageAllocator, true> all_equal_param_constraints_;
   common::ObDList<ObPreCalcExprConstraint> all_pre_calc_constraints_;
   common::ObSArray<ObExprConstraint, common::ModulePageAllocator, true> all_expr_constraints_;
+  common::ObSArray<ObPCPrivInfo, common::ModulePageAllocator, true> all_priv_constraints_;
   common::ObSArray<ObUserVarIdentRawExpr *, common::ModulePageAllocator, true> all_user_variable_;
   common::hash::ObHashMap<uint64_t, ObObj, common::hash::NoPthreadDefendMode> calculable_expr_results_;
   bool has_udf_;
-  bool has_pl_udf_; //used to mark query has pl udf
+  bool disable_udf_parallel_; //used to deterministic pl udf parallel execute
   bool has_is_table_; // used to mark query has information schema table
   ObSqlSchemaGuard sql_schema_guard_;
   share::schema::ObReferenceObjTable reference_obj_tables_;
@@ -640,6 +694,10 @@ public:
   bool is_prepare_stmt_;
   bool has_nested_sql_;
   const common::ObTimeZoneInfo *tz_info_;
+  uint64_t res_map_rule_id_;
+  int64_t res_map_rule_param_idx_;
+  ObDMLStmt *root_stmt_;
+  bool udf_has_select_stmt_; // udf has select stmt, not contain other dml stmt
 };
 } /* ns sql*/
 } /* ns oceanbase */

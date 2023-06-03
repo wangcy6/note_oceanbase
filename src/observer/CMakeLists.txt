@@ -6,6 +6,7 @@ ob_set_subtarget(ob_server ALONE
 ob_set_subtarget(ob_server common
   ob_dump_task_generator.cpp
   ob_heartbeat.cpp
+  ob_heartbeat_handler.cpp
   ob_inner_sql_rpc_proxy.cpp
   ob_inner_sql_rpc_processor.cpp
   ob_inner_sql_connection.cpp
@@ -21,7 +22,6 @@ ob_set_subtarget(ob_server common
   ob_rpc_processor_simple.cpp
   ob_safe_destroy_thread.cpp
   ob_server_event_history_table_operator.cpp
-  ob_server_memory_cutter.cpp
   ob_server_reload_config.cpp
   ob_server_schema_updater.cpp
   ob_server_struct.cpp
@@ -44,7 +44,6 @@ ob_set_subtarget(ob_server common_mixed
   report/ob_tablet_table_updater.cpp
   report/ob_tenant_meta_checker.cpp
   report/ob_server_meta_table_checker.cpp
-  layer_perf/ob_layer_perf.cpp
 )
 
 ob_set_subtarget(ob_server dbms_job
@@ -99,6 +98,12 @@ ob_set_subtarget(ob_server mysql
   mysql/obsm_utils.cpp
 )
 
+ob_set_subtarget(ob_server net
+  net/ob_ingress_bw_alloc_service.cpp
+  net/ob_net_endpoint_ingress_rpc_proccessor.cpp
+  net/ob_net_endpoint_ingress_rpc_struct.cpp
+)
+
 ob_set_subtarget(ob_server omt
   omt/ob_multi_level_queue.cpp
   omt/ob_multi_tenant.cpp
@@ -111,9 +116,10 @@ ob_set_subtarget(ob_server omt
   omt/ob_tenant_timezone.cpp
   omt/ob_tenant_timezone_mgr.cpp
   omt/ob_th_worker.cpp
-  omt/ob_worker_pool.cpp
   omt/ob_worker_processor.cpp
   omt/ob_multi_tenant_operator.cpp
+  omt/ob_tenant_srs_mgr.cpp
+  omt/ob_tenant_srs.cpp
 )
 
 ob_set_subtarget(ob_server table
@@ -122,8 +128,8 @@ ob_set_subtarget(ob_server table
   table/ob_htable_filter_operator.cpp
   table/ob_htable_filter_parser.cpp
   table/ob_htable_filters.cpp
+  table/ob_table_filter.cpp
   table/ob_htable_utils.cpp
-  table/ob_table_api_row_iterator.cpp
   table/ob_table_batch_execute_processor.cpp
   table/ob_table_end_trans_cb.cpp
   table/ob_table_execute_processor.cpp
@@ -132,6 +138,66 @@ ob_set_subtarget(ob_server table
   table/ob_table_rpc_processor.cpp
   table/ob_table_query_sync_processor.cpp
   table/ob_table_service.cpp
+  table/ob_table_context.cpp
+  table/ob_table_executor.cpp
+  table/ob_table_delete_executor.cpp
+  table/ob_table_insert_executor.cpp
+  table/ob_table_insert_up_executor.cpp
+  table/ob_table_lock_executor.cpp
+  table/ob_table_modify_executor.cpp
+  table/ob_table_replace_executor.cpp
+  table/ob_table_scan_executor.cpp
+  table/ob_table_update_executor.cpp
+  table/ob_table_executor_factory.cpp
+  table/ob_table_cg_service.cpp
+  table/ob_table_cache.cpp
+  table/ob_table_session_pool.cpp
+  table/ob_table_op_wrapper.cpp
+  table/ob_table_query_common.cpp
+)
+
+ob_set_subtarget(ob_server table_load
+  table_load/ob_table_load_abort_processor.cpp
+  table_load/ob_table_load_autoinc_nextval.cpp
+  table_load/ob_table_load_begin_processor.cpp
+  table_load/ob_table_load_bucket.cpp
+  table_load/ob_table_load_commit_processor.cpp
+  table_load/ob_table_load_coordinator_ctx.cpp
+  table_load/ob_table_load_coordinator_trans.cpp
+  table_load/ob_table_load_coordinator.cpp
+  table_load/ob_table_load_csv_parser.cpp
+  table_load/ob_table_load_error_row_handler.cpp
+  table_load/ob_table_load_finish_processor.cpp
+  table_load/ob_table_load_general_table_compactor.cpp
+  table_load/ob_table_load_get_status_processor.cpp
+  table_load/ob_table_load_manager.cpp
+  table_load/ob_table_load_merger.cpp
+  table_load/ob_table_load_obj_cast.cpp
+  table_load/ob_table_load_parallel_merge_ctx.cpp
+  table_load/ob_table_load_parallel_merge_table_compactor.cpp
+  table_load/ob_table_load_partition_calc.cpp
+  table_load/ob_table_load_partition_location.cpp
+  table_load/ob_table_load_processor.cpp
+  table_load/ob_table_load_schema.cpp
+  table_load/ob_table_load_service.cpp
+  table_load/ob_table_load_store_ctx.cpp
+  table_load/ob_table_load_store_trans.cpp
+  table_load/ob_table_load_store.cpp
+  table_load/ob_table_load_table_compactor.cpp
+  table_load/ob_table_load_table_ctx.cpp
+  table_load/ob_table_load_task_scheduler.cpp
+  table_load/ob_table_load_task.cpp
+  table_load/ob_table_load_time_convert.cpp
+  table_load/ob_table_load_trans_bucket_writer.cpp
+  table_load/ob_table_load_trans_ctx.cpp
+  table_load/ob_table_load_trans_processor.cpp
+  table_load/ob_table_load_trans_store.cpp
+  table_load/ob_table_load_utils.cpp
+  table_load/ob_table_load_mem_compactor.cpp
+  table_load/ob_table_load_exec_ctx.cpp
+  table_load/ob_table_load_instance.cpp
+  table_load/ob_table_load_multiple_heap_table_compactor.cpp
+  table_load/ob_table_load_redef_table.cpp
 )
 
 ob_set_subtarget(ob_server virtual_table
@@ -147,6 +213,7 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_all_virtual_compaction_diagnose_info.cpp
   virtual_table/ob_all_virtual_server_compaction_event_history.cpp
   virtual_table/ob_all_virtual_compaction_suggestion.cpp
+  virtual_table/ob_all_virtual_tablet_compaction_info.cpp
   virtual_table/ob_all_virtual_dag.cpp
   virtual_table/ob_all_virtual_dag_warning_history.cpp
   virtual_table/ob_all_virtual_dblink_info.cpp
@@ -155,18 +222,24 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_all_virtual_dtl_first_cached_buffer.cpp
   virtual_table/ob_all_virtual_dtl_memory.cpp
   virtual_table/ob_all_virtual_dump_tenant_info.cpp
+  virtual_table/ob_all_virtual_dup_ls_lease_mgr.cpp
+  virtual_table/ob_all_virtual_dup_ls_tablets.cpp
+  virtual_table/ob_all_virtual_dup_ls_tablet_set.cpp
   virtual_table/ob_all_virtual_engine_table.cpp
   virtual_table/ob_all_virtual_files_table.cpp
   virtual_table/ob_all_virtual_id_service.cpp
   virtual_table/ob_all_virtual_io_stat.cpp
+  virtual_table/ob_all_virtual_kvcache_store_memblock.cpp
   virtual_table/ob_all_virtual_load_data_stat.cpp
   virtual_table/ob_all_virtual_lock_wait_stat.cpp
   virtual_table/ob_all_virtual_long_ops_status.cpp
   virtual_table/ob_all_virtual_ls_info.cpp
+  virtual_table/ob_all_virtual_timestamp_service.cpp
   virtual_table/ob_all_virtual_transaction_freeze_checkpoint.cpp
   virtual_table/ob_all_virtual_transaction_checkpoint.cpp
   virtual_table/ob_all_virtual_checkpoint.cpp
   virtual_table/ob_all_virtual_macro_block_marker_status.cpp
+  virtual_table/ob_all_virtual_malloc_sample_info.cpp
   virtual_table/ob_all_virtual_memory_context_stat.cpp
   virtual_table/ob_all_virtual_memory_info.cpp
   virtual_table/ob_all_virtual_memstore_info.cpp
@@ -186,6 +259,7 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_all_virtual_ps_stat.cpp
   virtual_table/ob_all_virtual_px_target_monitor.cpp
   virtual_table/ob_all_virtual_px_worker_stat.cpp
+  virtual_table/ob_all_virtual_px_p2p_datahub.cpp
   virtual_table/ob_all_virtual_dtl_interm_result_monitor.cpp
   virtual_table/ob_all_virtual_raid_stat.cpp
   virtual_table/ob_all_virtual_ls_archive_stat.cpp
@@ -223,10 +297,14 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_all_virtual_tenant_parameter_stat.cpp
   virtual_table/ob_all_virtual_tx_stat.cpp
   virtual_table/ob_all_virtual_tx_lock_stat.cpp
+  virtual_table/ob_all_virtual_tx_scheduler_stat.cpp
   virtual_table/ob_all_virtual_tx_ctx_mgr_stat.cpp
   virtual_table/ob_all_virtual_tx_data_table.cpp
+  virtual_table/ob_all_virtual_tx_data.cpp
   virtual_table/ob_all_virtual_weak_read_stat.cpp
   virtual_table/ob_all_virtual_log_stat.cpp
+  virtual_table/ob_all_virtual_arbitration_member_info.cpp
+  virtual_table/ob_all_virtual_arbitration_service_status.cpp
   virtual_table/ob_all_virtual_apply_stat.cpp
   virtual_table/ob_all_virtual_replay_stat.cpp
   virtual_table/ob_all_virtual_ha_diagnose.cpp
@@ -292,8 +370,14 @@ ob_set_subtarget(ob_server virtual_table
   virtual_table/ob_virtual_ash.cpp
   virtual_table/ob_virtual_sql_plan_statistics.cpp
   virtual_table/ob_virtual_table_iterator_factory.cpp
-  virtual_table/ob_virtual_trace_log.cpp
   virtual_table/ob_all_virtual_dml_stats.cpp
+  virtual_table/ob_all_virtual_archive_dest_status.cpp
+  virtual_table/ob_all_virtual_ls_log_restore_status.cpp
+  virtual_table/ob_virtual_span_info.cpp
+  virtual_table/ob_virtual_show_trace.cpp
+  virtual_table/ob_all_virtual_sql_plan.cpp
+  virtual_table/ob_all_virtual_opt_stat_gather_monitor.cpp
+  virtual_table/ob_all_virtual_thread.cpp
 )
 
 ob_server_add_target(ob_server)
@@ -342,6 +426,7 @@ if (NOT OB_USE_ASAN)
 endif()
 
 add_library(ob_main OBJECT main.cpp)
+config_ccls_flag(ob_main)
 target_link_libraries(ob_main PUBLIC ob_base)
 add_executable(observer)
 target_link_libraries(observer

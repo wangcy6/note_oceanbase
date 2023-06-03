@@ -25,7 +25,7 @@ using namespace oceanbase::sql;
 using namespace oceanbase::share;
 
 ObExprOrahash::ObExprOrahash(ObIAllocator &alloc)
-  :ObFuncExprOperator(alloc, T_FUN_SYS_ORAHASH, N_ORAHASH, PARAM_NUM_UNKNOWN, NOT_ROW_DIMENSION)
+  :ObFuncExprOperator(alloc, T_FUN_SYS_ORAHASH, N_ORAHASH, PARAM_NUM_UNKNOWN, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -66,7 +66,7 @@ int ObExprOrahash::calc_result_typeN(ObExprResType &type,
   return ret;
 }
 
-//算法详见 https://yuque.antfin-inc.com/ob-public/sql/sfaedg
+//算法详见
 uint64_t ObExprOrahash::hash_mod_oracle(uint64_t val, uint64_t buckets) const
 {
   uint64_t N = 1;

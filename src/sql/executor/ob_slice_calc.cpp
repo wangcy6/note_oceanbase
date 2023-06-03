@@ -707,8 +707,8 @@ int ObHashSliceIdCalc::calc_slice_idx(ObEvalCtx &eval_ctx, int64_t slice_size, i
       round_robin_idx_++;
       found_null = true;
       break;
-    } else {
-      hash_val = hash_funcs_->at(i).hash_func_(*datum, hash_val);
+    } else if (OB_FAIL(hash_funcs_->at(i).hash_func_(*datum, hash_val, hash_val))) {
+      LOG_WARN("failed to do hash", K(ret));
     }
   }
   if (OB_SUCC(ret) && !found_null) {
@@ -733,8 +733,8 @@ int ObHashSliceIdCalc::calc_hash_value(ObEvalCtx &eval_ctx, uint64_t &hash_val)
     const ObExpr* dist_expr = hash_dist_exprs_->at(i);
     if (OB_FAIL(dist_expr->eval(eval_ctx, datum))) {
       LOG_WARN("failed to eval datum", K(ret));
-    } else {
-      hash_val = hash_funcs_->at(i).hash_func_(*datum, hash_val);
+    } else if (OB_FAIL(hash_funcs_->at(i).hash_func_(*datum, hash_val, hash_val))) {
+      LOG_WARN("failed to do hash", K(ret));
     }
   }
   return ret;
@@ -950,9 +950,10 @@ bool ObSlaveMapPkeyRangeIdxCalc::Compare::operator()(
   } else {
     int cmp = 0;
     const int64_t cnt = sort_cmp_funs_->count();
-    for (int64_t i = 0; 0 == cmp && i < cnt; i++) {
-      cmp = sort_cmp_funs_->at(i).cmp_func_(l[i], r[i]);
-      if (cmp < 0) {
+    for (int64_t i = 0; OB_SUCC(ret) && 0 == cmp && i < cnt; i++) {
+      if (OB_FAIL(sort_cmp_funs_->at(i).cmp_func_(l[i], r[i], cmp))) {
+        LOG_WARN("do cmp failed", K(ret), K(i), K(l), K(r));
+      } else if (cmp < 0) {
         less = sort_collations_->at(i).is_ascending_;
       } else if (cmp > 0) {
         less = !sort_collations_->at(i).is_ascending_;
@@ -1264,9 +1265,10 @@ bool ObRangeSliceIdCalc::Compare::operator()(
   } else {
     int cmp = 0;
     const int64_t cnt = sort_cmp_funs_->count();
-    for (int64_t i = 0; 0 == cmp && i < cnt; i++) {
-      cmp = sort_cmp_funs_->at(i).cmp_func_(l[i], r[i]);
-      if (cmp < 0) {
+    for (int64_t i = 0; OB_SUCC(ret) && 0 == cmp && i < cnt; i++) {
+      if (OB_FAIL(sort_cmp_funs_->at(i).cmp_func_(l[i], r[i], cmp))) {
+        LOG_WARN("do cmp failed", K(ret), K(i), K(l), K(r));
+      } else if (cmp < 0) {
         less = sort_collations_->at(i).is_ascending_;
       } else if (cmp > 0) {
         less = !sort_collations_->at(i).is_ascending_;
@@ -1275,6 +1277,42 @@ bool ObRangeSliceIdCalc::Compare::operator()(
   }
   return less;
 }
+
+int ObWfHybridDistSliceIdCalc::get_slice_idx_vec(
+    const ObIArray<ObExpr*> &exprs, ObEvalCtx &eval_ctx,
+    ObBitVector &skip, const int64_t batch_size,
+    int64_t *&indexes)
+{
+  UNUSEDx(exprs, eval_ctx, skip, batch_size, indexes);
+  return common::OB_NOT_SUPPORTED;
+}
+
+int ObWfHybridDistSliceIdCalc::get_slice_indexes(const ObIArray<ObExpr*> &exprs,
+                                                 ObEvalCtx &eval_ctx,
+                                                 SliceIdxArray &slice_idx_array)
+{
+  int ret = OB_SUCCESS;
+
+  if (slice_id_calc_type_ <= SliceIdCalcType::INVALID
+      || slice_id_calc_type_ >= SliceIdCalcType::MAX) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("slice_id_calc_type_ is invalid", K(ret), K(slice_id_calc_type_));
+  } else if (SliceIdCalcType::BROADCAST == slice_id_calc_type_
+             && OB_FAIL(broadcast_slice_id_calc_.get_slice_indexes(
+                        exprs, eval_ctx, slice_idx_array))) {
+    LOG_WARN("get_slice_indexes failed", K(ret), K(slice_id_calc_type_));
+  } else if (SliceIdCalcType::RANDOM == slice_id_calc_type_
+             && OB_FAIL(random_slice_id_calc_.get_slice_indexes(
+                        exprs, eval_ctx, slice_idx_array))) {
+    LOG_WARN("get_slice_indexes failed", K(ret), K(slice_id_calc_type_));
+  } else if (SliceIdCalcType::HASH == slice_id_calc_type_
+             && OB_FAIL(hash_slice_id_calc_.get_slice_indexes(exprs, eval_ctx, slice_idx_array))) {
+    LOG_WARN("get_slice_indexes failed", K(ret), K(slice_id_calc_type_));
+  }
+
+  return ret;
+}
+
 
 int ObNullAwareHashSliceIdCalc::get_slice_indexes(const ObIArray<ObExpr*> &exprs,
                                                   ObEvalCtx &eval_ctx,
@@ -1338,5 +1376,73 @@ int ObNullAwareAffinitizedRepartSliceIdxCalc::get_slice_indexes(
     OZ(slice_idx_array.push_back(slice_idx));
   }
 
+  return ret;
+}
+
+int ObHybridHashSliceIdCalcBase::check_if_popular_value(ObEvalCtx &eval_ctx, bool &is_popular)
+{
+  int ret = OB_SUCCESS;
+  uint64_t hash_val = 0;
+  is_popular = false;
+  if (OB_ISNULL(popular_values_hash_) || popular_values_hash_->count() <= 0) {
+    // assume not popular, do nothing
+  } else if (OB_UNLIKELY(hash_calc_.hash_funcs_->count() != 1)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("only support 1 condition for hybrid hash for now. this may change later",
+             K(ret), K(hash_calc_.hash_funcs_->count()));
+  } else if (OB_FAIL(hash_calc_.calc_hash_value(eval_ctx, hash_val))) {
+    LOG_WARN("fail get hash value", K(ret));
+  } else {
+    //  build a small hash table to accelerate the lookup.
+    //  if popular_values_hash_->count() <= 3, we use array lookup instead
+    if (use_hash_lookup_) {
+      if (OB_HASH_EXIST == (ret = popular_values_map_.exist_refactored(hash_val))) {
+        is_popular = true;
+        ret = OB_SUCCESS; // popular value
+      } else if (OB_HASH_NOT_EXIST == ret) {
+        ret = OB_SUCCESS; // not popular value
+      } else {
+        LOG_WARN("fail lookup hash map", K(ret));
+      }
+    } else {
+      for (int64_t i = 0; i < popular_values_hash_->count(); ++i) {
+        if (hash_val == popular_values_hash_->at(i)) {
+          is_popular = true;
+          break;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObHybridHashRandomSliceIdCalc::get_slice_idx(
+      const ObIArray<ObExpr*> &exprs, ObEvalCtx &eval_ctx, int64_t &slice_idx)
+{
+  int ret = OB_SUCCESS;
+  bool is_popular = false;
+  if (OB_FAIL(check_if_popular_value(eval_ctx, is_popular))) {
+    LOG_WARN("fail check if value popular", K(ret));
+  } else if (is_popular) {
+    ret = random_calc_.get_slice_idx(exprs, eval_ctx, slice_idx);
+  } else {
+    ret = hash_calc_.get_slice_idx(exprs, eval_ctx, slice_idx);
+  }
+  return ret;
+}
+
+
+int ObHybridHashBroadcastSliceIdCalc::get_slice_indexes(
+    const ObIArray<ObExpr*> &exprs, ObEvalCtx &eval_ctx, SliceIdxArray &slice_idx_array)
+{
+  int ret = OB_SUCCESS;
+  bool is_popular = false;
+  if (OB_FAIL(check_if_popular_value(eval_ctx, is_popular))) {
+    LOG_WARN("fail check if value popular", K(ret));
+  } else if (is_popular) {
+    ret = broadcast_calc_.get_slice_indexes(exprs, eval_ctx, slice_idx_array);
+  } else {
+    ret = hash_calc_.get_slice_indexes(exprs, eval_ctx, slice_idx_array);
+  }
   return ret;
 }

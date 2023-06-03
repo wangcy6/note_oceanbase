@@ -25,6 +25,7 @@
 #include "lib/profile/ob_trace_id.h"
 
 #include "share/partition_table/ob_partition_location.h"
+#include "share/ob_all_server_tracer.h"
 #include "observer/ob_server_struct.h"
 
 namespace oceanbase
@@ -222,9 +223,7 @@ void ObDBMSJobThread::handle(void *task)
   if (OB_ISNULL(task)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("null ptr", K(ret), K(task));
-  } else if (OB_ISNULL(master = static_cast<ObDBMSJobMaster *>(task))) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("master is null", K(ret), K(master), K(task));
+  } else if (FALSE_IT(master = static_cast<ObDBMSJobMaster *>(task))) {
   } else if (OB_FAIL(master->scheduler())) {
     LOG_ERROR("fail to run dbms job master", K(ret));
   }
@@ -237,28 +236,23 @@ ObDBMSJobMaster &ObDBMSJobMaster::get_instance()
   return master_;
 }
 
-int ObDBMSJobMaster::init(ObServerManager *server_mgr,
-                          ObISQLClient *sql_client,
+int ObDBMSJobMaster::init(ObISQLClient *sql_client,
                           ObMultiVersionSchemaService *schema_service)
 {
   int ret = OB_SUCCESS;
   uint64_t ready_queue_size = MAX_READY_JOBS_CAPACITY;
   if (is_mini_mode()) {
-    ready_queue_size /= (lib::ObRunningModeConfig::MINI_MEM_UPPER / lib::ObRunningModeConfig::instance().memory_limit_);
+    ready_queue_size *= lib::mini_mode_resource_ratio();
   }
   if (inited_) {
     ret = OB_INIT_TWICE;
     LOG_WARN("dbms job master already inited", K(ret), K(inited_));
-  } else if (OB_ISNULL(server_mgr)
-          || OB_ISNULL(sql_client)
+  } else if (OB_ISNULL(sql_client)
           || OB_ISNULL(schema_service)
           || OB_ISNULL(GCTX.dbms_job_rpc_proxy_)
           ) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("null ptr", K(ret), K(server_mgr), K(sql_client), K(schema_service));
-  } else if (!server_mgr->is_inited()) {
-    ret = OB_NOT_INIT;
-    LOG_WARN("server manager not init yet", K(ret));
+    LOG_WARN("null ptr", K(ret), K(sql_client), K(schema_service));
   } else if (OB_FAIL(ready_queue_.init(ready_queue_size))) {
     LOG_WARN("fail to init ready job queue for all jobs", K(ret));
   } else if (OB_FAIL(scheduler_task_.init(&ready_queue_))) {
@@ -275,7 +269,6 @@ int ObDBMSJobMaster::init(ObServerManager *server_mgr,
   } else {
     trace_id_ = ObCurTraceId::get();
     self_addr_ = GCONF.self_addr_;
-    server_mgr_ = server_mgr;
     schema_service_ = schema_service;
     job_rpc_proxy_ = GCTX.dbms_job_rpc_proxy_;
     inited_ = true;
@@ -483,9 +476,6 @@ int ObDBMSJobMaster::get_all_servers(int64_t tenant_id, ObString &pick_zone, ObI
   } else if (OB_INVALID_ID == tenant_id) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid job id", K(ret), K(tenant_id));
-  } else if (!server_mgr_->is_inited()) {
-    ret = OB_NOT_INIT;
-    LOG_WARN("server manager not init yet!", K(ret));
   } else if (OB_FAIL(schema_service_->get_tenant_schema_guard(OB_SYS_TENANT_ID, schema_guard))) {
     LOG_WARN("fail get schema guard", K(ret));
   } else if (OB_FAIL(schema_guard.get_tenant_info(tenant_id, tenant_info))) {
@@ -502,8 +492,8 @@ int ObDBMSJobMaster::get_all_servers(int64_t tenant_id, ObString &pick_zone, ObI
       if (pick_zone.empty()
        || 0 == pick_zone.case_compare(dbms_job::ObDBMSJobInfo::__ALL_SERVER_BC)
        || 0 == pick_zone.case_compare(zone.str())) {
-        if (OB_FAIL(server_mgr_->get_alive_servers(zone, server_list))) {
-          LOG_WARN("fail to get zone server list", K(ret));
+        if (OB_FAIL(SVR_TRACER.get_alive_servers(zone, server_list))) {
+          LOG_WARN("fail to get zone server list", KR(ret), K(zone));
         } else {
           for (int64_t j = 0; OB_SUCC(ret) && j < server_list.count(); j++) {
             if (common::is_contain(servers, server_list.at(j))) {
@@ -513,7 +503,7 @@ int ObDBMSJobMaster::get_all_servers(int64_t tenant_id, ObString &pick_zone, ObI
             }
           }
         }
-      } 
+      }
     }
   }
   return ret;
@@ -539,12 +529,16 @@ int ObDBMSJobMaster::server_random_pick(int64_t tenant_id, ObString &pick_zone, 
     while (OB_SUCC(ret) && cnt < total_server.count()) {
       pos = (pos + 1) % total_server.count();
       pick = total_server.at(pos);
-      server_mgr_->check_server_alive(pick, is_alive);
-      server_mgr_->check_server_active(pick, is_active);
-      if (is_alive && is_active) {
-        break;
+      if (OB_FAIL(SVR_TRACER.check_server_alive(pick, is_alive))) {
+        LOG_WARN("fail to check server alive", KR(ret), K(pick));
+      } else if (OB_FAIL(SVR_TRACER.check_server_active(pick, is_active))) {
+        LOG_WARN("fail to check server active", KR(ret), K(pick));
+      } else {
+        if (is_alive && is_active) {
+          break;
+        }
+        cnt++;
       }
-      cnt++;
     }
     if (OB_FAIL(ret)) {
     } else if (cnt >= total_server.count()) {
@@ -731,4 +725,3 @@ int ObDBMSJobMaster::register_job(
 
 } // end for namespace dbms_job
 } // end for namespace oceanbase
-

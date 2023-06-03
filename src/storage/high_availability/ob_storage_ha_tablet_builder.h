@@ -73,6 +73,7 @@ public:
   int build_tablets_sstable_info();
   int update_local_tablets();
   const CopyTabletSimpleInfoMap &get_tablets_simple_info_map() { return tablet_simple_info_map_ ; }
+  int get_src_deleted_tablet_list(common::ObIArray<common::ObTabletID> &tablet_id_list);
 
 private:
   int get_tablet_info_reader_(ObICopyTabletInfoReader *&reader);
@@ -103,12 +104,19 @@ private:
       const ObTablet *tablet,
       const ObSSTableArray &ddl_sstable_array,
       share::ObScnRange &scn_range);
+<<<<<<< HEAD
   int get_ddl_sstable_max_start_scn_(
+=======
+  int get_ddl_sstable_min_start_scn_(
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       const ObSSTableArray &ddl_sstable_array,
       share::SCN &max_start_scn);
   int hold_local_reuse_sstable_(
       const common::ObTabletID &tablet_id,
-      ObTablesHandleArray &tables_handle);
+      ObTablesHandleArray &tables_handle,
+      ObStorageSchema &storage_schema,
+      compaction::ObMediumCompactionInfoList &medium_info_list,
+      common::ObIAllocator &allocator);
   int hold_local_complete_tablet_sstable_(
       ObTablet *tablet,
       ObTablesHandleArray &tables_handle);
@@ -132,15 +140,20 @@ private:
   int update_local_tablet_(
       const obrpc::ObCopyTabletInfo &tablet_info,
       ObLS *ls);
-
   int create_tablet_remote_logical_sstable_(
       ObTablet *tablet,
       ObTablesHandleArray &tables_handle);
-
+  int create_tablet_with_major_sstables_(
+      ObLS *ls,
+      const obrpc::ObCopyTabletInfo &tablet_info,
+      const ObTablesHandleArray &major_tables,
+      const ObStorageSchema &storage_schema,
+      const compaction::ObMediumCompactionInfoList &medium_info_list);
 private:
   bool is_inited_;
   ObStorageHATabletsBuilderParam param_;
   CopyTabletSimpleInfoMap tablet_simple_info_map_;
+  ObArray<common::ObTabletID> deleted_tablet_id_list_;
   DISALLOW_COPY_AND_ASSIGN(ObStorageHATabletsBuilder);
 };
 
@@ -263,6 +276,55 @@ private:
   CopySSTableMacroRangeInfoMap macro_range_info_map_;
 
   DISALLOW_COPY_AND_ASSIGN(ObStorageHACopySSTableInfoMgr);
+};
+
+class ObStorageHATabletBuilderUtil
+{
+public:
+  static int build_tablet_with_major_tables(
+      ObLS *ls,
+      const common::ObTabletID &tablet_id,
+      const ObTablesHandleArray &major_tables,
+      const ObStorageSchema &storage_schema,
+      const compaction::ObMediumCompactionInfoList &medium_info_list);
+  static int build_table_with_minor_tables(
+      ObLS *ls,
+      const common::ObTabletID &tablet_id,
+      const ObMigrationTabletParam *src_tablet_meta,
+      const ObTablesHandleArray &minor_tables);
+  static int build_table_with_ddl_tables(
+      ObLS *ls,
+      const common::ObTabletID &tablet_id,
+      const ObTablesHandleArray &ddl_tables);
+  static int check_remote_logical_sstable_exist(
+      ObTablet *tablet,
+      bool &is_exist);
+private:
+  static int get_tablet_(
+      const common::ObTabletID &tablet_id,
+      ObLS *ls,
+      ObTabletHandle &tablet_handle);
+  static int calc_multi_version_start_with_major_(
+      const ObTablesHandleArray &major_tables,
+      ObTablet *tablet,
+      int64_t &multi_version_start);
+  static int inner_update_tablet_table_store_with_major_(
+      const int64_t multi_version_start,
+      ObLS *ls,
+      ObTablet *tablet,
+      ObITable *table,
+      const ObStorageSchema &storage_schema,
+      const compaction::ObMediumCompactionInfoList &medium_info_list);
+  static int inner_update_tablet_table_store_with_minor_(
+      ObLS *ls,
+      ObTablet *tablet,
+      const bool &need_tablet_meta_merge,
+      const ObMigrationTabletParam *src_tablet_meta,
+      const ObTablesHandleArray &tables_handle);
+  static int check_need_merge_tablet_meta_(
+      const ObMigrationTabletParam *src_tablet_meta,
+      ObTablet *tablet,
+      bool &need_merge);
 };
 
 

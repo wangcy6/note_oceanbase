@@ -12,6 +12,7 @@
 
 #define USING_LOG_PREFIX STORAGE
 
+<<<<<<< HEAD
 #include "ob_ddl_struct.h"
 #include "share/scn.h"
 #include "storage/blocksstable/ob_block_manager.h"
@@ -20,18 +21,18 @@
 #include "storage/blocksstable/ob_macro_block_struct.h"
 #include "share/ob_force_print_log.h"
 #include "share/schema/ob_multi_version_schema_service.h"
+=======
+#include "storage/ddl/ob_ddl_struct.h"
+#include "storage/ddl/ob_tablet_ddl_kv.h"
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 #include "storage/ddl/ob_tablet_ddl_kv_mgr.h"
-#include "storage/tx_storage/ob_ls_service.h"
-#include "storage/meta_mem/ob_tablet_handle.h"
-#include "storage/ddl/ob_ddl_merge_task.h"
-#include "storage/tx_storage/ob_ls_handle.h"
-#include "storage/compaction/ob_schedule_dag_func.h"
+#include "storage/tablet/ob_tablet.h"
+#include "storage/blocksstable/ob_block_manager.h"
+#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
 
 using namespace oceanbase::storage;
 using namespace oceanbase::blocksstable;
-using namespace oceanbase::clog;
 using namespace oceanbase::share;
-using namespace oceanbase::share::schema;
 
 ObDDLMacroHandle::ObDDLMacroHandle()
   : block_id_()
@@ -130,6 +131,7 @@ bool ObDDLMacroBlock::is_valid() const
 }
 
 
+<<<<<<< HEAD
 ObDDLKV::ObDDLKV()
   : is_inited_(false), ls_id_(), tablet_id_(), ddl_start_scn_(SCN::min_scn()), snapshot_version_(0),
     lock_(), allocator_("DDL_KV"), is_freezed_(false), is_closed_(false), last_freezed_scn_(SCN::min_scn()),
@@ -509,6 +511,9 @@ int ObDDLKVsHandle::get_ddl_kv(const int64_t idx, ObDDLKV *&kv)
 }
 
 ObDDLKVPendingGuard::ObDDLKVPendingGuard(ObTablet *tablet, const SCN &scn)
+=======
+ObDDLKVPendingGuard::ObDDLKVPendingGuard(ObTablet *tablet, const SCN &start_scn, const SCN &scn)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   : tablet_(tablet), scn_(scn), kv_handle_(), ret_(OB_SUCCESS)
 {
   int ret = OB_SUCCESS;
@@ -519,11 +524,13 @@ ObDDLKVPendingGuard::ObDDLKVPendingGuard(ObTablet *tablet, const SCN &scn)
     LOG_WARN("invalid arguments", K(ret), KP(tablet), K(scn));
   } else if (OB_FAIL(tablet->get_ddl_kv_mgr(ddl_kv_mgr_handle))) {
     LOG_WARN("get ddl kv mgr failed", K(ret));
+<<<<<<< HEAD
   } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->get_or_create_ddl_kv(scn, kv_handle_))) {
+=======
+  } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->get_or_create_ddl_kv(start_scn, scn, kv_handle_))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     LOG_WARN("acquire ddl kv failed", K(ret));
-  } else if (OB_FAIL(kv_handle_.get_ddl_kv(curr_kv))) {
-    LOG_WARN("fail to get ddl kv", K(ret));
-  } else if (OB_ISNULL(curr_kv)) {
+  } else if (OB_ISNULL(curr_kv = static_cast<ObDDLKV *>(kv_handle_.get_table()))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("error unexpected, active ddl kv must not be nullptr", K(ret));
   } else {
@@ -541,8 +548,8 @@ int ObDDLKVPendingGuard::get_ddl_kv(ObDDLKV *&kv)
   kv = nullptr;
   if (OB_FAIL(ret_)) {
     // do nothing
-  } else if (OB_FAIL(kv_handle_.get_ddl_kv(kv))) {
-    LOG_WARN("fail to get ddl kv", K(ret));
+  } else {
+    kv = static_cast<ObDDLKV *>(kv_handle_.get_table());
   }
   return ret;
 }
@@ -551,10 +558,8 @@ ObDDLKVPendingGuard::~ObDDLKVPendingGuard()
 {
   int ret = OB_SUCCESS;
   if (OB_SUCCESS == ret_) {
-    ObDDLKV *curr_kv = nullptr;
-    if (OB_FAIL(kv_handle_.get_ddl_kv(curr_kv))) {
-      LOG_ERROR("error unexpected, can not get ddl kv", K(ret));
-    } else if (nullptr != curr_kv) {
+    ObDDLKV *curr_kv = static_cast<ObDDLKV *>(kv_handle_.get_table());
+    if (nullptr != curr_kv) {
       curr_kv->dec_pending_cnt();
     }
   }
@@ -572,9 +577,16 @@ int ObDDLKVPendingGuard::set_macro_block(ObTablet *tablet, const ObDDLMacroBlock
     int64_t try_count = 0;
     while ((OB_SUCCESS == ret || OB_EAGAIN == ret) && try_count < MAX_RETRY_COUNT) {
       ObDDLKV *ddl_kv = nullptr;
+<<<<<<< HEAD
       ObDDLKVPendingGuard guard(tablet, macro_block.scn_);
+=======
+      ObDDLKVPendingGuard guard(tablet, macro_block.ddl_start_scn_, macro_block.scn_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       if (OB_FAIL(guard.get_ddl_kv(ddl_kv))) {
         LOG_WARN("get ddl kv failed", K(ret));
+      } else if (OB_ISNULL(ddl_kv)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("ddl kv is null", K(ret), KP(ddl_kv), K(guard));
       } else if (OB_FAIL(ddl_kv->set_macro_block(macro_block))) {
         LOG_WARN("fail to set macro block info", K(ret));
       } else {

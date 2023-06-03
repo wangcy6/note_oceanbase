@@ -24,10 +24,12 @@ namespace sql
 class ObInsertStmtPrinter : public ObDMLStmtPrinter {
 
 public:
-  ObInsertStmtPrinter() {}
+  ObInsertStmtPrinter()=delete;
   ObInsertStmtPrinter(char *buf, int64_t buf_len, int64_t *pos, const ObInsertStmt *stmt,
-                      common::ObObjPrintParams print_params) :
-    ObDMLStmtPrinter(buf, buf_len, pos, stmt, print_params) {}
+                      ObSchemaGetterGuard *schema_guard,
+                      common::ObObjPrintParams print_params,
+                      const ParamStore *param_store = NULL) :
+    ObDMLStmtPrinter(buf, buf_len, pos, stmt, schema_guard, print_params, param_store) {}
   virtual ~ObInsertStmtPrinter() {}
 
   void init(char *buf, int64_t buf_len, int64_t *pos, ObInsertStmt *stmt);
@@ -40,8 +42,6 @@ private:
   int print_insert();
   int print_into();
   int print_values();
-
-  int print_subquery(const ObInsertStmt *insert_stmt);
 
   // disallow copy
   DISALLOW_COPY_AND_ASSIGN(ObInsertStmtPrinter);

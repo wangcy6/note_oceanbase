@@ -100,8 +100,10 @@ int ObColumnEqualEncoder::traverse(bool &suitable)
     // in exception meta, fix_data_cnt_ is uint8_t,
     // to avoid overflow, we have to limit the max excepction count
     const int64_t max_exc_cnt = std::min(MAX_EXC_CNT, rows_->count() * EXC_THRESHOLD_PCT / 100 + 1);
+    bool has_lob_header = is_lob_storage(column_type_.get_type());
     sql::ObExprBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(
-        column_type_.get_type(), column_type_.get_collation_type());
+        column_type_.get_type(), column_type_.get_collation_type(), column_type_.get_scale(),
+        lib::is_oracle_mode(), has_lob_header);
     ObCmpFunc cmp_func;
     cmp_func.cmp_func_ = lib::is_oracle_mode()
         ? basic_funcs->null_last_cmp_ : basic_funcs->null_first_cmp_;
@@ -111,10 +113,11 @@ int ObColumnEqualEncoder::traverse(bool &suitable)
          && exc_row_ids_.count() <= max_exc_cnt; ++row_id) {
       const ObDatum &datum = ctx_->col_datums_->at(row_id);
       const ObDatum &ref_datum = ref_ctx_->col_datums_->at(row_id);
-      if (!is_datum_equal(datum, ref_datum, cmp_func)) {
-        if (OB_FAIL(exc_row_ids_.push_back(row_id))) {
-          LOG_WARN("push_back failed", K(ret), K(row_id));
-        }
+      bool equal = false;
+      if (OB_FAIL(is_datum_equal(datum, ref_datum, cmp_func, equal))) {
+        LOG_WARN("cmp datum failed", K(ret), K(row_id));
+      } else if (!equal && OB_FAIL(exc_row_ids_.push_back(row_id))) {
+        LOG_WARN("push_back failed", K(ret), K(row_id));
       }
     }
 
@@ -147,7 +150,8 @@ int ObColumnEqualEncoder::traverse(bool &suitable)
           }
           case ObStringSC:
           case ObTextSC:
-          case ObJsonSC: {
+          case ObJsonSC:
+          case ObGeometrySC: {
             ObStringBitMapMetaWriter *meta_writer =
                 static_cast<ObStringBitMapMetaWriter *>(&base_meta_writer_);
             if (OB_FAIL(meta_writer->init(&exc_row_ids_, ctx_->col_datums_, column_type_))) {
@@ -251,7 +255,8 @@ int ObColumnEqualEncoder::store_meta(ObBufferWriter &writer)
           }
           case ObStringSC:
           case ObTextSC:
-          case ObJsonSC: {
+          case ObJsonSC:
+          case ObGeometrySC: {
             ObStringBitMapMetaWriter *meta_writer =
                 static_cast<ObStringBitMapMetaWriter *>(&base_meta_writer_);
             if (OB_FAIL(meta_writer->write(buf))) {

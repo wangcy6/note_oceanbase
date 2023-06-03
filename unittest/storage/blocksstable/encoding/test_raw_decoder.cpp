@@ -135,7 +135,8 @@ int ObMicroBlockRawEncoder::build_block(char *&buf, int64_t &size)
     // <5> fill header
     if (OB_SUCC(ret)) {
       header_->row_count_ = static_cast<int16_t>(datum_rows_.count());
-      header_->encoding_has_out_row_column_ = has_out_row_column_;
+      header_->has_string_out_row_ = has_string_out_row_;
+      header_->all_lob_in_row_ = !has_lob_out_row_;
 
 
       const int64_t header_size = header_->header_size_;
@@ -204,7 +205,10 @@ public:
   virtual void SetUp();
   virtual void TearDown() {}
 
-  TestRawDecoder() {}
+  TestRawDecoder():tenant_ctx_(OB_SERVER_TENANT_ID)
+  {
+    share::ObTenantEnv::set_tenant(&tenant_ctx_);
+  }
   virtual ~TestRawDecoder() {}
 
   void setup_obj(ObObj& obj, int64_t column_id, int64_t seed);
@@ -223,6 +227,7 @@ protected:
   ObTableReadInfo read_info_;
   int64_t full_column_cnt_;
   ObArenaAllocator allocator_;
+  share::ObTenantBase tenant_ctx_;
 };
 
 void TestRawDecoder::SetUp()
@@ -305,7 +310,7 @@ void TestRawDecoder::SetUp()
   ctx_.column_cnt_ = COLUMN_CNT + extra_rowkey_cnt;
   ctx_.col_descs_ = &col_descs_;
 
-  int64_t column_encodings[ctx_.column_cnt_];
+  int64_t *column_encodings = reinterpret_cast<int64_t *>(allocator_.alloc(sizeof(int64_t) * ctx_.column_cnt_));
   ctx_.column_encodings_ = column_encodings;
   for (int64_t i = 0; i < ctx_.column_cnt_; ++i) {
     ctx_.column_encodings_[i] = ObColumnHeader::Type::RAW;

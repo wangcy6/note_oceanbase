@@ -49,12 +49,28 @@ void ObWorkerProcessor::th_destroy()
   translator_.th_destroy();
 }
 
+#ifdef ERRSIM
+ERRSIM_POINT_DEF(EN_WORKER_PROCESS_REQUEST)
+#endif
+
+int ObWorkerProcessor::process_err_test()
+{
+  int ret = OB_SUCCESS;
+
+#ifdef ERRSIM
+  ret = EN_WORKER_PROCESS_REQUEST;
+#endif
+  return ret;
+}
+
 inline int ObWorkerProcessor::process_one(rpc::ObRequest &req)
 {
   int ret = OB_SUCCESS;
   ObReqProcessor *processor = NULL;
 
-  if (OB_FAIL(translator_.translate(req, processor))) {
+  if (OB_FAIL(process_err_test())) {
+    LOG_WARN("ignore request with err_test", K(ret));
+  } else if (OB_FAIL(translator_.translate(req, processor))) {
     LOG_WARN("translate request fail", K(ret));
     on_translate_fail(&req, ret);
   } else if (OB_ISNULL(processor)) {
@@ -95,8 +111,13 @@ int ObWorkerProcessor::process(rpc::ObRequest &req)
         = static_cast<const obrpc::ObRpcPacket&>(req.get_packet());
     NG_TRACE_EXT(start_rpc, OB_ID(addr), RPC_REQ_OP.get_peer(&req), OB_ID(pcode), packet.get_pcode());
     ObCurTraceId::set(req.generate_trace_id(myaddr_));
-    if (OB_LOG_LEVEL_NONE != packet.get_log_level() && enable_trace_log) {
-      ObThreadLogLevelUtils::init(packet.get_log_level());
+    // Do not set thread local log level while log level upgrading (OB_LOGGER.is_info_as_wdiag)
+    if (OB_LOGGER.is_info_as_wdiag()) {
+      ObThreadLogLevelUtils::clear();
+    } else {
+      if (enable_trace_log && OB_LOG_LEVEL_NONE != packet.get_log_level()) {
+        ObThreadLogLevelUtils::init(packet.get_log_level());
+      }
     }
   } else if (ObRequest::OB_MYSQL == req_type) {
     NG_TRACE_EXT(start_sql, OB_ID(addr), SQL_REQ_OP.get_peer(&req));

@@ -33,8 +33,10 @@ namespace sql
 {
 struct ObDASTableLocMeta;
 struct ObDASTabletLoc;
+class ObQueryRetryInfo;
 class ObDASCtx;
 typedef common::ObFixedArray<common::ObAddr, common::ObIAllocator> AddrArray;
+typedef common::hash::ObHashMap<common::ObObjectID, common::ObObjectID, common::hash::NoPthreadDefendMode> ObPartitionIdMap;
 
 class VirtualSvrPair
 {
@@ -68,22 +70,50 @@ private:
 class DASRelatedTabletMap : public share::schema::IRelatedTabletMap
 {
   friend class ObDASCtx;
+public:
+  struct Key
+  {
+    int hash(uint64_t &res)
+    {
+      res += common::murmurhash(&src_tablet_id_, sizeof(src_tablet_id_), res);
+      res += common::murmurhash(&related_table_id_, sizeof(related_table_id_), res);
+      return common::OB_SUCCESS;
+    }
+
+    bool operator ==(const Key &other) const
+    {
+      return (other.src_tablet_id_ == src_tablet_id_
+          && other.related_table_id_ == related_table_id_);
+    }
+
+    TO_STRING_KV(K_(src_tablet_id),
+                 K_(related_table_id));
+    common::ObTabletID src_tablet_id_;
+    common::ObTableID related_table_id_;
+  };
+
+  struct Value
+  {
+    TO_STRING_KV(K_(tablet_id),
+                 K_(part_id),
+                 K_(first_level_part_id));
+    common::ObTabletID tablet_id_;
+    common::ObObjectID part_id_;
+    // only valid if partition level of related table is level two
+    common::ObObjectID first_level_part_id_;
+  };
+
   struct MapEntry
   {
     OB_UNIS_VERSION(1);
   public:
-    TO_STRING_KV(K_(src_tablet_id),
-                 K_(related_table_id),
-                 K_(related_tablet_id),
-                 K_(related_part_id));
-    common::ObTabletID src_tablet_id_;
-    common::ObTableID related_table_id_;
-    common::ObTabletID related_tablet_id_;
-    common::ObObjectID related_part_id_;
+    TO_STRING_KV(K_(key),
+                 K_(val));
+    Key key_;
+    Value val_;
   };
   typedef common::ObList<MapEntry, common::ObIAllocator> RelatedTabletList;
-public:
-  typedef std::pair<common::ObTabletID, common::ObObjectID> Value;
+  typedef common::hash::ObHashMap<Key*, Value*, common::hash::NoPthreadDefendMode> RelatedTabletMap;
 public:
   DASRelatedTabletMap(common::ObIAllocator &allocator)
     : list_(allocator),
@@ -94,28 +124,44 @@ public:
   virtual int add_related_tablet_id(common::ObTabletID src_tablet_id,
                                     common::ObTableID related_table_id,
                                     common::ObTabletID related_tablet_id,
-                                    common::ObObjectID related_part_id) override;
-  int get_related_tablet_id(common::ObTabletID src_tablet_id,
-                            common::ObTableID related_table_id,
-                            Value &val);
-  void clear() { list_.clear(); }
-  TO_STRING_KV(K_(list));
+                                    common::ObObjectID related_part_id,
+                                    common::ObObjectID related_first_level_part_id) override;
+  const Value *get_related_tablet_id(common::ObTabletID src_tablet_id,
+                                     common::ObTableID related_table_id);
+  int assign(const RelatedTabletList &list);
+  int insert_related_tablet_map();
+  void clear()
+  {
+    list_.clear();
+    map_.clear();
+  }
+  const RelatedTabletList &get_list() const { return list_; }
+  TO_STRING_KV(K_(list), "map_size", map_.size());
 private:
+  const int64_t FAST_LOOP_LIST_LEN = 100;
   //There are usually not many tablets for a query.
   //At this stage, use list to simulate map search,
   //and then optimize if there are performance problems later.
   RelatedTabletList list_;
+  //
+  RelatedTabletMap map_;
   common::ObIAllocator &allocator_;
 };
 
 class ObDASTabletMapper
 {
   friend class ObDASCtx;
+  typedef common::ObList<DASRelatedTabletMap::MapEntry, common::ObIAllocator> RelatedTabletList;
 public:
   ObDASTabletMapper()
     : table_schema_(nullptr),
       vt_svr_pair_(nullptr),
-      related_info_()
+      related_info_(),
+      is_non_partition_optimized_(false),
+      tablet_id_(ObTabletID::INVALID_TABLET_ID),
+      object_id_(OB_INVALID_ID),
+      related_list_(nullptr),
+      partition_id_map_(nullptr)
   {
   }
 
@@ -185,7 +231,8 @@ public:
                                    common::ObIArray<common::ObObjectID> &out_part_ids);
   int get_all_tablet_and_object_id(common::ObIArray<common::ObTabletID> &tablet_ids,
                                    common::ObIArray<common::ObObjectID> &out_part_ids);
-  int get_default_tablet_and_object_id(const common::ObIArray<common::ObObjectID> &part_hint_ids,
+  int get_default_tablet_and_object_id(const share::schema::ObPartitionLevel part_level,
+                                       const common::ObIArray<common::ObObjectID> &part_hint_ids,
                                        common::ObTabletID &tablet_id,
                                        common::ObObjectID &object_id);
   int get_related_partition_id(const common::ObTableID &src_table_id,
@@ -193,15 +240,37 @@ public:
                                const common::ObTableID &dst_table_id,
                                common::ObObjectID &dst_object_id);
   share::schema::RelatedTableInfo &get_related_table_info() { return related_info_; }
+  bool is_non_partition_optimized() const { return is_non_partition_optimized_; }
+  void set_non_partitioned_table_ids(const common::ObTabletID &tablet_id,
+                                     const common::ObObjectID &object_id,
+                                     const RelatedTabletList *related_list)
+  {
+    tablet_id_ = tablet_id;
+    object_id_ = object_id;
+    related_list_ = related_list;
+    is_non_partition_optimized_ = true;
+  }
+  void set_partition_id_map(ObPartitionIdMap *partition_id_map)
+  {
+    partition_id_map_ = partition_id_map;
+  }
+  int set_partition_id_map(common::ObObjectID first_level_part_id, common::ObObjectID object_id);
+  int get_partition_id_map(common::ObObjectID first_level_part_id, common::ObObjectID &object_id);
 private:
   int mock_vtable_related_tablet_id_map(const common::ObIArray<common::ObTabletID> &tablet_ids,
                                         const common::ObIArray<common::ObObjectID> &out_part_ids);
   int mock_vtable_related_tablet_id_map(const common::ObTabletID &tablet_id,
                                         const common::ObObjectID &part_id);
+  int set_partition_id_map(common::ObObjectID first_level_part_id, common::ObIArray<common::ObObjectID> &object_ids);
 private:
   const share::schema::ObTableSchema *table_schema_;
   const VirtualSvrPair *vt_svr_pair_;
   share::schema::RelatedTableInfo related_info_;
+  bool is_non_partition_optimized_;
+  ObTabletID tablet_id_;
+  ObObjectID object_id_;
+  const RelatedTabletList *related_list_;
+  ObPartitionIdMap *partition_id_map_;
 };
 
 class ObDASLocationRouter
@@ -210,24 +279,47 @@ class ObDASLocationRouter
   typedef common::ObList<VirtualSvrPair, common::ObIAllocator> VirtualSvrList;
 public:
   ObDASLocationRouter(common::ObIAllocator &allocator);
-  int get(const ObDASTableLocMeta &loc_meta,
-          const common::ObTabletID &tablet_id,
-          share::ObLSLocation &location);
+  ~ObDASLocationRouter();
+  int nonblock_get(const ObDASTableLocMeta &loc_meta,
+                   const common::ObTabletID &tablet_id,
+                   share::ObLSLocation &location);
+
+  int nonblock_get_candi_tablet_locations(const ObDASTableLocMeta &loc_meta,
+                                          const common::ObIArray<ObTabletID> &tablet_ids,
+                                          const common::ObIArray<ObObjectID> &partition_ids,
+                                          const ObIArray<ObObjectID> &first_level_part_ids,
+                                          common::ObIArray<ObCandiTabletLoc> &candi_tablet_locs);
 
   int get_tablet_loc(const ObDASTableLocMeta &loc_meta,
                      const common::ObTabletID &tablet_id,
                      ObDASTabletLoc &tablet_loc);
-  static int get_leader(const uint64_t tenant_id,
-                        const ObTabletID &tablet_id,
-                        ObDASTabletLoc &tablet_loc,
-                        int64_t expire_renew_time);
-  static int get_leader(const uint64_t tenant_id,
-                        const common::ObTabletID &tablet_id,
-                        ObAddr &leader_addr,
-                        int64_t expire_renew_time);
+  int nonblock_get_leader(const uint64_t tenant_id,
+                          const ObTabletID &tablet_id,
+                          ObDASTabletLoc &tablet_loc);
+  int get_leader(const uint64_t tenant_id,
+                 const common::ObTabletID &tablet_id,
+                 ObAddr &leader_addr,
+                 int64_t expire_renew_time);
   int get_full_ls_replica_loc(const common::ObObjectID &tenant_id,
                               const ObDASTabletLoc &tablet_loc,
                               share::ObLSReplicaLocation &replica_loc);
+  void refresh_location_cache(bool is_nonblock, int err_no);
+  void refresh_location_cache(const common::ObTabletID &tablet_id, bool is_nonblock, int err_no);
+  int block_renew_tablet_location(const common::ObTabletID &tablet_id, share::ObLSLocation &ls_loc);
+  int save_touched_tablet_id(const common::ObTabletID &tablet_id) { return all_tablet_list_.push_back(tablet_id); }
+  void set_last_errno(int err_no) { last_errno_ = err_no; }
+  void set_retry_cnt(int64_t retry_cnt) { retry_cnt_ = retry_cnt; }
+  void inc_retry_cnt() { ++retry_cnt_; }
+  void set_retry_info(const ObQueryRetryInfo* retry_info);
+  int64_t get_retry_cnt() const { return retry_cnt_; }
+  int get_external_table_ls_location(share::ObLSLocation &location);
+  void save_cur_exec_status(int err_no)
+  {
+    if (OB_SUCCESS == cur_errno_) {
+      //can't cover the first error code
+      cur_errno_ = err_no;
+    }
+  }
 private:
   int get_vt_svr_pair(uint64_t vt_id, const VirtualSvrPair *&vt_svr_pair);
   int get_vt_tablet_loc(uint64_t table_id,
@@ -238,9 +330,12 @@ private:
                          share::ObLSLocation &location);
   int nonblock_get_readable_replica(const uint64_t tenant_id,
                                     const common::ObTabletID &tablet_id,
-                                    ObDASTabletLoc &tablet_loc,
-                                    int64_t expire_renew_time);
+                                    ObDASTabletLoc &tablet_loc);
 private:
+  int last_errno_;
+  int cur_errno_;
+  int64_t retry_cnt_;
+  ObList<common::ObTabletID, common::ObIAllocator> all_tablet_list_;
   VirtualSvrList virtual_server_list_;
   common::ObIAllocator &allocator_;
 private:

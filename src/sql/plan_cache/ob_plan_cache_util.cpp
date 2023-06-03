@@ -30,9 +30,6 @@ namespace oceanbase
 {
 namespace sql
 {
-
-const char *plan_cache_gc_confs[3] = { "OFF", "REPORT", "AUTO" };
-
 int ObGetAllPlanIdOp::set_key_array(common::ObIArray<uint64_t> *key_array)
 {
 int ret = common::OB_SUCCESS;
@@ -78,7 +75,11 @@ int ObGetAllCacheIdOp::operator()(common::hash::HashMapPair<ObCacheObjID, ObILib
     SQL_PC_LOG(WARN, "invalid argument", K(ret));
   } else if (entry.second->get_ns() >= ObLibCacheNameSpace::NS_CRSR
             && entry.second->get_ns() <= ObLibCacheNameSpace::NS_PKG) {
-    if (OB_FAIL(key_array_->push_back(entry.first))) {
+    if (OB_ISNULL(entry.second)) {
+      // do nothing
+    } else if (!entry.second->added_lc()) {
+      // do nothing
+    } else if (OB_FAIL(key_array_->push_back(entry.first))) {
       SQL_PC_LOG(WARN, "fail to push back plan_id", K(ret));
     }
   }
@@ -284,8 +285,7 @@ int ObPhyLocationGetter::get_phy_locations(const ObIArray<ObTableLocation> &tabl
         if (OB_FAIL(table_location.calculate_candi_tablet_locations(exec_ctx,
                                                                     params,
                                                                     candi_table_loc.get_phy_part_loc_info_list_for_update(),
-                                                                    dtc_params,
-                                                                    true /* non-block */))) {
+                                                                    dtc_params))) {
           LOG_WARN("failed to calculate partition location", K(ret));
         } else {
           NG_TRACE(calc_partition_location_end);
@@ -363,12 +363,14 @@ int ObPhyLocationGetter::build_related_tablet_info(const ObTableLocation &table_
   ObDataTypeCastParams dtc_params = ObBasicSessionInfo::create_dtc_params(exec_ctx.get_my_session());
   ObPhysicalPlanCtx *plan_ctx = exec_ctx.get_physical_plan_ctx();
   ObArray<ObObjectID> partition_ids;
+  ObArray<ObObjectID> first_level_part_ids;
   ObArray<ObTabletID> tablet_ids;
 
   if (OB_FAIL(table_location.calculate_tablet_ids(exec_ctx,
                                                   plan_ctx->get_param_store(),
                                                   tablet_ids,
                                                   partition_ids,
+                                                  first_level_part_ids,
                                                   dtc_params))) {
     LOG_WARN("calculate tablet ids failed", K(ret));
   } else {
@@ -392,6 +394,8 @@ int ObConfigInfoInPC::load_influence_plan_config()
   // here to add value of configs that can influence execution plan.
   enable_px_ordered_coord_ = GCONF._enable_px_ordered_coord;
   enable_newsort_ = GCONF._enable_newsort;
+  is_strict_defensive_check_ = GCONF.enable_strict_defensive_check();
+  is_enable_px_fast_reclaim_ = GCONF._enable_px_fast_reclaim;
 
   // For Tenant configs
   // tenant config use tenant_config to get configs
@@ -400,6 +404,9 @@ int ObConfigInfoInPC::load_influence_plan_config()
     rowsets_enabled_ = tenant_config->_rowsets_enabled;
     enable_px_batch_rescan_ = tenant_config->_enable_px_batch_rescan;
     bloom_filter_enabled_ = tenant_config->_bloom_filter_enabled;
+    px_join_skew_handling_ = tenant_config->_px_join_skew_handling;
+    px_join_skew_minfreq_ = static_cast<int8_t>(tenant_config->_px_join_skew_minfreq);
+    min_cluster_version_ = GET_MIN_CLUSTER_VERSION();
   }
 
   return ret;
@@ -430,6 +437,22 @@ int ObConfigInfoInPC::serialize_configs(char *buf, int buf_len, int64_t &pos)
   } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
                               "%d,", enable_newsort_))) {
     SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(enable_newsort_));
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+                              "%d,", px_join_skew_handling_))) {
+    SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(px_join_skew_handling_));
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+                              "%d,", is_strict_defensive_check_))) {
+    SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(is_strict_defensive_check_));
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+                              "%d,", px_join_skew_minfreq_))) {
+    SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(px_join_skew_minfreq_));
+
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+                               "%lu,", min_cluster_version_))) {
+    SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(min_cluster_version_));
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
+                               "%d", is_enable_px_fast_reclaim_))) {
+    SQL_PC_LOG(WARN, "failed to databuff_printf", K(ret), K(is_enable_px_fast_reclaim_));
   } else {
     // do nothing
   }

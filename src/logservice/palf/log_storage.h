@@ -22,6 +22,7 @@
 #include "log_writer_utils.h"      // LogWriteBuf
 #include "lsn.h"                   // LSN
 #include "palf_iterator.h"         // PalfIteraor
+#include "palf_callback_wrapper.h"
 
 namespace oceanbase
 {
@@ -36,10 +37,11 @@ class SCN;
 namespace palf
 {
 class ReadBuf;
+class LogHotCache;
 class LogStorage : public ILogStorage
 {
 public:
-  using SwitchNextBlockCallback = ObFunction<int(const block_id_t &)>;
+  using UpdateManifestCallback = ObFunction<int(const block_id_t, const bool in_restart)>;
   LogStorage();
   ~LogStorage();
   int init(const char *log_dir,
@@ -47,8 +49,12 @@ public:
            const LSN &base_lsn,
            const int64_t palf_id,
            const int64_t logical_block_size,
-           const SwitchNextBlockCallback &switch_cb,
-           ILogBlockPool *log_block_pool);
+           const int64_t align_size,
+           const int64_t align_buf_size,
+           const UpdateManifestCallback &update_manifest_cb,
+           ILogBlockPool *log_block_pool,
+           LogPlugins *plugins,
+           LogHotCache *hot_cache);
 
   template <class EntryHeaderType>
   int load(const char *log_dir,
@@ -56,8 +62,12 @@ public:
            const LSN &base_lsn,
            const int64_t palf_id,
            const int64_t logical_block_size,
-           const SwitchNextBlockCallback &switch_cb,
+           const int64_t align_size,
+           const int64_t align_buf_size,
+           const UpdateManifestCallback &update_manifest_cb,
            ILogBlockPool *log_block_pool,
+           LogPlugins *plugins,
+           LogHotCache *hot_cache,
            EntryHeaderType &entry_header,
            LSN &lsn);
 
@@ -87,6 +97,10 @@ public:
 
   int truncate(const LSN &lsn);
   int truncate_prefix_blocks(const LSN &lsn);
+
+  int begin_flashback(const LSN &start_lsn_of_block);
+  int end_flashback(const LSN &start_lsn_of_block);
+
   int delete_block(const block_id_t &block_id);
   int get_block_id_range(block_id_t &min_block_id, block_id_t &max_block_id) const;
   // @retval
@@ -101,11 +115,15 @@ public:
 
   int update_manifest_used_for_meta_storage(const block_id_t expected_max_block_id);
 
+  int get_logical_block_size(int64_t &logical_block_size) const;
+
   TO_STRING_KV(K_(log_tail),
+               K_(readable_log_tail),
                K_(log_block_header),
                K_(block_mgr),
                K(logical_block_size_),
-               K(curr_block_writable_size_));
+               K(curr_block_writable_size_),
+               KP(block_header_serialize_buf_));
 
 private:
   int do_init_(const char *log_dir,
@@ -113,9 +131,21 @@ private:
                const LSN &base_lsn,
                const int64_t palf_id,
                const int64_t logical_block_size,
-               const SwitchNextBlockCallback &switch_next_block_cb,
-               ILogBlockPool *log_block_pool);
-  bool check_read_out_of_lower_bound_(const block_id_t &block_id) const;
+               const int64_t align_size,
+               const int64_t align_buf_size,
+               const UpdateManifestCallback &update_manifest_cb,
+               ILogBlockPool *log_block_pool,
+               LogPlugins *plugins,
+               LogHotCache *hot_cache);
+  // @ret val:
+  //   OB_SUCCESS
+  //   OB_ERR_OUT_OF_LOWER_BOUND
+  //   OB_ERR_OUT_OF_UPPER_BOUND
+  //      in flashback, (flashback_block_id, max_block_id] may be deleted, however, fetch log may read
+  //      some blocks in range of (flashback_block_id, max_block_id].
+  //   OB_NEED_RETRY
+  //   OB_ERR_UNEXPECTED
+  int check_read_out_of_bound_(const block_id_t &block_id) const;
   int inner_switch_block_();
   int append_block_header_used_for_meta_storage_();
   int append_block_header_(const LSN &block_min_lsn, const share::SCN &block_min_scn);
@@ -134,7 +164,9 @@ private:
   void truncate_block_header_(const LSN &lsn);
 
   void update_log_tail_guarded_by_lock_(const int64_t log_size);
+  void update_log_tail_guarded_by_lock_(const LSN &lsn);
   const LSN &get_log_tail_guarded_by_lock_() const;
+  const LSN &get_readable_log_tail_guarded_by_lock_() const;
   offset_t get_phy_offset_(const LSN &lsn) const;
   int read_block_header_(const block_id_t block_id, LogBlockHeader &block_header) const;
   bool check_last_block_is_full_(const block_id_t max_block_id) const;
@@ -144,11 +176,15 @@ private:
                    const bool need_read_block_header,
                    ReadBuf &read_buf,
                    int64_t &out_read_size);
+  void reset_log_tail_for_last_block_(const LSN &lsn, bool last_block_exist);
+  int update_manifest_(const block_id_t expected_next_block_id, const bool in_restart = false);
 private:
   // Used to perform IO tasks in the background
   LogBlockMgr block_mgr_;
   LogReader log_reader_;
   LSN log_tail_;
+  // always same as 'log_tail_' except in process of flashback.
+  LSN readable_log_tail_;
   LogBlockHeader log_block_header_;
   // Used to detemine whether need switch block.
   int64_t curr_block_writable_size_;
@@ -159,7 +195,10 @@ private:
   // used to protect log_tail_ and log_block_header_
   mutable ObSpinLock tail_info_lock_;
   mutable ObSpinLock delete_block_lock_;
-  SwitchNextBlockCallback switch_next_block_cb_;
+  UpdateManifestCallback update_manifest_cb_;
+  LogPlugins *plugins_;
+  char block_header_serialize_buf_[MAX_INFO_BLOCK_SIZE];
+  LogHotCache *hot_cache_;
   bool is_inited_;
 };
 
@@ -175,8 +214,12 @@ int LogStorage::load(const char *base_dir,
                      const LSN &base_lsn,
                      const int64_t palf_id,
                      const int64_t logical_block_size,
-                     const SwitchNextBlockCallback &switch_next_block_cb,
+                     const int64_t align_size,
+                     const int64_t align_buf_size,
+                     const UpdateManifestCallback &update_manifest_cb,
                      ILogBlockPool *log_block_pool,
+                     LogPlugins *plugins,
+                     LogHotCache *hot_cache,
                      EntryHeaderType &entry_header,
                      LSN &lsn)
 {
@@ -192,8 +235,12 @@ int LogStorage::load(const char *base_dir,
                               base_lsn,
                               palf_id,
                               logical_block_size,
-                              switch_next_block_cb,
-                              log_block_pool))) {
+                              align_size,
+                              align_buf_size,
+                              update_manifest_cb,
+                              log_block_pool,
+                              plugins,
+                              hot_cache))) {
     PALF_LOG(WARN, "LogStorage do_init_ failed", K(ret), K(base_dir), K(sub_dir), K(palf_id));
     // NB: if there is no valid data on disk, no need to load last block
   } else if (OB_FAIL(block_mgr_.get_block_id_range(min_block_id, max_block_id))
@@ -226,9 +273,10 @@ int LogStorage::locate_log_tail_and_last_valid_entry_header_(const block_id_t mi
   int ret = OB_SUCCESS;
   using EntryType = typename EntryHeaderType::ENTRYTYPE;
   block_id_t iterate_block_id = max_block_id;
-  log_tail_ = (max_block_id + 1) * logical_block_size_;
+  update_log_tail_guarded_by_lock_(LSN((max_block_id + 1) * logical_block_size_));
   // the last block may has not valid data, we need iterate prev block
   // for GC, we must ensure that the block which include 'max_committed_lsn' will no be reused
+  const bool need_print_error = false;
   while (OB_SUCC(ret) && true == is_valid_block_id(iterate_block_id)
          && iterate_block_id >= min_block_id) {
     // NB: 'log_tail_' need point to the tail of 'iterate_block_id', because 'pread' interface
@@ -238,9 +286,10 @@ int LogStorage::locate_log_tail_and_last_valid_entry_header_(const block_id_t mi
     PalfIterator<DiskIteratorStorage, EntryType> iterator;
     auto get_file_end_lsn = []() { return LSN(LOG_MAX_LSN_VAL); };
     LSN start_lsn(iterate_block_id * logical_block_size_);
-    if (OB_FAIL(iterator.init(start_lsn, this, get_file_end_lsn))) {
+    if (OB_FAIL(iterator.init(start_lsn, get_file_end_lsn, this))) {
       PALF_LOG(WARN, "PalfGroupBufferIterator init failed", K(ret), K(start_lsn));
     } else {
+      iterator.set_need_print_error(need_print_error);
       EntryType curr_entry;
       LSN curr_lsn;
       while (OB_SUCC(ret) && OB_SUCC(iterator.next())) {
@@ -252,12 +301,12 @@ int LogStorage::locate_log_tail_and_last_valid_entry_header_(const block_id_t mi
         }
       }
       if (OB_ITER_END == ret
-          || (OB_INVALID_DATA == ret && true == iterator.check_is_the_last_entry())) {
+          || ((OB_CHECKSUM_ERROR == ret || OB_INVALID_DATA == ret) && true == iterator.check_is_the_last_entry())) {
         ret = OB_SUCCESS;
         // NB: lsn is valid when there are some valid data in last block, otherwise, we need
         // iterate prev block.
         if (true == lsn.is_valid()) {
-          log_tail_ = lsn + entry_header.get_data_len() + entry_header.get_serialize_size();
+          update_log_tail_guarded_by_lock_(lsn + entry_header.get_data_len() + entry_header.get_serialize_size());
           break;
         } else {
           PALF_LOG(INFO,
@@ -265,7 +314,7 @@ int LogStorage::locate_log_tail_and_last_valid_entry_header_(const block_id_t mi
                    K(ret),
                    K(iterate_block_id));
           // NB: nowdays, each block' will be full of data.
-          log_tail_ = iterate_block_id * logical_block_size_;
+          update_log_tail_guarded_by_lock_(LSN(iterate_block_id * logical_block_size_));
           iterate_block_id--;
         }
       } else {

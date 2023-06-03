@@ -80,6 +80,7 @@ public:
   MockLogEngine mock_log_engine_;
   MockPalfFSCbWrapper palf_fs_cb_;
   ObTenantMutilAllocator *alloc_mgr_;
+  LogPlugins *plugins_;
   MockPublicLogSlidingWindow log_sw_;
   char *data_buf_;
 };
@@ -87,20 +88,23 @@ public:
 TestLogSlidingWindow::TestLogSlidingWindow() {}
 TestLogSlidingWindow::~TestLogSlidingWindow() {}
 
+const static uint64_t tenant_id = 1001;
 void TestLogSlidingWindow::SetUp()
 {
   palf_id_ = 1001;
   self_.set_ip_addr("127.0.0.1", 12345);
 
-  const uint64_t tenant_id = 1001;
+  int ret = ObMallocAllocator::get_instance()->create_and_add_tenant_allocator(tenant_id);
+  OB_ASSERT(OB_SUCCESS == ret);
   ObMemAttr attr(tenant_id, ObModIds::OB_TENANT_MUTIL_ALLOCATOR);
   void *buf = ob_malloc(sizeof(common::ObTenantMutilAllocator), attr);
   if (NULL == buf) {
-    CLOG_LOG(WARN, "alloc memory failed");
+    CLOG_LOG_RET(WARN, OB_ALLOCATE_MEMORY_FAILED, "alloc memory failed");
     OB_ASSERT(FALSE);
   }
   alloc_mgr_ = new (buf) common::ObTenantMutilAllocator(tenant_id);
-  data_buf_ = (char*)ob_malloc(64 * 1024 * 1024);
+  plugins_ = new LogPlugins();
+  data_buf_ = (char*)ob_malloc(64 * 1024 * 1024, attr);
   // init MTL
   ObTenantBase tbase(tenant_id);
   ObTenantEnv::set_tenant(&tbase);
@@ -110,6 +114,7 @@ void TestLogSlidingWindow::TearDown()
 {
   ob_free(alloc_mgr_);
   ob_free(data_buf_);
+  ObMallocAllocator::get_instance()->recycle_tenant_allocator(tenant_id);
 }
 
 void gen_default_palf_base_info_(PalfBaseInfo &palf_base_info)
@@ -145,19 +150,19 @@ TEST_F(TestLogSlidingWindow, test_init)
   gen_default_palf_base_info_(base_info);
 
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.init(palf_id_, self_, NULL,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, NULL, &palf_fs_cb_, NULL, base_info));
+        &mock_mm_, &mock_mode_mgr_, NULL, &palf_fs_cb_, NULL, plugins_, base_info, true));
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        NULL, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        NULL, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, NULL, NULL, &palf_fs_cb_, NULL, base_info));
+        &mock_mm_, NULL, NULL, &palf_fs_cb_, NULL, plugins_, base_info, true));
   // init succ
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   // init twice
   EXPECT_EQ(OB_INIT_TWICE, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
 }
 
 TEST_F(TestLogSlidingWindow, test_private_func_batch_01)
@@ -172,7 +177,7 @@ TEST_F(TestLogSlidingWindow, test_private_func_batch_01)
   gen_default_palf_base_info_(base_info);
   // init succ
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   log_id = 10 + PALF_SLIDING_WINDOW_SIZE;
   EXPECT_EQ(false, log_sw_.can_receive_larger_log_(log_id));
   EXPECT_EQ(false, log_sw_.leader_can_submit_larger_log_(log_id));
@@ -191,7 +196,7 @@ TEST_F(TestLogSlidingWindow, test_to_follower_pending)
   gen_default_palf_base_info_(base_info);
   // init succ
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   char *buf = data_buf_;
   int64_t buf_len = 1 * 1024 * 1024;
   share::SCN ref_scn;
@@ -217,8 +222,10 @@ TEST_F(TestLogSlidingWindow, test_fetch_log)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   // init succ
+  MockLocCb cb;
+  EXPECT_EQ(OB_SUCCESS, plugins_->add_plugin(static_cast<PalfLocationCacheCb*>(&cb)));
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   prev_lsn.val_ = 1;
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.try_fetch_log(fetch_log_type, prev_lsn, fetch_start_lsn, fetch_start_log_id));
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.try_fetch_log_for_reconfirm(dest, fetch_end_lsn, is_fetched));
@@ -241,7 +248,7 @@ TEST_F(TestLogSlidingWindow, test_report_log_task_trace)
   gen_default_palf_base_info_(base_info);
   // init succ
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   EXPECT_EQ(OB_SUCCESS, log_sw_.report_log_task_trace(1));
   char *buf = data_buf_;
   int64_t buf_len = 2 * 1024 * 1024;
@@ -257,26 +264,10 @@ TEST_F(TestLogSlidingWindow, test_report_log_task_trace)
 TEST_F(TestLogSlidingWindow, test_set_location_cache_cb)
 {
   MockLocCb cb;
-  EXPECT_EQ(OB_NOT_INIT, log_sw_.set_location_cache_cb(NULL));
-  PalfBaseInfo base_info;
-  gen_default_palf_base_info_(base_info);
-  // init succ
-  EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
-  EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.set_location_cache_cb(NULL));
-  EXPECT_EQ(OB_SUCCESS, log_sw_.set_location_cache_cb(&cb));
-  EXPECT_EQ(OB_NOT_SUPPORTED, log_sw_.set_location_cache_cb(&cb));
-}
-
-TEST_F(TestLogSlidingWindow, test_reset_location_cache_cb)
-{
-  EXPECT_EQ(OB_NOT_INIT, log_sw_.reset_location_cache_cb());
-  PalfBaseInfo base_info;
-  gen_default_palf_base_info_(base_info);
-  // init succ
-  EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
-  EXPECT_EQ(OB_SUCCESS, log_sw_.reset_location_cache_cb());
+  MockLocCb *null_cb = NULL;
+  EXPECT_EQ(OB_INVALID_ARGUMENT, plugins_->add_plugin(static_cast<PalfLocationCacheCb*>(null_cb)));
+  EXPECT_EQ(OB_SUCCESS, plugins_->add_plugin(static_cast<PalfLocationCacheCb*>(&cb)));
+  EXPECT_EQ(OB_OP_NOT_ALLOW, plugins_->add_plugin(static_cast<PalfLocationCacheCb*>(&cb)));
 }
 
 TEST_F(TestLogSlidingWindow, test_submit_log)
@@ -292,7 +283,11 @@ TEST_F(TestLogSlidingWindow, test_submit_log)
   share::SCN scn;
   EXPECT_EQ(OB_NOT_INIT, log_sw_.submit_log(buf, buf_len, ref_scn, lsn, scn));
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
+<<<<<<< HEAD
         &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+=======
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.submit_log(NULL, buf_len, ref_scn, lsn, scn));
   buf_len = 0;
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.submit_log(buf, buf_len, ref_scn, lsn, scn));
@@ -324,7 +319,7 @@ TEST_F(TestLogSlidingWindow, test_submit_group_log)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   mock_state_mgr_.mock_proposal_id_ = 100;
   LSN lsn(10);
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_sw_.submit_group_log(lsn, NULL, 1024));
@@ -383,7 +378,7 @@ TEST_F(TestLogSlidingWindow, test_receive_log)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
 
   char *buf = data_buf_;
   int64_t buf_len = 2 * 1024 * 1024;
@@ -546,7 +541,7 @@ TEST_F(TestLogSlidingWindow, test_after_flush_log)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   int64_t curr_proposal_id = 10;
 
   // set default config meta
@@ -609,7 +604,7 @@ TEST_F(TestLogSlidingWindow, test_truncate_log)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   int64_t curr_proposal_id = 10;
   mock_state_mgr_.mock_proposal_id_ = curr_proposal_id;
 
@@ -717,7 +712,7 @@ TEST_F(TestLogSlidingWindow, test_ack_log)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   int64_t curr_proposal_id = 10;
   mock_state_mgr_.mock_proposal_id_ = curr_proposal_id;
   log_sw_.self_ = self_;
@@ -775,7 +770,7 @@ TEST_F(TestLogSlidingWindow, test_truncate_for_rebuild)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   int64_t curr_proposal_id = 10;
   mock_state_mgr_.mock_proposal_id_ = curr_proposal_id;
 
@@ -886,7 +881,7 @@ TEST_F(TestLogSlidingWindow, test_append_disk_log)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   int64_t curr_proposal_id = 10;
   mock_state_mgr_.mock_proposal_id_ = curr_proposal_id;
   // generate new group entry
@@ -946,7 +941,7 @@ TEST_F(TestLogSlidingWindow, test_append_disk_log)
   // non-continous buf
   group_header.reset();
   write_buf.reset();
-  char *second_buf = (char *)ob_malloc(second_part_len);
+  char *second_buf = (char *)ob_malloc(second_part_len, ObNewModIds::TEST);
   EXPECT_TRUE(NULL != second_buf);
   memcpy(second_buf, data_buf_ + first_part_len, second_part_len);
   EXPECT_EQ(OB_SUCCESS, write_buf.push_back(data_buf_, first_part_len));
@@ -1008,7 +1003,7 @@ TEST_F(TestLogSlidingWindow, test_group_entry_truncate)
   PalfBaseInfo base_info;
   gen_default_palf_base_info_(base_info);
   EXPECT_EQ(OB_SUCCESS, log_sw_.init(palf_id_, self_, &mock_state_mgr_,
-        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, base_info));
+        &mock_mm_, &mock_mode_mgr_, &mock_log_engine_, &palf_fs_cb_, alloc_mgr_, plugins_, base_info, true));
   int64_t curr_proposal_id = 10;
   mock_state_mgr_.mock_proposal_id_ = curr_proposal_id;
   // generate new group entry

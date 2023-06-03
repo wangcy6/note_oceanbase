@@ -22,6 +22,7 @@
 #include "sql/ob_sql_utils.h"
 #include "sql/session/ob_sql_session_mgr.h"
 #include "rpc/obmysql/obsm_struct.h"
+#include "observer/mysql/obmp_utils.h"
 #include "observer/mysql/ob_query_retry_ctrl.h"
 
 using namespace oceanbase::rpc;
@@ -51,11 +52,14 @@ int ObMPInitDB::process()
 {
   LOG_INFO("init db", K_(db_name));
   int ret = OB_SUCCESS;
+  bool need_disconnect = true;
   ObSQLSessionInfo *session = NULL;
   ObString tmp_db_name;
   ObDataBuffer allocator(db_name_conv_buf, sizeof(db_name_conv_buf));
+  const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
   int64_t query_timeout = 0;
   bool is_packet_retry = false;
+  bool need_response_error = true; //temporary placeholder
   if (OB_FAIL(get_session(session))) {
     LOG_WARN("get session  fail", K(ret));
   } else if (OB_ISNULL(session)) {
@@ -80,7 +84,10 @@ int ObMPInitDB::process()
     int64_t retry_times = 0;
     THIS_WORKER.set_timeout_ts(get_receive_timestamp() + query_timeout);
     ObNameCaseMode mode = OB_NAME_CASE_INVALID;
-    if (OB_FAIL(gctx_.schema_service_->get_tenant_received_broadcast_version(effective_tenant_id, global_version))) {
+    if (OB_UNLIKELY(session->is_zombie())) {
+      ret = OB_ERR_SESSION_INTERRUPTED;
+      LOG_WARN("session has been killed", K(ret), KPC(session));
+    } else if (OB_FAIL(gctx_.schema_service_->get_tenant_received_broadcast_version(effective_tenant_id, global_version))) {
       LOG_WARN("fail to get global_version", K(ret), K(effective_tenant_id));
     } else if (OB_FAIL(gctx_.schema_service_->get_tenant_refreshed_schema_version(effective_tenant_id, local_version))) {
       LOG_WARN("fail to get local_version", K(ret), K(effective_tenant_id));
@@ -92,7 +99,12 @@ int ObMPInitDB::process()
       LOG_WARN("fail to get name case mode", K(mode), K(ret));
     } else if (OB_FAIL(update_transmission_checksum_flag(*session))) {
       LOG_WARN("update transmisson checksum flag failed", K(ret));
+    } else if (FALSE_IT(session->set_txn_free_route(pkt.txn_free_route()))) {
+    } else if (OB_FAIL(process_extra_info(*session, pkt, need_response_error))) {
+      LOG_WARN("fail get process extra info", K(ret));
+    } else if (FALSE_IT(session->post_sync_session_info())) {
     } else {
+      need_disconnect = false;
       bool perserve_lettercase = lib::is_oracle_mode() ?
           true : (mode != OB_LOWERCASE_AND_INSENSITIVE);
       if (OB_FAIL(ObSQLUtils::convert_sql_text_to_schema_for_storing(allocator,
@@ -166,7 +178,10 @@ int ObMPInitDB::process()
   }  // end session guard
 
   if (OB_FAIL(ret)) {
-    if (false == is_packet_retry && OB_FAIL(send_error_packet(ret, NULL))) { // 覆盖ret, 无需继续抛出
+    if (false == is_packet_retry && need_disconnect && is_conn_valid()) {
+      force_disconnect();
+      LOG_WARN("disconnect connection when process query", K(ret));
+    } else  if (false == is_packet_retry && OB_FAIL(send_error_packet(ret, NULL))) { // 覆盖ret, 无需继续抛出
       LOG_WARN("failed to send error packet", K(ret));
     }
   } else if (OB_LIKELY(NULL != session)) {

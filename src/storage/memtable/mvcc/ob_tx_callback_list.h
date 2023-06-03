@@ -14,7 +14,7 @@
 #define OCEANBASE_STORAGE_MEMTABLE_MVCC_OB_TX_CALLBACK_LIST
 
 #include "storage/memtable/mvcc/ob_tx_callback_functor.h"
-// #include "storage/tx/ob_trans_part_ctx.h"
+#include "storage/memtable/ob_memtable_util.h"
 
 namespace oceanbase
 {
@@ -22,6 +22,7 @@ namespace memtable
 {
 
 class ObTransCallbackMgr;
+class ObCallbackScope;
 
 class ObTxCallbackList
 {
@@ -42,7 +43,7 @@ public:
   void reset();
 
   // append_callback will append your callback into the callback list
-  int append_callback(ObITransCallback *callback);
+  int append_callback(ObITransCallback *callback, const bool for_replay);
 
   // concat_callbacks will append all callbacks in other into itself and reset
   // other. And it will return the concat number during concat_callbacks.
@@ -57,12 +58,14 @@ public:
   int remove_callbacks_for_fast_commit(bool &has_remove);
 
   // remove_callbacks_for_remove_memtable will remove all callbacks that is
-  // belonged to the specified memtable. It will only remove callbacks without
-  // removing data by calling checkpoint_callback. So user need implement lazy
-  // callback for the correctness. And user need guarantee all callbacks
-  // belonged to the memtable must be synced before removing. What's more, it
-  // will calculate checksum when removing.
-  int remove_callbacks_for_remove_memtable(ObIMemtable *memtable_for_remove);
+  // belonged to the specified memtable sets. It will only remove callbacks
+  // without removing data by calling checkpoint_callback. So user need to
+  // implement lazy callback for the correctness. And user need guarantee all
+  // callbacks belonged to the memtable sets must be synced before removing.
+  // What's more, it will calculate checksum when removing.
+  int remove_callbacks_for_remove_memtable(
+    const memtable::ObMemtableSet *memtable_set,
+    const share::SCN max_applied_scn);
 
   // remove_callbacks_for_rollback_to will remove callbacks from back to front
   // until callbacks smaller or equal than the seq_no. It will remove both
@@ -81,6 +84,13 @@ public:
   // when switch to follower forcely.
   int clean_unlog_callbacks(int64_t &removed_cnt);
 
+<<<<<<< HEAD
+=======
+  // sync_log_fail will remove all callbacks that not sync successfully. Which
+  // is called when callback is on failure.
+  int sync_log_fail(const ObCallbackScope &callbacks, int64_t &removed_cnt);
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   // tx_calc_checksum_before_scn will calculate checksum during execution. It will
   // remember the intermediate results for final result.
   int tx_calc_checksum_before_scn(const share::SCN scn);
@@ -112,6 +122,8 @@ public:
 
 private:
   int callback_(ObITxCallbackFunctor &func);
+  int callback_(ObITxCallbackFunctor &functor,
+                const ObCallbackScope &callbacks);
   int callback_(ObITxCallbackFunctor &func,
                 ObITransCallback *start,
                 ObITransCallback *end);

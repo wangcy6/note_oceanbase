@@ -30,9 +30,18 @@
 #include "sql/engine/px/ob_px_basic_info.h"
 #include "sql/engine/table/ob_table_scan_op.h"
 #include "sql/engine/px/ob_px_bloom_filter.h"
+#include "sql/engine/ob_exec_feedback_info.h"
 #include "sql/das/ob_das_define.h"
+#include "lib/string/ob_strings.h"
+#include "share/external_table/ob_external_table_file_mgr.h"
+#include "share/detect/ob_detect_callback.h"
 namespace oceanbase
 {
+
+namespace common
+{
+class ObIDetectCallback;
+}
 namespace sql
 {
 
@@ -52,6 +61,7 @@ class ObPhysicalPlan;
 class ObSqcTaskMgr;
 class ObPxSqcHandler;
 class ObJoinFilter;
+class ObPxCoordInfo;
 
 // 在 PX 端描述每个 SQC 的 task
 // 通过 exec_addr 区分 SQC
@@ -75,7 +85,7 @@ private:
   // 考虑到容错重试，同一个 addr 上可能有多个 sqc 存在，通过 sqc_id_ 来区分 task 归属为哪个 sqc
   int64_t sqc_id_;
   // 记录 Task 是 SQC 中的第几个任务，用于 partial partition wise join 场景
-  // ref: https://lark.alipay.com/xiaochu.yh/doc/cnvh8g
+  // ref:
   int64_t task_id_;
   // slave map group id
   int64_t sm_group_id_;
@@ -118,6 +128,75 @@ public:
   int64_t location_end_pos_;
   TO_STRING_KV(K_(table_location_key), K_(location_start_pos), K_(location_end_pos));
 };
+
+struct ObPxDetectableIds
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObPxDetectableIds() : qc_detectable_id_(), sqc_detectable_id_() {}
+  ObPxDetectableIds(const common::ObDetectableId &qc_detectable_id, const common::ObDetectableId &sqc_detectable_id)
+      : qc_detectable_id_(qc_detectable_id), sqc_detectable_id_(sqc_detectable_id) {}
+  void operator=(const ObPxDetectableIds &other)
+  {
+    qc_detectable_id_ = other.qc_detectable_id_;
+    sqc_detectable_id_ = other.sqc_detectable_id_;
+  }
+  bool operator==(const ObPxDetectableIds &other) const
+  {
+    return qc_detectable_id_ == other.qc_detectable_id_ &&
+           sqc_detectable_id_ == other.sqc_detectable_id_;
+  }
+  TO_STRING_KV(K_(qc_detectable_id), K_(sqc_detectable_id));
+  common::ObDetectableId qc_detectable_id_;
+  common::ObDetectableId sqc_detectable_id_;
+};
+
+
+struct ObP2PDhMapInfo
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObP2PDhMapInfo() : p2p_sequence_ids_(),
+                     target_addrs_() {}
+  ~ObP2PDhMapInfo() {
+    p2p_sequence_ids_.reset();
+    target_addrs_.reset();
+  }
+  void destroy() {
+    p2p_sequence_ids_.reset();
+    target_addrs_.reset();
+  }
+  int assign(const ObP2PDhMapInfo &other) {
+    int ret = OB_SUCCESS;
+    if (OB_FAIL(p2p_sequence_ids_.assign(other.p2p_sequence_ids_))) {
+      OB_LOG(WARN, "fail to assign other p2p seq id", K(ret));
+    } else if (OB_FAIL(target_addrs_.assign(other.target_addrs_))) {
+      OB_LOG(WARN, "fail to assign other target_addrs_", K(ret));
+    }
+    return ret;
+  }
+  bool is_empty() { return p2p_sequence_ids_.empty(); }
+public:
+  common::ObSArray<int64_t> p2p_sequence_ids_;
+  common::ObSArray<ObSArray<ObAddr>> target_addrs_;
+  TO_STRING_KV(K_(p2p_sequence_ids), K_(target_addrs));
+};
+
+struct ObQCMonitoringInfo {
+  OB_UNIS_VERSION(1);
+public:
+  int init(const ObExecContext &exec_ctx);
+  int assign(const ObQCMonitoringInfo &other);
+  void reset();
+public:
+  common::ObString sql_;
+  // in nested px situation, it is the current px coordinator's thread id
+  int64_t qc_tid_;
+  // no need to deserialize
+  static constexpr int64_t LIMIT_LENGTH = 100;
+  TO_STRING_KV(K_(sql), K_(qc_tid));
+};
+
 // PX 端描述每个 SQC 的数据结构
 class ObPxSqcMeta
 {
@@ -158,7 +237,14 @@ public:
               ignore_vtable_error_(false),
               access_table_location_keys_(),
               access_table_location_indexes_(),
-              server_not_alive_(false)
+              server_not_alive_(false),
+              adjoining_root_dfo_(false),
+              is_single_tsc_leaf_dfo_(false),
+              allocator_("PxSqcMetaInner"),
+              access_external_table_files_(),
+              px_detectable_ids_(),
+              interrupt_by_dm_(false),
+              p2p_dh_map_info_()
   {}
   ~ObPxSqcMeta() = default;
   int assign(const ObPxSqcMeta &other);
@@ -172,6 +258,7 @@ public:
   const dtl::ObDtlChannelInfo &get_sqc_channel_info_const() const { return sqc_ch_info_; }
   ObIArray<ObSqcTableLocationKey> &get_access_table_location_keys() { return access_table_location_keys_; }
   ObIArray<ObSqcTableLocationIndex> &get_access_table_location_indexes() { return access_table_location_indexes_; }
+  ObIArray<share::ObExternalFileInfo> &get_access_external_table_files() { return access_external_table_files_; }
   DASTabletLocIArray &get_access_table_locations_for_update() { return access_table_locations_; }
   const DASTabletLocIArray &get_access_table_locations() const { return access_table_locations_; }
   void set_execution_id(uint64_t execution_id) { execution_id_ = execution_id; }
@@ -181,6 +268,10 @@ public:
   inline ObPxInterruptID get_interrupt_id() { return px_int_id_; }
   inline void set_interrupt_id(const ObPxInterruptID &px_int_id)
                               { px_int_id_ = px_int_id; }
+  void set_px_detectable_ids(const ObPxDetectableIds &px_detectable_ids) { px_detectable_ids_ = px_detectable_ids; }
+  const ObPxDetectableIds &get_px_detectable_ids() { return px_detectable_ids_; }
+  void set_interrupt_by_dm(bool val) { interrupt_by_dm_ = val; }
+  bool is_interrupt_by_dm() { return interrupt_by_dm_; }
   void set_exec_addr(const common::ObAddr &addr) {   exec_addr_ = addr; }
   void set_qc_addr(const common::ObAddr &addr) {   qc_addr_ = addr; }
   void set_qc_channel(dtl::ObDtlChannel *ch) {   qc_channel_ = ch; }
@@ -211,8 +302,6 @@ public:
   int64_t get_total_part_count() const { return total_part_count_; }
   void set_fulltree(bool v) { is_fulltree_ = v; }
   bool is_fulltree() const { return is_fulltree_; }
-  void set_rpc_worker(bool v) { is_rpc_worker_ = v; }
-  bool is_rpc_worker() const { return is_rpc_worker_; }
   void set_thread_inited(bool v) { thread_inited_ = v; }
   bool is_thread_inited() const { return thread_inited_; }
   void set_thread_finish(bool v) { thread_finish_ = v; }
@@ -227,7 +316,7 @@ public:
   int64_t get_px_sequence_id() { return px_sequence_id_; }
   void set_ignore_vtable_error(bool flag) { ignore_vtable_error_ = flag; }
   bool is_ignore_vtable_error() { return ignore_vtable_error_; }
-  void set_server_not_alive() { server_not_alive_ = true; }
+  void set_server_not_alive(bool not_alive) { server_not_alive_ = not_alive; }
   bool is_server_not_alive() { return server_not_alive_; }
   ObPxTransmitDataChannelMsg &get_transmit_channel_msg() { return transmit_channel_; }
   ObPxReceiveDataChannelMsg &get_receive_channel_msg() { return receive_channel_; }
@@ -241,6 +330,9 @@ public:
     serial_receive_channels_.reset();
     rescan_batch_params_.reset();
     partition_pruning_table_locations_.reset();
+    access_external_table_files_.reset();
+    allocator_.reset();
+    monitoring_info_.reset();
   }
   // SQC 端收到 InitSQC 消息后通过 data_channel 信息是否为空
   // 来判断 data channel 是否已经预分配好，是否要走轻量调度
@@ -256,25 +348,35 @@ public:
   { transmit_use_interm_result_ = flag; }
   void set_recieve_use_interm_result(bool flag)
   { recieve_use_interm_result_ = flag; }
-  bool transmit_use_interm_result() { return transmit_use_interm_result_; }
-  bool recieve_use_interm_result() { return recieve_use_interm_result_; }
+  bool transmit_use_interm_result() const { return transmit_use_interm_result_; }
+  bool recieve_use_interm_result() const { return recieve_use_interm_result_; }
   int add_serial_recieve_channel(const ObPxReceiveDataChannelMsg &channel);
   int set_rescan_batch_params(ObBatchRescanParams &params) { return rescan_batch_params_.assign(params); }
   ObBatchRescanParams &get_rescan_batch_params() { return rescan_batch_params_; }
   common::ObIArray<ObTableLocation> &get_pruning_table_locations()
   { return partition_pruning_table_locations_; }
-
+  void set_adjoining_root_dfo(bool flag)
+  { adjoining_root_dfo_ = flag; }
+  bool adjoining_root_dfo() const { return adjoining_root_dfo_; }
+  void set_single_tsc_leaf_dfo(bool flag) { is_single_tsc_leaf_dfo_ = flag; }
+  bool is_single_tsc_leaf_dfo() { return is_single_tsc_leaf_dfo_; }
+  ObP2PDhMapInfo &get_p2p_dh_map_info() { return p2p_dh_map_info_;};
+  void set_sqc_count(int64_t sqc_cnt) { sqc_count_ = sqc_cnt; }
+  int64_t get_sqc_count() const { return sqc_count_;}
+  ObQCMonitoringInfo &get_monitoring_info() { return monitoring_info_; }
+  const ObQCMonitoringInfo &get_monitoring_info() const { return monitoring_info_; }
   TO_STRING_KV(K_(need_report), K_(execution_id), K_(qc_id), K_(sqc_id), K_(dfo_id), K_(exec_addr), K_(qc_addr),
                K_(qc_ch_info), K_(sqc_ch_info),
                K_(task_count), K_(max_task_count), K_(min_task_count),
                K_(thread_inited), K_(thread_finish), K_(px_int_id),
-               K_(is_fulltree), K_(is_rpc_worker), K_(transmit_use_interm_result),
-               K_(recieve_use_interm_result), K(temp_table_ctx_), K_(server_not_alive));
+               K_(transmit_use_interm_result),
+               K_(recieve_use_interm_result), K_(serial_receive_channels));
 private:
   uint64_t execution_id_;
   uint64_t qc_id_;
   int64_t sqc_id_;
   int64_t dfo_id_;
+  ObQCMonitoringInfo monitoring_info_;
   // The partition location information of the all table_scan op and dml op
   // used for px worker execution
   // no need serialize
@@ -323,6 +425,19 @@ private:
   ObSEArray<ObSqcTableLocationKey, 2> access_table_location_keys_;
   ObSEArray<ObSqcTableLocationIndex, 2> access_table_location_indexes_;
   bool server_not_alive_;
+  /*used for init channel msg, indicate a transmit
+  op is adjoining coodinator, that need not wait that msg*/
+  bool adjoining_root_dfo_;
+  //for auto scale
+  bool is_single_tsc_leaf_dfo_;
+  ObArenaAllocator allocator_;
+  ObSEArray<share::ObExternalFileInfo, 8> access_external_table_files_;
+
+  ObPxDetectableIds px_detectable_ids_;
+  bool interrupt_by_dm_;
+  // for p2p dh msg
+  ObP2PDhMapInfo p2p_dh_map_info_;
+  int64_t sqc_count_;
 };
 
 class ObDfo
@@ -371,12 +486,19 @@ public:
     temp_table_id_(0),
     slave_mapping_type_(SlaveMappingType::SM_NONE),
     part_ch_map_(),
-    px_bloom_filter_mode_(JoinFilterMode::NOT_INIT),
-    px_bf_id_(OB_INVALID_ID),
-    use_filter_ch_map_(),
     total_task_cnt_(0),
-    ignore_vtable_error_(false),
-    pkey_table_loc_id_(0)
+    pkey_table_loc_id_(0),
+    tsc_op_cnt_(0),
+    external_table_files_(),
+    px_detectable_ids_(),
+    detect_cb_(nullptr),
+    node_sequence_id_(0),
+    p2p_dh_ids_(),
+    p2p_dh_addrs_(),
+    p2p_dh_loc_(nullptr),
+    need_p2p_info_(false),
+    p2p_dh_map_info_(),
+    coord_info_ptr_(nullptr)
   {
   }
 
@@ -415,8 +537,6 @@ public:
   inline bool has_dml_op() { return has_dml_op_; }
   inline void set_temp_table_scan(bool has_scan) { has_temp_scan_ = has_scan; }
   inline bool has_temp_table_scan() const { return has_temp_scan_; }
-  inline void set_rpc_worker(bool v) { is_rpc_worker_ = v; }
-  inline bool is_rpc_worker() const { return is_rpc_worker_; }
   inline bool is_fast_dfo() const { return is_prealloc_receive_channel() || is_prealloc_transmit_channel(); }
   inline void set_slave_mapping_type(SlaveMappingType v) { slave_mapping_type_ = v; }
   inline SlaveMappingType get_slave_mapping_type() { return slave_mapping_type_; }
@@ -434,7 +554,6 @@ public:
   int64_t get_sqcs_count() { return sqcs_.count(); }
   int build_tasks();
   int alloc_data_xchg_ch();
-  int alloc_bloom_filter_ch();
   /* 获取 qc 端的 channel 端口 */
   int get_qc_channels(common::ObIArray<dtl::ObDtlChannel *> &sqc_chs);
 
@@ -479,6 +598,13 @@ public:
   void set_px_sequence_id(uint64_t px_sequence_id) { px_sequence_id_ = px_sequence_id; }
   int64_t get_px_sequence_id() const { return px_sequence_id_; }
 
+  void set_px_detectable_ids(const ObPxDetectableIds &px_detectable_ids) { px_detectable_ids_ = px_detectable_ids; }
+  const ObPxDetectableIds &get_px_detectable_ids() { return px_detectable_ids_; }
+  common::ObIDetectCallback *get_detect_cb() { return detect_cb_; }
+  void set_detect_cb(common::ObIDetectCallback *cb) { detect_cb_ = cb; }
+  void set_node_sequence_id(uint64_t node_sequence_id) { node_sequence_id_ = node_sequence_id; }
+  uint64_t get_node_sequence_id() { return node_sequence_id_; }
+
   void set_temp_table_id(uint64_t temp_table_id) { temp_table_id_ = temp_table_id; }
   uint64_t get_temp_table_id() const { return temp_table_id_; }
 
@@ -511,21 +637,6 @@ public:
 
   void set_dist_method(ObPQDistributeMethod::Type dist_method) { dist_method_ = dist_method; }
   ObPQDistributeMethod::Type get_dist_method() { return dist_method_; }
-
-  void set_px_bloom_filter_mode(JoinFilterMode mode) { px_bloom_filter_mode_ = mode; }
-  JoinFilterMode get_is_px_bloom_filter() { return px_bloom_filter_mode_; }
-  bool is_px_use_bloom_filter()
-    { return JoinFilterMode::USE == px_bloom_filter_mode_; }
-  bool is_px_create_bloom_filter()
-    { return JoinFilterMode::CREATE == px_bloom_filter_mode_; }
-  bool have_px_bloom_filter()
-    { return JoinFilterMode::USE == px_bloom_filter_mode_ ||
-             JoinFilterMode::CREATE == px_bloom_filter_mode_; }
-  void set_px_bf_id(int64_t id) { px_bf_id_ = id; }
-  int64_t get_px_bf_id() const { return px_bf_id_; }
-  int get_use_filter_chs(ObPxBloomFilterChInfo &create_filter_ch_map);
-  ObPxBloomFilterChInfo &get_use_filter_ch_info() { return use_filter_ch_map_; }
-
   ObPxChTotalInfos &get_dfo_ch_total_infos() { return dfo_ch_infos_; }
   int64_t get_total_task_count() { return total_task_cnt_; }
   int get_dfo_ch_info(int64_t sqc_idx, dtl::ObDtlChTotalInfo *&ch_info);
@@ -542,10 +653,24 @@ public:
     return (dfo_id >= 0 && dfo_id <= MAX_DFO_ID) ||
            (dfo_id == MAX_DFO_ID);
   }
-  void set_ignore_vtable_error(bool flag) { ignore_vtable_error_ = flag; }
-  bool is_ignore_vtable_error() { return ignore_vtable_error_; }
   void set_pkey_table_loc_id(int64_t id) { pkey_table_loc_id_ = id; }
   int64_t get_pkey_table_loc_id() { return pkey_table_loc_id_; };
+  void inc_tsc_op_cnt() { tsc_op_cnt_++; }
+  bool is_leaf_dfo() { return child_dfos_.empty(); }
+  bool is_single_tsc_leaf_dfo() { return is_leaf_dfo() && 1 == tsc_op_cnt_; }
+  common::ObIArray<share::ObExternalFileInfo> &get_external_table_files() { return external_table_files_; }
+  int add_p2p_dh_ids(int64_t id) { return p2p_dh_ids_.push_back(id); }
+  common::ObIArray<int64_t> &get_p2p_dh_ids() { return p2p_dh_ids_; }
+  void set_p2p_dh_loc(ObDASTableLoc *p2p_dh_loc) { p2p_dh_loc_ = p2p_dh_loc; }
+  ObDASTableLoc *get_p2p_dh_loc() { return p2p_dh_loc_; }
+  common::ObIArray<ObAddr> &get_p2p_dh_addrs() { return p2p_dh_addrs_; }
+  void set_need_p2p_info(bool flag) { need_p2p_info_ = flag; }
+  bool need_p2p_info() { return need_p2p_info_; }
+  void set_coord_info_ptr(ObPxCoordInfo *ptr) { coord_info_ptr_ = ptr; }
+  ObPxCoordInfo *get_coord_info_ptr() { return coord_info_ptr_; }
+  ObP2PDhMapInfo &get_p2p_dh_map_info() { return p2p_dh_map_info_;};
+  bool force_bushy() { return force_bushy_; }
+  void set_force_bushy(bool flag) { force_bushy_ = flag; }
   TO_STRING_KV(K_(execution_id),
                K_(dfo_id),
                K_(is_active),
@@ -566,15 +691,18 @@ public:
                "child", get_child_count(),
                K_(slave_mapping_type),
                K_(dist_method),
-               K_(px_bloom_filter_mode),
-               K_(px_bf_id),
-               K_(pkey_table_loc_id));
+               K_(pkey_table_loc_id),
+               K_(tsc_op_cnt),
+               K_(transmit_ch_sets),
+               K_(receive_ch_sets_map),
+               K_(p2p_dh_ids),
+               K_(p2p_dh_addrs),
+               K_(need_p2p_info));
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObDfo);
 private:
   int calc_total_task_count();
-  int condition_push_back(ObPxBloomFilterChSet &ch_set, ObPxBloomFilterChSets &ch_sets);
 private:
   common::ObIAllocator &allocator_;
   uint64_t execution_id_;
@@ -630,12 +758,24 @@ private:
   SlaveMappingType slave_mapping_type_;
   ObPxPartChMapArray part_ch_map_;
   ObPQDistributeMethod::Type dist_method_;
-  JoinFilterMode px_bloom_filter_mode_; //标记dfo中的px bloom filter
-  int64_t px_bf_id_;                    //记录px_bloom_filter_id
-  ObPxBloomFilterChInfo use_filter_ch_map_;   // use and create channel info is same
   int64_t total_task_cnt_;      // the task total count of dfo start worker
-  bool ignore_vtable_error_;
   int64_t pkey_table_loc_id_; // record pkey table loc id for child dfo
+  int64_t tsc_op_cnt_;
+  common::ObArray<share::ObExternalFileInfo> external_table_files_;
+  // for dm
+  ObPxDetectableIds px_detectable_ids_;
+  common::ObIDetectCallback *detect_cb_;
+  uint64_t node_sequence_id_;
+  // ---------------
+  // for p2p dh mgr
+  common::ObArray<int64_t>p2p_dh_ids_; //for dh create
+  common::ObArray<ObAddr>p2p_dh_addrs_; //for dh use
+  ObDASTableLoc *p2p_dh_loc_;
+  bool need_p2p_info_;
+  ObP2PDhMapInfo p2p_dh_map_info_;
+  // ---------------
+  ObPxCoordInfo *coord_info_ptr_;
+  bool force_bushy_;
 };
 
 
@@ -706,6 +846,47 @@ public:
   ObSqcSerializeCache ser_cache_;
 };
 
+struct ObPxCleanDtlIntermResInfo
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObPxCleanDtlIntermResInfo() : ch_total_info_(), sqc_id_(common::OB_INVALID_ID), task_count_(0) {}
+  ObPxCleanDtlIntermResInfo(dtl::ObDtlChTotalInfo &ch_info, int64_t sqc_id, int64_t task_count) :
+    ch_total_info_(ch_info), sqc_id_(sqc_id), task_count_(task_count)
+  {}
+
+  ~ObPxCleanDtlIntermResInfo() { }
+  void reset()
+  {
+    ch_total_info_.reset();
+    sqc_id_ = common::OB_INVALID_ID;
+    task_count_ = 0;
+  }
+
+  TO_STRING_KV(K_(ch_total_info), K_(sqc_id), K_(task_count));
+public:
+  dtl::ObDtlChTotalInfo ch_total_info_;
+  int64_t sqc_id_;
+  int64_t task_count_;
+};
+
+class ObPxCleanDtlIntermResArgs
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObPxCleanDtlIntermResArgs() : info_(), batch_size_(0) {}
+  ~ObPxCleanDtlIntermResArgs() { }
+  void reset()
+  {
+    info_.reset();
+    batch_size_ = 0;
+  }
+
+  TO_STRING_KV(K_(info), K_(batch_size));
+public:
+  ObSEArray<ObPxCleanDtlIntermResInfo, 8> info_;
+  uint64_t batch_size_;
+};
 
 class ObPxTask
 {
@@ -729,8 +910,11 @@ public:
       temp_table_id_(common::OB_INVALID_ID),
       interm_result_ids_(),
       tx_desc_(NULL),
-      is_use_local_thread_(false)
-  {}
+      is_use_local_thread_(false),
+      fb_info_()
+  {
+
+  }
   ~ObPxTask() = default;
   ObPxTask &operator=(const ObPxTask &other)
   {
@@ -755,6 +939,7 @@ public:
     interm_result_ids_.assign(other.interm_result_ids_);
     tx_desc_ = other.tx_desc_;
     is_use_local_thread_ = other.is_use_local_thread_;
+    fb_info_.assign(other.fb_info_);
     return *this;
   }
 public:
@@ -777,7 +962,8 @@ public:
                K_(temp_table_id),
                K_(interm_result_ids),
                K_(tx_desc),
-               K_(is_use_local_thread));
+               K_(is_use_local_thread),
+               K_(fb_info));
   dtl::ObDtlChannelInfo &get_sqc_channel_info() { return sqc_ch_info_; }
   dtl::ObDtlChannelInfo &get_task_channel_info() { return task_ch_info_; }
   void set_task_channel(dtl::ObDtlChannel *ch) { task_channel_ = ch; }
@@ -817,6 +1003,7 @@ public:
   transaction::ObTxDesc *&get_tx_desc() { return tx_desc_; }
   void set_use_local_thread(bool flag) { is_use_local_thread_ = flag; }
   bool is_use_local_thread() { return is_use_local_thread_; }
+  ObExecFeedbackInfo &get_feedback_info() { return fb_info_; };
 public:
   // 小于等于0表示设置了rc 值, task default ret值为1
   static const int64_t TASK_DEFAULT_RET_VALUE = 1;
@@ -844,6 +1031,7 @@ public:
   common::ObSEArray<uint64_t, 8> interm_result_ids_;  //返回每个task生成的结果集
   transaction::ObTxDesc *tx_desc_; // transcation information
   bool is_use_local_thread_;
+  ObExecFeedbackInfo fb_info_; //for feedback info
 };
 
 class ObPxRpcInitTaskArgs

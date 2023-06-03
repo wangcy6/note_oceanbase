@@ -59,7 +59,7 @@ void ObTxLSLogLimit::decide_log_buf_size()
   LOG_BUF_SIZE = 0;
   ObLogBaseHeader base_header;
   ObTxLogHeader tx_header;
-  ObTxLogBlockHeader block_header(UINT64_MAX, INT64_MAX, INT64_MAX);
+  ObTxLogBlockHeader block_header(UINT64_MAX, INT64_MAX, INT64_MAX, common::ObAddr());
   ObTxStartWorkingLog sw_log(INT_MAX64);
 
   // block_header.before_serialize();
@@ -148,11 +148,13 @@ int ObTxLSLogCb::alloc_log_buf_()
 {
   int ret = OB_SUCCESS;
 
+  ObMemAttr attr(base_wr_->get_tenant_id(), "TxLSLogBuf");
+  SET_USE_500(attr);
   if (0 == ObTxLSLogLimit::LOG_BUF_SIZE || nullptr != log_buf_) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "[TxLsLogWriter] invalid arguments", KR(ret), K(ObTxLSLogLimit::LOG_BUF_SIZE), KP(log_buf_));
   } else if (nullptr
-             == (log_buf_ = (char *)ob_malloc(ObTxLSLogLimit::LOG_BUF_SIZE, "TxLSLogBuf"))) {
+             == (log_buf_ = (char *)ob_malloc(ObTxLSLogLimit::LOG_BUF_SIZE, attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     TRANS_LOG(WARN, "[TxLsLogWriter] allocate memory failed", KR(ret), K(ObTxLSLogLimit::LOG_BUF_SIZE));
   }
@@ -165,10 +167,11 @@ ObTxLSLogWriter::ObTxLSLogWriter() : cbs_lock_(common::ObLatchIds::TX_LS_LOG_WRI
 
 ObTxLSLogWriter::~ObTxLSLogWriter() { reset(); }
 
-int ObTxLSLogWriter::init(const ObLSID &ls_id,
+int ObTxLSLogWriter::init(const int64_t tenant_id,
+                          const ObLSID &ls_id,
                           ObITxLogAdapter * adapter,
                           ObLSTxCtxMgr *ctx_mgr)
-{
+  {
   int ret = OB_SUCCESS;
 
   if (OB_NOT_NULL(tx_log_adapter_) || OB_NOT_NULL(ctx_mgr_)) {
@@ -177,7 +180,9 @@ int ObTxLSLogWriter::init(const ObLSID &ls_id,
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "[TxLsLogWriter] invalid arguments", K(ls_id), KP(adapter), KP(ctx_mgr));
   } else {
+    tenant_id_ = tenant_id;
     ls_id_ = ls_id;
+    tenant_id_ = tenant_id;
     ctx_mgr_ = ctx_mgr;
     tx_log_adapter_ = adapter;
     ObTxLSLogLimit::decide_log_buf_size();
@@ -224,6 +229,7 @@ void ObTxLSLogWriter::reset()
   keep_alive_cbs_.reset();
   start_working_cbs_.reset();
   free_cbs_.reset();
+  tenant_id_ = OB_SERVER_TENANT_ID;
   ls_id_.reset();
   ctx_mgr_ = nullptr;
   tx_log_adapter_ = nullptr;
@@ -358,7 +364,8 @@ int ObTxLSLogWriter::append_free_log_cb_()
   char *cb_buf = nullptr;
   ObTxLSLogCb *tmp_cb = nullptr;
   if (nullptr
-      == (cb_buf = (char *)ob_malloc(sizeof(ObTxLSLogCb) * APPEND_LOG_CB_CNT, "ObTxLSLogCb"))) {
+      == (cb_buf = (char *)ob_malloc(sizeof(ObTxLSLogCb) * APPEND_LOG_CB_CNT,
+                                     ObMemAttr(tenant_id_, "ObTxLSLogCb")))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
     for (int i = 0; i < APPEND_LOG_CB_CNT; i++) {
@@ -412,6 +419,7 @@ void ObTxLSLogWriter::destroy_cbs_(common::ObDList<ObTxLSLogCb> &cbs)
   ObTxLSLogCb *cb_ptr = nullptr;
   while (!cbs.is_empty()) {
     if (OB_NOT_NULL(cb_ptr = cbs.remove_first())) {
+      cb_ptr->~ObTxLSLogCb();
       ob_free(cb_ptr);
     }
   }

@@ -62,7 +62,8 @@ public:
                                      bool org = false,
                                      bool is_oracle_sys_view = false,
                                      char **dblink_name_ptr = NULL,
-                                     int32_t *dblink_name_len = NULL);
+                                     int32_t *dblink_name_len = NULL,
+                                     bool *has_dblink_node = NULL);
 
   int resolve_table_relation_node(const ParseNode *node,
                                   common::ObString &table_name,
@@ -70,7 +71,8 @@ public:
                                   bool org = false,
                                   bool is_oracle_sys_view = false,
                                   char **dblink_name_ptr = NULL,
-                                  int32_t *dblink_name_len = NULL);
+                                  int32_t *dblink_name_len = NULL,
+                                  bool *has_dblink_node = NULL);
   /**
    * @brief  解析一个T_REF_FACTOR节点，得到database name和table name
    * @param [in] node  - 语法节点
@@ -84,6 +86,7 @@ public:
    *
    */
   static int resolve_ref_factor(const ParseNode *node, ObSQLSessionInfo *session_info, common::ObString &table_name, common::ObString &db_name);
+  static int resolve_dblink_name(const ParseNode *table_node, uint64_t tenant_id, ObString &dblink_name, bool &is_reverse_link, bool &has_dblink_node);
   int resolve_database_factor(const ParseNode *node,
                               uint64_t tenant_id,
                               uint64_t &database_id,
@@ -103,7 +106,7 @@ public:
     return ret_cid;
   }
   inline uint64_t generate_cte_table_id() { return params_.new_cte_tid_++;}
-  inline uint64_t generate_cte_column_base_id() { return common::OB_MIN_CTE_COLUMN_ID;}
+  inline uint64_t generate_cte_column_base_id() { return common::OB_APP_MIN_COLUMN_ID;}
   template<class T>
   T *create_stmt()
   {
@@ -175,13 +178,15 @@ public:
   ~ObSynonymChecker()
   {
   }
-  int add_synonym_id(uint64_t synonym_id);
+  int add_synonym_id(uint64_t synonym_id, uint64_t database_id);
   const common::ObIArray<uint64_t> &get_synonym_ids() const { return synonym_ids_; }
+  const common::ObIArray<uint64_t> &get_database_ids() const { return database_ids_; }
   void set_synonym(bool has_synonym) { has_synonym_ = has_synonym; }
   bool has_synonym() const  { return has_synonym_; }
 private:
   bool has_synonym_;
   common::ObSEArray<uint64_t, 2> synonym_ids_;
+  common::ObSEArray<uint64_t, 2> database_ids_;
   DISALLOW_COPY_AND_ASSIGN(ObSynonymChecker);
 };
 

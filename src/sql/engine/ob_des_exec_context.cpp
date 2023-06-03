@@ -181,21 +181,10 @@ DEFINE_DESERIALIZE(ObDesExecContext)
   }
 
   if (OB_SUCC(ret)) {
+    set_mem_attr(ObMemAttr(tenant_id, ObModIds::OB_SQL_EXEC_CONTEXT, ObCtxIds::EXECUTE_CTX_ID));
     // init operator context need session info, initialized after session deserialized.
     if (OB_FAIL(init_phy_op(phy_op_size))) {
       LOG_WARN("init exec context phy op failed", K(ret), K_(phy_op_size));
-    }
-  }
-  /**
-   * session will be used to generate sql plan even if in remote / distributed execution,
-   * because nested session will generate and execute nested sql with inner connection.
-   */
-  if (OB_SUCC(ret) && !OB_ISNULL(my_session_) && !OB_ISNULL(GCTX.sql_engine_)) {
-    ObPCMemPctConf pc_mem_conf;
-    if (OB_FAIL(my_session_->get_pc_mem_conf(pc_mem_conf))) {
-      LOG_WARN("failed to get pc mem conf", K(ret));
-    } else {
-      my_session_->set_plan_cache_manager(GCTX.sql_engine_->get_plan_cache_manager());
     }
   }
 
@@ -205,6 +194,8 @@ DEFINE_DESERIALIZE(ObDesExecContext)
   if (OB_SUCC(ret)) {
     if (OB_FAIL(init_expr_op(phy_plan_ctx_->get_expr_op_size()))) {
       LOG_WARN("init exec context expr op failed", K(ret));
+    } else {
+      das_ctx_.get_location_router().set_retry_info(&my_session_->get_retry_info());
     }
   }
   use_temp_expr_ctx_cache_ = true;

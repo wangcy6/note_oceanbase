@@ -72,6 +72,7 @@ class IObDedupTask
 public:
   explicit IObDedupTask(const int type) : type_(type),
                                           stat_(ST_WAITING),
+                                          sync_(common::ObLatchIds::DEDUP_QUEUE_LOCK),
                                           memory_(NULL),
                                           prev_(NULL),
                                           next_(NULL)
@@ -80,6 +81,7 @@ public:
   virtual ~IObDedupTask() {}
 public:
   virtual int64_t hash() const = 0;
+  virtual int hash(uint64_t &hash_val) const{ hash_val = hash(); return OB_SUCCESS; }
   virtual bool operator ==(const IObDedupTask &other) const = 0;
   virtual int64_t get_deep_copy_size() const = 0;
   virtual IObDedupTask *deep_copy(char *buffer, const int64_t buf_size) const = 0;
@@ -160,7 +162,7 @@ public:
   ObDedupQueue();
   virtual ~ObDedupQueue();
 public:
-  int init(int32_t thread_num = DEFAULT_THREAD_NUM,
+  int init(const int64_t thread_num = DEFAULT_THREAD_NUM,
            const char* thread_name = nullptr,
            const int64_t queue_size = TASK_QUEUE_SIZE,
            const int64_t task_map_size = TASK_MAP_SIZE,
@@ -174,6 +176,7 @@ public:
   int add_task(const IObDedupTask &task);
   int64_t task_count() const { return task_queue_.get_total(); }
   void set_label(const lib::ObLabel &label) { allocator_.set_label(label); }
+  void set_attr(const lib::ObMemAttr &attr) { allocator_.set_attr(attr); }
   int set_thread_dead_threshold(const int64_t thread_dead_threshold);
 public:
   void run1() override;
@@ -186,12 +189,14 @@ private:
                           hash::MultiWriteDefendMode,
                           hash::hash_func<const IObDedupTask *>,
                           hash::equal_to<const IObDedupTask *>,
-                          HashAllocator> TaskMap;
+                          HashAllocator,
+                          common::hash::NormalPointer,
+                          common::ObWrapperAllocator> TaskMap;
   typedef hash::HashMapTypes<const IObDedupTask *, IObDedupTask *>::pair_type TaskMapKVPair;
   static const int32_t DEFAULT_THREAD_NUM = 4;
   static const int32_t MAX_THREAD_NUM = 64;
-  static const int32_t QUEUE_WAIT_TIME_MS = 10; //10ms
-  static const int32_t MAX_QUEUE_WAIT_TIME_MS = 100; //100ms
+  static const int32_t QUEUE_WAIT_TIME_MS = 50; //50ms
+  static const int32_t MAX_QUEUE_WAIT_TIME_MS = 500; //500ms
   static const int64_t GC_BATCH_NUM = 512;
   static const int64_t DEFALT_THREAD_DEAD_THRESHOLD = 30000000L; //30s
   static const int64_t THREAD_CHECK_INTERVAL = 10000000L; //10s
@@ -293,11 +298,12 @@ private:
 private:
   bool is_inited_;
   ThreadMeta thread_metas_[MAX_THREAD_NUM];
-  int32_t thread_num_;
-  int32_t work_thread_num_;
+  int64_t thread_num_;
+  int64_t work_thread_num_;
   int64_t thread_dead_threshold_;
   ObConcurrentFIFOAllocator allocator_;
   HashAllocator hash_allocator_;
+  common::ObWrapperAllocator bucket_allocator_;
   TaskMap task_map_;
   TaskQueue task_queue_;
   ObThreadCond task_queue_sync_;

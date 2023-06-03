@@ -32,7 +32,11 @@ ObLSSavedInfo::ObLSSavedInfo()
 void ObLSSavedInfo::reset()
 {
   clog_checkpoint_scn_ = share::ObScnRange::MIN_SCN;
+<<<<<<< HEAD
   clog_base_lsn_ = palf::PALF_INITIAL_LSN_VAL;
+=======
+  clog_base_lsn_.reset();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   replayable_point_ = 0;
   tablet_change_checkpoint_scn_ = SCN::min_scn();
 }

@@ -44,12 +44,14 @@ public:
   void set_table(const ObString database_name,
                  const uint64_t database_id,
                  const ObString table_name,
-                 const uint64_t table_id)
+                 const uint64_t table_id,
+                 const share::schema::ObTableType table_type)
   {
     database_name_ = database_name;
     database_id_ = database_id;
     table_name_ = table_name;
     table_id_ = table_id;
+    ref_table_type_ = table_type;
   }
 
   void set_sample_info(const ObAnalyzeSampleInfo &sample_info)
@@ -59,6 +61,7 @@ public:
   void set_is_drop() { is_drop_ = true; }
   uint64_t get_tenant_id() { return tenant_id_; }
   uint64_t get_table_id() { return table_id_; }
+  share::schema::ObTableType get_table_type() { return ref_table_type_; }
   StatisticType get_statistic_type() { return statistic_type_; }
   const ObAnalyzeSampleInfo &get_sample_info() const { return sample_info_; }
   ObAnalyzeSampleInfo &get_sample_info() { return sample_info_; }
@@ -99,6 +102,8 @@ public:
   int set_part_ids(ObIArray<int64_t> &part_ids);
   int set_subpart_ids(ObIArray<int64_t> &subpart_ids);
 
+  void set_gather_subpart_hist(bool gather_subpart_hist) { gather_subpart_hist_ = gather_subpart_hist; }
+
 
   TO_STRING_KV(K_(tenant_id),
                K_(table_id),
@@ -108,7 +113,10 @@ public:
                K_(partition_infos),
                K_(subpartition_infos),
                K_(part_ids),
-               K_(subpart_ids));
+               K_(subpart_ids),
+               K_(ref_table_type),
+               K_(gather_subpart_hist));
+
 private:
   uint64_t tenant_id_;
   ObString database_name_;
@@ -136,6 +144,8 @@ private:
   common::ObSEArray<int64_t, 4, common::ModulePageAllocator, true> subpart_ids_;
   common::ObSEArray<PartInfo, 4, common::ModulePageAllocator, true> all_partition_infos_;
   common::ObSEArray<PartInfo, 4, common::ModulePageAllocator, true> all_subpartition_infos_;
+  share::schema::ObTableType ref_table_type_;
+  bool gather_subpart_hist_;
   DISALLOW_COPY_AND_ASSIGN(ObAnalyzeStmt);
 };
 

@@ -21,9 +21,9 @@
 #include "share/config/ob_server_config.h"
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_getter_guard.h"
-#include "share/ls/ob_ls_table_iterator.h"//ObLSTableIterator
+#include "share/ls/ob_ls_table_iterator.h"//ObTenantLSTableIterator
 #include "share/ls/ob_ls_info.h"//ObLSInfo
-#include "rootserver/ob_server_manager.h"
+#include "share/ob_all_server_tracer.h"
 #include "observer/ob_server_struct.h"
 #include "rootserver/ob_root_service.h"
 namespace oceanbase
@@ -37,7 +37,6 @@ namespace rootserver
 
 ObLostReplicaChecker::ObLostReplicaChecker()
   : inited_(false), cond_(),
-    server_manager_(NULL),
     lst_operator_(NULL),
     schema_service_(NULL)
 {
@@ -65,9 +64,7 @@ int ObLostReplicaChecker::check_cancel_()
   return ret;
 }
 
-int ObLostReplicaChecker::init(ObServerManager &server_manager,
-                                ObLSTableOperator &lst_operator,
-                                ObMultiVersionSchemaService &schema_service)
+int ObLostReplicaChecker::init(ObLSTableOperator &lst_operator, ObMultiVersionSchemaService &schema_service)
 {
   int ret = OB_SUCCESS;
   const int64_t thread_cnt = 1;
@@ -79,7 +76,6 @@ int ObLostReplicaChecker::init(ObServerManager &server_manager,
   } else if (OB_FAIL(create(thread_cnt, "LostRepCheck"))) {
     LOG_WARN("create empty server checker thread failed", K(ret), K(thread_cnt));
   } else {
-    server_manager_ = &server_manager;
     lst_operator_ = &lst_operator;
     schema_service_ = &schema_service;
     inited_ = true;
@@ -162,35 +158,46 @@ int ObLostReplicaChecker::check_lost_replicas()
 int ObLostReplicaChecker::check_lost_replica_by_ls_(const share::ObLSInfo &ls_info)
 {
   int ret = OB_SUCCESS;
-  int tmp_ret = OB_SUCCESS;
   bool is_lost_replica = false;
   int64_t lost_count = 0;
   LOG_DEBUG("start checking lost replicas by ls", K(ls_info));
   if (!inited_) {
     ret = OB_NOT_INIT;
-    LOG_WARN("not init", K(ret));
+    LOG_WARN("not init", KR(ret));
   } else if (OB_UNLIKELY(!ls_info.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("ls info invalid", K(ret), K(ls_info));
+    LOG_WARN("ls info invalid", KR(ret), K(ls_info));
   } else if (OB_ISNULL(lst_operator_)) {
     ret  = OB_ERR_UNEXPECTED;
     LOG_WARN("ls operator is null", KR(ret), KP(lst_operator_));
   } else {
     const share::ObLSInfo::ReplicaArray &replicas = ls_info.get_replicas();
-    FOREACH_CNT_X(replica, replicas, OB_SUCCESS == ret) {
+    FOREACH_CNT_X(replica, replicas, OB_SUCC(ret)) {
       is_lost_replica = false;
       if (OB_FAIL(check_lost_replica_(ls_info, *replica, is_lost_replica))) {
-        LOG_WARN("check_lost_replica failed", K(ls_info), "replica",
-                 *replica, KR(ret));
+        LOG_WARN("check_lost_replica failed", KR(ret), K(ls_info), KPC(replica));
       } else if (is_lost_replica) {
         lost_count++;
         if (OB_FAIL(lst_operator_->remove(replica->get_tenant_id(),
                                           replica->get_ls_id(),
-                                          replica->get_server()))) {
-          LOG_WARN("lst_operator remove replica failed", KR(ret), "replica", *replica);
+                                          replica->get_server(),
+                                          false/*inner_table_only*/))) {
+          LOG_WARN("lst_operator remove replica failed", KR(ret), KPC(replica));
         } else {
-          LOG_INFO("lost replica checker remove lost replica finish", "replica",
-                   *replica, KR(ret), K(tmp_ret));
+          LOG_INFO("lost replica checker remove lost replica finish", KR(ret), KPC(replica));
+        }
+
+        if (OB_SUCC(ret) && is_sys_tenant(replica->get_tenant_id())) {
+          if (OB_FAIL(lst_operator_->remove(replica->get_tenant_id(),
+                                            replica->get_ls_id(),
+                                            replica->get_server(),
+                                            true/*inner_table_only*/))) {
+            LOG_WARN("lst_operator remove replica from inner table failed",
+                     KR(ret), KPC(replica));
+          } else {
+            LOG_INFO("lost replica checker remove lost replica from inner table finish",
+                     KR(ret), KPC(replica));
+          }
         }
       } else {
         // do nothing
@@ -220,37 +227,22 @@ int ObLostReplicaChecker::check_lost_replica_(const ObLSInfo &ls_info,
     LOG_WARN("check lost server failed", "server", replica.get_server(), K(ret));
   } else if (is_lost_server) {
     /*
-     * 下面的逻辑处理了两种宕机情况：
-     * 1. paxos replica 不在 member list 中，永久下线
-     * 2. nonpaxos replica 永久下线
-     *
-     * 发生永久下线之前，副本可能都已经迁移，对应内部表记录也被清理。但可能存在异常：
-     *  - 内部表记录清理失败
-     *  - 发生永久下线之前，副本没有被迁移
-     *
-     * 为了应对这两种异常，需要在这里做内部表记录回收清理。
-     *
-     * Knonw Issue: 迁移失败、又在这里做了副本回收，会出现少副本的情况。
-     *  稍后走补副本逻辑补充副本。R@region 时补副本可能补充到其它 zone。
+     * make sure whether a replica is lost, a lost replica could be cleaned from meta table
+     * a replica is lost if satisfied consitions below:
+     * 1. server is lost.
+     * 2. replica is not in service.
+     *    (F-replica is in-service when exists in member_list;
+     *     R-replica is in-service when exists in learner_list)
+     * 3. replica is in service but not exists in __all_ls_status
+     *    (if exists, let remove_member handle this replica;
+     *     if not exist, this replica is lost, maybe GC module didn't clean it)
      *
      */
-    /* 
-     * 该逻辑功能是判断一个副本是否需要删除。前提都是该server已经处于永久下线
-     * 1.首先根据是否在leader的member_list中，如果不在member_list中，那么该replica是需要被删除的。
-     * 非paxos副本或者非in_service中的副本需要直接删除
-     * 2.如果在member_list中则需要判断在日志流状态表存在，
-     *   当日志流状态表中存在，这里不处理，交给remove_member处理。
-     *   当日志流状态表中不存在，则可以直接处理了，这种属于GC的残留。
-     *
-     */
-    if (!replica.is_in_service()
-        || !ObReplicaTypeCheck::is_paxos_replica_V2(replica.get_replica_type())) {
+    if (!replica.is_in_service()) {
       is_lost_replica = true;
-      LOG_INFO("replica not in service or not paxos replica", K(replica));
+      LOG_INFO("replica not in service", K(replica));
     } else {
       // go on check ls_status
-    }
-    if (OB_SUCC(ret) && !is_lost_replica) {
       ObLSStatusOperator status_op;
       share::ObLSStatusInfo status_info;
       if (OB_ISNULL(GCTX.sql_proxy_)) {
@@ -282,21 +274,18 @@ int ObLostReplicaChecker::check_lost_server_(const ObAddr &server, bool &is_lost
   } else if (!server.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid server", K(server), K(ret));
-  } else if (OB_ISNULL(server_manager_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("server mgr is null", KR(ret), KP(server_manager_));
-  } else if (!server_manager_->has_build()) {
+  } else if (!SVR_TRACER.has_build()) {
     is_lost_server = false;
   } else {
-    ObServerStatus status;
-    ret = server_manager_->get_server_status(server, status);
+    ObServerInfoInTable server_info;
+    ret = SVR_TRACER.get_server_info(server, server_info);
     if (OB_ENTRY_NOT_EXIST != ret && OB_SUCCESS != ret) {
       LOG_WARN("get_server_status failed", K(server), K(ret));
     } else if (OB_ENTRY_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
       is_lost_server = true;
       LOG_INFO("server not exist", K(server));
-    } else if (status.is_permanent_offline()) {
+    } else if (server_info.is_permanent_offline()) {
       is_lost_server = true;
     }
   }

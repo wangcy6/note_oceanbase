@@ -157,6 +157,7 @@ int ObDistPlans::add_plan(ObPhysicalPlan &plan,
   ObPlanMatchHelper helper(plan_set_);
   ObArray<ObCandiTableLoc> phy_tbl_infos;
   ObArray<ObTableLocation> out_tbl_locations;
+
   for (int64_t i = 0; OB_SUCC(ret) && !is_matched && i < dist_plans_.count(); i++) {
     //检查是否已有其他线程add该plan成功
     phy_tbl_infos.reuse();
@@ -167,7 +168,11 @@ int ObDistPlans::add_plan(ObPhysicalPlan &plan,
       LOG_WARN("invalid argument", K(tmp_plan));
     } else if (OB_FAIL(helper.match_plan(pc_ctx, tmp_plan, is_matched, phy_tbl_infos, out_tbl_locations))) {
       LOG_WARN("fail to match dist plan", K(ret));
-    } else if (false == is_matched) {
+    } else {
+      is_matched = is_matched && tmp_plan->has_same_location_constraints(plan);
+    }
+
+    if (!is_matched) {
       // do nothing
     } else {
       ret = OB_SQL_PC_PLAN_DUPLICATE;
@@ -175,14 +180,7 @@ int ObDistPlans::add_plan(ObPhysicalPlan &plan,
   }
 
   if (OB_SUCC(ret) && !is_matched) {
-    if (OB_FAIL(plan.set_location_constraints(pc_ctx.sql_ctx_.base_constraints_,
-                                              pc_ctx.sql_ctx_.strict_constraints_,
-                                              pc_ctx.sql_ctx_.non_strict_constraints_))) {
-      LOG_WARN("failed to set location constraints", K(ret), K(plan),
-               K(pc_ctx.sql_ctx_.base_constraints_),
-               K(pc_ctx.sql_ctx_.strict_constraints_),
-               K(pc_ctx.sql_ctx_.non_strict_constraints_));
-    } else if (OB_FAIL(dist_plans_.push_back(&plan))) {
+    if (OB_FAIL(dist_plans_.push_back(&plan))) {
       LOG_WARN("fail to add plan", K(ret));
     }
   }
@@ -196,7 +194,6 @@ int ObDistPlans::is_same_plan(const ObPhysicalPlan *l_plan,
                               bool &is_same) const
 {
   int ret = OB_SUCCESS;
-
   if (OB_ISNULL(l_plan) || OB_ISNULL(r_plan)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(l_plan), K(r_plan));
@@ -204,7 +201,6 @@ int ObDistPlans::is_same_plan(const ObPhysicalPlan *l_plan,
     is_same = (l_plan->get_signature() == r_plan->get_signature());
     LOG_DEBUG("compare plan", K(l_plan->get_signature()), K(r_plan->get_signature()), K(is_same));
   }
-
   return ret;
 }
 
@@ -236,7 +232,7 @@ int64_t ObDistPlans::get_mem_size() const
   int64_t plan_set_mem = 0;
   for (int64_t i = 0; i < dist_plans_.count(); i++) {
     if (OB_ISNULL(dist_plans_.at(i))) {
-      BACKTRACE(ERROR, true, "null physical plan");
+      BACKTRACE_RET(ERROR, OB_ERR_UNEXPECTED, true, "null physical plan");
     } else {
       plan_set_mem += dist_plans_.at(i)->get_mem_size();
     }
@@ -260,11 +256,11 @@ int ObDistPlans::remove_plan_stat()
     for (int64_t i = 0; i < dist_plans_.count(); i++) {
       if (OB_ISNULL(dist_plans_.at(i))) {
         tmp_ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("get an unexpected null", K(tmp_ret), K(dist_plans_.at(i)));
+        LOG_WARN_RET(tmp_ret, "get an unexpected null", K(tmp_ret), K(dist_plans_.at(i)));
       } else if (FALSE_IT(plan_id = dist_plans_.at(i)->get_plan_id())) {
       } else if (OB_SUCCESS !=
                  (tmp_ret = plan_set_->remove_cache_obj_entry(plan_id))) {
-        LOG_WARN("failed to remove plan stat",
+        LOG_WARN_RET(tmp_ret, "failed to remove plan stat",
                  K(tmp_ret), K(plan_id), K(i));
       } else {
         /* do nothing */

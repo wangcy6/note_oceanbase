@@ -22,7 +22,7 @@
 #include "observer/ob_server_struct.h"
 #include "observer/omt/ob_tenant_config.h"
 #include "observer/omt/ob_tenant_config_mgr.h"
-#include "sql/monitor/full_link_trace/ob_flt_control_info_mgr.h"
+#include "sql/monitor/flt/ob_flt_control_info_mgr.h"
 
 using namespace oceanbase::common;
 
@@ -34,10 +34,10 @@ ObTenantConfig::ObTenantConfig() : ObTenantConfig(OB_INVALID_TENANT_ID)
 }
 
 ObTenantConfig::ObTenantConfig(uint64_t tenant_id)
-    : tenant_id_(tenant_id), current_version_(1),
+    : tenant_id_(tenant_id), current_version_(INITIAL_TENANT_CONF_VERSION),
       mutex_(),
       update_task_(), system_config_(), config_mgr_(nullptr),
-      lock_(), is_deleting_(false)
+      ref_(0L), is_deleting_(false), create_timestamp_(0L)
 {
 }
 
@@ -45,6 +45,7 @@ int ObTenantConfig::init(ObTenantConfigMgr *config_mgr)
 {
   int ret = OB_SUCCESS;
   config_mgr_ = config_mgr;
+  create_timestamp_ = ObTimeUtility::current_time();
   if (OB_FAIL(system_config_.init())) {
     LOG_ERROR("init system config failed", K(ret));
   } else if (OB_FAIL(update_task_.init(config_mgr, this))) {
@@ -55,66 +56,16 @@ int ObTenantConfig::init(ObTenantConfigMgr *config_mgr)
 
 void ObTenantConfig::print() const
 {
-  ObLatchRGuard rd_guard(const_cast<ObLatch&>(lock_), ObLatchIds::CONFIG_LOCK);
   OB_LOG(INFO, "===================== * begin tenant config report * =====================", K(tenant_id_));
   ObConfigContainer::const_iterator it = container_.begin();
   for (; it != container_.end(); ++it) {
     if (OB_ISNULL(it->second)) {
-      OB_LOG(WARN, "config item is null", "name", it->first.str());
+      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "config item is null", "name", it->first.str());
     } else {
       _OB_LOG(INFO, "| %-36s = %s", it->first.str(), it->second->str());
     }
   }
   OB_LOG(INFO, "===================== * stop tenant config report * =======================", K(tenant_id_));
-}
-
-int ObTenantConfig::check_all() const
-{
-  int ret = OB_SUCCESS;
-  ObLatchRGuard rd_guard(const_cast<ObLatch&>(lock_), ObLatchIds::CONFIG_LOCK);
-  ObConfigContainer::const_iterator it = container_.begin();
-  for (; OB_SUCC(ret) && it != container_.end(); ++it) {
-    if (OB_ISNULL(it->second)) {
-      ret = OB_ERR_UNEXPECTED;
-      OB_LOG(ERROR, "config item is null", "name", it->first.str(), K(ret));
-    } else if (!it->second->check()) {
-      ret = OB_INVALID_CONFIG;
-      OB_LOG(WARN, "Configure setting invalid",
-             "name", it->first.str(), "value", it->second->str(), K(ret));
-    } else {
-      // do nothing
-    }
-  }
-  return ret;
-}
-
-int ObTenantConfig::rdlock()
-{
-  return lock_.rdlock(ObLatchIds::CONFIG_LOCK) == OB_SUCCESS
-      ? OB_SUCCESS : OB_EAGAIN;
-}
-
-int ObTenantConfig::wrlock()
-{
-  return lock_.wrlock(ObLatchIds::CONFIG_LOCK) == OB_SUCCESS
-      ? OB_SUCCESS : OB_EAGAIN;
-}
-
-int ObTenantConfig::try_rdlock()
-{
-  return lock_.try_rdlock(ObLatchIds::CONFIG_LOCK) == OB_SUCCESS
-      ? OB_SUCCESS : OB_EAGAIN;
-}
-
-int ObTenantConfig::try_wrlock()
-{
-  return lock_.try_wrlock(ObLatchIds::CONFIG_LOCK) == OB_SUCCESS
-      ? OB_SUCCESS : OB_EAGAIN;
-}
-
-int ObTenantConfig::unlock()
-{
-  return lock_.unlock() == OB_SUCCESS ? OB_SUCCESS : OB_EAGAIN;
 }
 
 int ObTenantConfig::read_config()
@@ -123,8 +74,6 @@ int ObTenantConfig::read_config()
   ObSystemConfigKey key;
   ObAddr server;
   char local_ip[OB_MAX_SERVER_ADDR_SIZE] = "";
-  DRWLock::RDLockGuard lguard(ObConfigManager::get_serialize_lock());
-  ObLatchWGuard wr_guard(lock_, ObLatchIds::CONFIG_LOCK);
   server = GCTX.self_addr();
   if (OB_UNLIKELY(true != server.ip_to_string(local_ip, sizeof(local_ip)))) {
     ret = OB_CONVERT_ERROR;
@@ -348,6 +297,8 @@ int ObTenantConfig::update_local(int64_t expected_version, ObMySQLProxy::MySQLRe
       LOG_ERROR("Read tenant config failed", K_(tenant_id), K(ret));
     } else if (save2file && OB_FAIL(config_mgr_->dump2file())) {
       LOG_WARN("Dump to file failed", K(ret));
+    } else if (OB_FAIL(publish_special_config_after_dump())) {
+      LOG_WARN("publish special config after dump failed", K(tenant_id_), K(ret));
     }
     print();
   } else {
@@ -356,64 +307,115 @@ int ObTenantConfig::update_local(int64_t expected_version, ObMySQLProxy::MySQLRe
   return ret;
 }
 
-int ObTenantConfig::add_extra_config(char *config_str,
+int ObTenantConfig::publish_special_config_after_dump()
+{
+  int ret = OB_SUCCESS;
+  ObConfigItem *const *pp_item = NULL;
+  if (OB_ISNULL(pp_item = container_.get(ObConfigStringKey(COMPATIBLE)))) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("Invalid config string", K(tenant_id_), K(ret));
+  } else if (!(*pp_item)->dump_value_updated()) {
+    LOG_INFO("config dump value is not set, no need read", K(tenant_id_), K((*pp_item)->spfile_str()));
+  } else if (!(*pp_item)->set_value((*pp_item)->spfile_str())) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("Invalid config value", K(tenant_id_), K((*pp_item)->spfile_str()), K(ret));
+  } else {
+    LOG_INFO("publish special config after dump succ", K(tenant_id_), K((*pp_item)->spfile_str()), K((*pp_item)->str()));
+  }
+  return ret;
+}
+
+int ObTenantConfig::add_extra_config(const char *config_str,
                                      int64_t version /* = 0 */ ,
-                                     bool check_name /* = false */)
+                                     bool check_name /* = false */,
+                                     bool check_unit /* = true */)
 {
   int ret = OB_SUCCESS;
   const int64_t MAX_OPTS_LENGTH = sysconf(_SC_ARG_MAX);
+  int64_t config_str_length = 0;
+  char *buf = NULL;
   char *saveptr = NULL;
   char *token = NULL;
-  DRWLock::RDLockGuard lguard(ObConfigManager::get_serialize_lock());
-  ObLatchWGuard wr_guard(lock_, ObLatchIds::CONFIG_LOCK);
-  token = STRTOK_R(config_str, ",\n", &saveptr);
-  while (OB_SUCC(ret) && OB_LIKELY(NULL != token)) {
-    char *saveptr_one = NULL;
-    const char *name = NULL;
-    const char *value = NULL;
-    ObConfigItem *const *pp_item = NULL;
-    if (OB_ISNULL(name = STRTOK_R(token, "=", &saveptr_one))) {
-      ret = OB_INVALID_CONFIG;
-      LOG_ERROR("Invalid config string", K(token), K(ret));
-    } else if (OB_ISNULL(saveptr_one) || OB_UNLIKELY('\0' == *(value = saveptr_one))) {
-      LOG_INFO("Empty config string", K(token), K(name));
-      // ret = OB_INVALID_CONFIG;
-      name = "";
-    }
-    if (OB_SUCC(ret)) {
-      const int value_len = strlen(value);
-      // hex2cstring -> value_len / 2 + 1
-      // '\0' -> 1
-      const int external_info_val_len = value_len / 2 + 1 + 1;
-      char *external_info_val = (char*)ob_malloc(external_info_val_len, "temp");
-      DEFER(if (external_info_val != nullptr) ob_free(external_info_val););
-      if (OB_ISNULL(external_info_val)) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_WARN("failed to alloc", K(ret));
-      } else if (FALSE_IT(external_info_val[0] = '\0')) {
-      } else if (OB_ISNULL(pp_item = container_.get(ObConfigStringKey(name)))) {
-        /* make compatible with previous configuration */
-        ret = check_name ? OB_INVALID_CONFIG : OB_SUCCESS;
-        LOG_WARN("Invalid config string, no such config item", K(name), K(value), K(ret));
+  if (OB_ISNULL(config_str)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("config str is null", K(ret));
+  } else if ((config_str_length = static_cast<int64_t>(STRLEN(config_str))) >= MAX_OPTS_LENGTH) {
+    ret = OB_BUF_NOT_ENOUGH;
+    LOG_ERROR("Extra config is too long", K(ret));
+  } else if (OB_ISNULL(buf = new (std::nothrow) char[config_str_length + 1])) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_ERROR("ob tc malloc memory for buf fail", K(ret));
+  } else {
+    MEMCPY(buf, config_str, config_str_length);
+    buf[config_str_length] = '\0';
+    token = STRTOK_R(buf, ",\n", &saveptr);
+    const ObString compatible_cfg(COMPATIBLE);
+    while (OB_SUCC(ret) && OB_LIKELY(NULL != token)) {
+      char *saveptr_one = NULL;
+      const char *name = NULL;
+      const char *value = NULL;
+      ObConfigItem *const *pp_item = NULL;
+      if (OB_ISNULL(name = STRTOK_R(token, "=", &saveptr_one))) {
+        ret = OB_INVALID_CONFIG;
+        LOG_ERROR("Invalid config string", K(token), K(ret));
+      } else if (OB_ISNULL(saveptr_one) || OB_UNLIKELY('\0' == *(value = saveptr_one))) {
+        LOG_INFO("Empty config string", K(token), K(name));
+        // ret = OB_INVALID_CONFIG;
+        name = "";
       }
-      if (OB_FAIL(ret) || OB_ISNULL(pp_item)) {
-      } else if (!(*pp_item)->set_value(value)) {
-        ret = OB_INVALID_CONFIG;
-        LOG_WARN("Invalid config value", K(name), K(value), K(ret));
-      } else if (!(*pp_item)->check()) {
-        ret = OB_INVALID_CONFIG;
-        const char* range = (*pp_item)->range();
-        if (OB_ISNULL(range) || strlen(range) == 0) {
-          LOG_ERROR("Invalid config, value out of range", K(name), K(value), K(ret));
-        } else {
-          _LOG_ERROR("Invalid config, value out of %s (for reference only). name=%s, value=%s, ret=%d", range, name, value, ret);
+      if (OB_SUCC(ret)) {
+        const int value_len = strlen(value);
+        // hex2cstring -> value_len / 2 + 1
+        // '\0' -> 1
+        const int external_info_val_len = value_len / 2 + 1 + 1;
+        char *external_info_val = (char*)ob_malloc(external_info_val_len, "temp");
+        DEFER(if (external_info_val != nullptr) ob_free(external_info_val););
+        if (OB_ISNULL(external_info_val)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_WARN("failed to alloc", K(ret));
+        } else if (FALSE_IT(external_info_val[0] = '\0')) {
+        } else if (OB_ISNULL(pp_item = container_.get(ObConfigStringKey(name)))) {
+          /* make compatible with previous configuration */
+          ret = check_name ? OB_INVALID_CONFIG : OB_SUCCESS;
+          LOG_WARN("Invalid config string, no such config item", K(name), K(value), K(ret));
         }
-      } else {
-        (*pp_item)->set_version(version);
-        LOG_INFO("Load tenant config succ", K(name), K(value));
+        if (OB_FAIL(ret) || OB_ISNULL(pp_item)) {
+        } else if (compatible_cfg.case_compare(name) == 0) {
+          if (!(*pp_item)->set_dump_value(value)) {
+            ret = OB_INVALID_CONFIG;
+            LOG_WARN("Invalid config value", K(name), K(value), K(ret));
+          } else {
+            (*pp_item)->set_dump_value_updated();
+            (*pp_item)->set_version(version);
+            LOG_INFO("Load tenant config dump value succ", K(name), K((*pp_item)->spfile_str()), K((*pp_item)->str()));
+          }
+        } else if (check_unit && !(*pp_item)->check_unit(value)) {
+          ret = OB_INVALID_CONFIG;
+          LOG_ERROR("Invalid config value", K(name), K(value), K(ret));
+        } else {
+          if (!(*pp_item)->set_value(value)) {
+            ret = OB_INVALID_CONFIG;
+            LOG_WARN("Invalid config value", K(name), K(value), K(ret));
+          } else if (!(*pp_item)->check()) {
+            ret = OB_INVALID_CONFIG;
+            const char* range = (*pp_item)->range();
+            if (OB_ISNULL(range) || strlen(range) == 0) {
+              LOG_ERROR("Invalid config, value out of range", K(name), K(value), K(ret));
+            } else {
+              _LOG_ERROR("Invalid config, value out of %s (for reference only). name=%s, value=%s, ret=%d", range, name, value, ret);
+            }
+          } else {
+            (*pp_item)->set_version(version);
+            LOG_INFO("Load tenant config succ", K(name), K(value));
+          }
+        }
+        token = STRTOK_R(NULL, ",\n", &saveptr);
       }
-      token = STRTOK_R(NULL, ",\n", &saveptr);
     }
+  }
+  if (NULL != buf) {
+    delete [] buf;
+    buf = NULL;
   }
   return ret;
 }
@@ -423,7 +425,6 @@ OB_DEF_SERIALIZE(ObTenantConfig)
   int ret = OB_SUCCESS;
   int64_t expect_data_len = get_serialize_size_();
   int64_t saved_pos = pos;
-  ObLatchRGuard rd_guard(const_cast<ObLatch&>(lock_), ObLatchIds::CONFIG_LOCK);
   if (OB_FAIL(databuff_printf(buf, buf_len, pos, "[%lu]\n", tenant_id_))) {
   } else {
     ret = ObCommonConfig::serialize(buf, buf_len, pos);
@@ -441,7 +442,6 @@ OB_DEF_SERIALIZE(ObTenantConfig)
 OB_DEF_DESERIALIZE(ObTenantConfig)
 {
   int ret = OB_SUCCESS;
-  ObLatchWGuard wr_guard(lock_, ObLatchIds::CONFIG_LOCK);
   if ('[' != *(buf + pos)) {
     ret = OB_INVALID_DATA;
     LOG_ERROR("invalid tenant config", K(ret));
@@ -484,7 +484,6 @@ OB_DEF_SERIALIZE_SIZE(ObTenantConfig)
   int64_t len = 0, tmp_pos = 0;
   int ret = OB_SUCCESS;
   char tenant_str[100] = {'\0'};
-  ObLatchRGuard rd_guard(const_cast<ObLatch&>(lock_), ObLatchIds::CONFIG_LOCK);
   if (OB_FAIL(databuff_printf(tenant_str, 100, tmp_pos, "[%lu]\n", tenant_id_))) {
     LOG_WARN("write data buff failed", K(ret));
   } else {

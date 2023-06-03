@@ -24,6 +24,7 @@ using namespace share;
 namespace palf
 {
 #define CHECK_VALID if (NULL == palf_handle_impl_) { return OB_NOT_INIT; }
+
 PalfHandle::PalfHandle() : palf_handle_impl_(NULL),
                            rc_cb_(NULL),
                            fs_cb_(NULL),
@@ -77,17 +78,14 @@ bool  PalfHandle::operator==(const PalfHandle &rhs) const
   return palf_handle_impl_ == rhs.palf_handle_impl_;
 }
 
-int PalfHandle::set_initial_member_list(const common::ObMemberList &member_list, const int64_t paxos_replica_num)
+int PalfHandle::set_initial_member_list(const common::ObMemberList &member_list,
+                                        const int64_t paxos_replica_num,
+                                        const common::GlobalLearnerList &learner_list)
 {
   CHECK_VALID;
-  return palf_handle_impl_->set_initial_member_list(member_list, paxos_replica_num);
+  return palf_handle_impl_->set_initial_member_list(member_list, paxos_replica_num, learner_list);
 }
 
-int PalfHandle::set_initial_member_list(const common::ObMemberList &member_list, const common::ObMember &arb_replica, const int64_t paxos_replica_num)
-{
-  CHECK_VALID;
-  return palf_handle_impl_->set_initial_member_list(member_list, arb_replica, paxos_replica_num);
-}
 
 int PalfHandle::set_region(const common::ObRegion &region)
 {
@@ -202,6 +200,12 @@ int PalfHandle::advance_base_info(const palf::PalfBaseInfo &palf_base_info, cons
   return palf_handle_impl_->advance_base_info(palf_base_info, is_rebuild);
 }
 
+int PalfHandle::flashback(const int64_t mode_version, const SCN &flashback_scn, const int64_t timeout_us)
+{
+  CHECK_VALID;
+  return palf_handle_impl_->flashback(mode_version, flashback_scn, timeout_us);
+}
+
 int PalfHandle::get_begin_lsn(LSN &lsn) const
 {
   CHECK_VALID;
@@ -212,6 +216,15 @@ int PalfHandle::get_begin_scn(SCN &scn) const
 {
   CHECK_VALID;
   return palf_handle_impl_->get_begin_scn(scn);
+<<<<<<< HEAD
+=======
+}
+
+int PalfHandle::get_base_lsn(LSN &lsn) const
+{
+  CHECK_VALID;
+  return palf_handle_impl_->get_base_lsn(lsn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 }
 
 int PalfHandle::get_base_info(const LSN &lsn,
@@ -260,6 +273,15 @@ int PalfHandle::get_role(common::ObRole &role, int64_t &proposal_id, bool &is_pe
   return palf_handle_impl_->get_role(role, proposal_id, is_pending_state);
 }
 
+<<<<<<< HEAD
+=======
+int PalfHandle::get_palf_id(int64_t &palf_id) const
+{
+  CHECK_VALID;
+  return palf_handle_impl_->get_palf_id(palf_id);
+}
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 int PalfHandle::get_end_scn(SCN &scn) const
 {
   int ret = OB_SUCCESS;
@@ -280,6 +302,20 @@ int PalfHandle::get_paxos_member_list(common::ObMemberList &member_list, int64_t
   return palf_handle_impl_->get_paxos_member_list(member_list, paxos_replica_num);
 }
 
+int PalfHandle::get_paxos_member_list_and_learner_list(common::ObMemberList &member_list,
+                                                       int64_t &paxos_replica_num,
+                                                       GlobalLearnerList &learner_list) const
+{
+  CHECK_VALID;
+  return palf_handle_impl_->get_paxos_member_list_and_learner_list(member_list, paxos_replica_num, learner_list);
+}
+
+int PalfHandle::get_election_leader(common::ObAddr &addr) const
+{
+  CHECK_VALID;
+  return palf_handle_impl_->get_election_leader(addr);
+}
+
 int PalfHandle::change_replica_num(const common::ObMemberList &member_list,
                                    const int64_t curr_replica_num,
                                    const int64_t new_replica_num,
@@ -287,6 +323,20 @@ int PalfHandle::change_replica_num(const common::ObMemberList &member_list,
 {
   CHECK_VALID;
   return palf_handle_impl_->change_replica_num(member_list, curr_replica_num, new_replica_num, timeout_us);
+<<<<<<< HEAD
+=======
+}
+int PalfHandle::force_set_as_single_replica()
+{
+  CHECK_VALID;
+  return palf_handle_impl_->force_set_as_single_replica();
+}
+int PalfHandle::get_ack_info_array(LogMemberAckInfoList &ack_info_array,
+                                   common::GlobalLearnerList &degraded_list) const
+{
+  CHECK_VALID;
+  return palf_handle_impl_->get_ack_info_array(ack_info_array, degraded_list);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 }
 
 int PalfHandle::add_member(const common::ObMember &member,
@@ -325,6 +375,7 @@ int PalfHandle::remove_learner(const common::ObMember &removed_learner, const in
   return palf_handle_impl_->remove_learner(removed_learner, timeout_us);
 }
 
+<<<<<<< HEAD
 int PalfHandle::switch_learner_to_acceptor(const common::ObMember &learner, const int64_t timeout_us)
 {
   CHECK_VALID;
@@ -374,6 +425,24 @@ int PalfHandle::upgrade_learner_to_acceptor(const common::ObMemberList &learner_
   CHECK_VALID;
   return palf_handle_impl_->upgrade_learner_to_acceptor(learner_list, timeout_us);
 }
+=======
+int PalfHandle::switch_learner_to_acceptor(const common::ObMember &learner,
+                                           const int64_t new_replica_num,
+                                           const int64_t timeout_us)
+{
+  CHECK_VALID;
+  return palf_handle_impl_->switch_learner_to_acceptor(learner, new_replica_num, timeout_us);
+}
+
+int PalfHandle::switch_acceptor_to_learner(const common::ObMember &member,
+                                           const int64_t new_replica_num,
+                                           const int64_t timeout_us)
+{
+  CHECK_VALID;
+  return palf_handle_impl_->switch_acceptor_to_learner(member, new_replica_num, timeout_us);
+}
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 int PalfHandle::change_leader_to(const common::ObAddr &dst_addr)
 {
@@ -410,12 +479,21 @@ int PalfHandle::get_access_mode(AccessMode &access_mode) const
   return ret;
 }
 
-int PalfHandle::disable_vote()
+int PalfHandle::disable_vote(const bool need_check_log_missing)
 {
   int ret = OB_SUCCESS;
   CHECK_VALID;
-  ret = palf_handle_impl_->disable_vote();
+  ret = palf_handle_impl_->disable_vote(need_check_log_missing);
   return ret;
+}
+
+bool PalfHandle::is_vote_enabled() const
+{
+  int ret = OB_SUCCESS;
+  bool bool_ret = false;
+  CHECK_VALID;
+  bool_ret = palf_handle_impl_->is_vote_enabled();
+  return bool_ret;
 }
 
 int PalfHandle::enable_vote()
@@ -546,7 +624,7 @@ int PalfHandle::unregister_rebuild_cb()
   } else {
     MTL_DELETE(PalfRebuildCbNode, "RebuildCbNode", rebuild_cb_);
     rebuild_cb_ = NULL;
-    PALF_LOG(INFO, "unregister_rebuild_cb success", K(ret));
+    PALF_LOG(INFO, "unregister_rebuild_cb success", K(ret), KPC(this));
   }
 	return ret;
 }

@@ -271,14 +271,14 @@ public:
     va_copy(ap2, ap);
     int64_t n = vsnprintf(data_ + pos_, remain(), fmt, ap);
     if (n++ < 0) { // include '\0' at tail
-      _OB_LOG(WARN, "vsnprintf failed, errno %d", errno);
+      _OB_LOG_RET(WARN, common::OB_ERR_SYS, "vsnprintf failed, errno %d", errno);
       rc = common::OB_ERROR;
     } else if (n > remain()) {
       rc = expand(n + 1);
       if (common::OB_SUCCESS == rc) {
         n = vsnprintf(data_ + pos_, remain(), fmt, ap2);
         if (n < 0) {
-          _OB_LOG(WARN, "vsnprintf failed, errno %d", errno);
+          _OB_LOG_RET(WARN, common::OB_ERR_SYS, "vsnprintf failed, errno %d", errno);
           rc = common::OB_ERROR;
         } else {
           pos_ += n;
@@ -349,8 +349,8 @@ public:
 
 public:
   ObSelfBufferWriter(
+      const char *label,
       const int64_t size = 0,
-      const char *label = 0,
       const bool need_align = false);
   virtual ~ObSelfBufferWriter();
   int ensure_space(const int64_t size);

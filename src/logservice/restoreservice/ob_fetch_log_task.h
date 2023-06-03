@@ -14,6 +14,7 @@
 #define OCEANBASE_LOGSERVICE_OB_RESTORE_TASK_H_
 
 #include "lib/utility/ob_print_utils.h"
+#include "ob_remote_log_iterator.h"           // Iterator
 #include "share/ob_ls_id.h"                   // ObLSID
 #include "logservice/palf/lsn.h"              // LSN
 #include "share/scn.h"              // SCN
@@ -30,22 +31,16 @@ namespace logservice
 class ObFetchLogTask : public common::ObLink
 {
 public:
-  enum Status
-  {
-    NORMAL = 0,   // 正常状态
-    FINISH = 1,   // 该任务包含日志范围完成
-    STALE = 2,    // 该任务已经过时(切主导致任务过时, 暂时未使用TODO)
-    TO_END = 3,   // 已经拉到任务指定终点
-  };
-
-public:
   ObFetchLogTask(const share::ObLSID &id,
                  const share::SCN &pre_scn,
                  const palf::LSN &lsn,
                  const int64_t size,
-                 const int64_t proposal_id);
+                 const int64_t proposal_id,
+                 const int64_t version);
 
+  ~ObFetchLogTask() { reset(); }
   bool is_valid() const;
+<<<<<<< HEAD
   bool is_finish() const { return Status::FINISH == status_; }
   bool is_to_end() const { return Status::TO_END == status_; }
   void mark_to_end() { status_ = Status::TO_END; }
@@ -54,20 +49,45 @@ public:
   void set_stale() { status_ = Status::STALE; }
   TO_STRING_KV(K_(id), K_(proposal_id), K_(pre_scn), K_(start_lsn), K_(cur_lsn), K_(end_lsn),
       K_(max_fetch_scn), K_(max_submit_scn), K_(status));
+=======
+  void reset();
+  TO_STRING_KV(K_(id), K_(proposal_id), K_(version), K_(pre_scn), K_(start_lsn),
+      K_(cur_lsn), K_(end_lsn), K_(max_fetch_scn), K_(max_submit_scn), K_(iter));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 public:
   share::ObLSID id_;
   // to distinguish stale tasks which is generated in previous leader
   int64_t proposal_id_;
+<<<<<<< HEAD
+=======
+  int64_t version_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   share::SCN pre_scn_;    // heuristic log scn to locate piece, may be imprecise one
   palf::LSN start_lsn_;
   palf::LSN cur_lsn_;
   palf::LSN end_lsn_;
+<<<<<<< HEAD
   share::SCN max_fetch_scn_;     // 拉取日志最大log scn
   share::SCN max_submit_scn_;    // 提交日志最大log cn
   Status status_;
+=======
+  share::SCN max_fetch_scn_;     // 拉取日志最大scn
+  share::SCN max_submit_scn_;    // 提交日志最大scn
+  ObRemoteLogGroupEntryIterator iter_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 
+struct FetchLogTaskCompare final
+{
+public:
+  FetchLogTaskCompare() {}
+  ~FetchLogTaskCompare() {}
+  bool operator()(const ObFetchLogTask *left, const ObFetchLogTask *right)
+  {
+    return left->start_lsn_ < right->start_lsn_;
+  }
+};
 } // namespace logservice
 } // namespace oceanbase
 #endif /* OCEANBASE_LOGSERVICE_OB_RESTORE_TASK_H_ */

@@ -18,6 +18,9 @@
 #include "common/object/ob_object.h"
 #include "common/rowkey/ob_rowkey_info.h"
 #include "share/schema/ob_schema_struct.h"
+#include "share/stat/ob_opt_table_stat.h"
+#include "share/stat/ob_opt_column_stat.h"
+#include "share/stat/ob_opt_osg_column_stat.h"
 
 namespace oceanbase
 {
@@ -28,6 +31,9 @@ class ObOptColumnStat;
 
 typedef std::pair<int64_t, int64_t> BolckNumPair;
 typedef hash::ObHashMap<int64_t, BolckNumPair, common::hash::NoPthreadDefendMode> PartitionIdBlockMap;
+typedef common::hash::ObHashMap<ObOptTableStat::Key, ObOptTableStat *, common::hash::NoPthreadDefendMode> TabStatIndMap;
+typedef common::hash::ObHashMap<ObOptColumnStat::Key, ObOptOSGColumnStat *, common::hash::NoPthreadDefendMode> OSGColStatIndMap;
+typedef common::hash::ObHashMap<ObOptColumnStat::Key, ObOptColumnStat *, common::hash::NoPthreadDefendMode> ColStatIndMap;
 
 enum StatOptionFlags
 {
@@ -49,7 +55,13 @@ enum StatOptionFlags
 };
 const static double OPT_DEFAULT_STALE_PERCENT = 0.1;
 const static int64_t OPT_DEFAULT_STATS_RETENTION = 31;
-const static int64_t OPT_STATS_MAX_VALUE_CAHR_LEN = 128;
+const static int64_t OPT_STATS_MAX_VALUE_CHAR_LEN = 128;
+const static int64_t OPT_STATS_BIG_TABLE_ROWS = 10000000;
+const int64_t MAGIC_SAMPLE_SIZE = 5500;
+const int64_t MAGIC_MAX_AUTO_SAMPLE_SIZE = 22000;
+const int64_t MAGIC_MIN_SAMPLE_SIZE = 2500;
+const int64_t MAGIC_BASE_SAMPLE_SIZE = 1000;
+const double MAGIC_SAMPLE_CUT_RATIO = 0.00962;
 
 enum StatLevel
 {
@@ -96,12 +108,34 @@ enum ColumnAttrFlag
   IS_NOT_NULL_COL   = 1 << 3
 };
 
+enum ColumnGatherFlag
+{
+  NO_NEED_STAT          = 0,
+  VALID_OPT_COL         = 1,
+  NEED_BASIC_STAT       = 1 << 1,
+  NEED_AVG_LEN          = 1 << 2,
+  NEED_TRUNCATE_STR     = 1 << 3
+};
+
+enum ObGranularityType
+{
+  GRANULARITY_INVALID = 0,
+  GRANULARITY_GLOBAL,
+  GRANULARITY_PARTITION,
+  GRANULARITY_SUBPARTITION,
+  GRANULARITY_ALL,
+  GRANULARITY_AUTO,
+  GRANULARITY_GLOBAL_AND_PARTITION,
+  GRANULARITY_APPROX_GLOBAL_AND_PARTITION
+};
+
 struct ObExtraParam
 {
   StatLevel type_;
   int64_t nth_part_;
   PartitionIdBlockMap partition_id_block_map_;
   int64_t start_time_;
+  bool need_histogram_;
 };
 
 //TODO@jiangxiu.wt: improve the expression of PartInfo, use the map is better.
@@ -165,6 +199,133 @@ struct PartInfo
   ObSEArray<int64_t, 4> no_regather_partition_ids_;
 };
 
+enum ObStatTableType {
+  ObUserTable = 0,
+  ObSysTable
+};
+
+enum ObStatType {
+  ObFirstTimeToGather = 0,
+  ObStale,
+  ObNotStale
+};
+
+struct ObStatTableWrapper {
+  ObStatTableWrapper() :
+    stat_table_(),
+    table_type_(ObUserTable),
+    stat_type_(ObFirstTimeToGather),
+    is_big_table_(false),
+    last_gather_duration_(0)
+    {}
+  bool operator<(const ObStatTableWrapper &other) const;
+  int assign(const ObStatTableWrapper &other);
+  StatTable stat_table_;
+  ObStatTableType table_type_;
+  ObStatType stat_type_;
+  bool is_big_table_;
+  int64_t last_gather_duration_;
+  TO_STRING_KV(K_(stat_table),
+               K_(table_type),
+               K_(stat_type),
+               K_(is_big_table),
+               K_(last_gather_duration));
+};
+
+struct ObGatherTableStatsHelper {
+  ObGatherTableStatsHelper():
+    stat_tables_(),
+    duration_time_(-1),
+    succeed_count_(0),
+    failed_count_(0)
+    {}
+  inline bool need_gather_table_stats() const
+  {
+    return !stat_tables_.empty();
+  }
+  int get_duration_time(sql::ParamStore &params);
+  ObArray<ObStatTableWrapper> stat_tables_;
+
+  //duration_time to is used to mark the gather database stats job can use max time. default value
+  //is -1, it's meaning gather until all table have been gathered.
+  int64_t duration_time_;
+  int64_t succeed_count_;
+  int64_t failed_count_;
+  TO_STRING_KV(K_(stat_tables),
+               K_(duration_time),
+               K_(succeed_count),
+               K_(failed_count));
+};
+struct ObGlobalStatParam
+{
+  ObGlobalStatParam()
+  : need_modify_(true),
+    gather_approx_(false),
+    gather_histogram_(true)
+  {}
+  ObGlobalStatParam& operator=(const ObGlobalStatParam& other)
+  {
+    need_modify_ = other.need_modify_;
+    gather_approx_ = other.gather_approx_;
+    gather_histogram_ = other.gather_histogram_;
+    return *this;
+  }
+  void set_gather_stat(const bool gather_approx)
+  {
+    need_modify_ = true;
+    gather_approx_ = gather_approx;
+    gather_histogram_ = true;
+  }
+  void reset_gather_stat()
+  {
+    need_modify_ = false;
+    gather_approx_ = false;
+    gather_histogram_ = false;
+  }
+  TO_STRING_KV(K_(need_modify),
+               K_(gather_approx),
+               K_(gather_histogram));
+  bool need_modify_;
+  bool gather_approx_;
+  bool gather_histogram_;
+};
+struct ObPartitionStatParam
+{
+  ObPartitionStatParam(share::schema::ObPartitionFuncType type)
+  : part_type_(type),
+    need_modify_(true),
+    gather_histogram_(true)
+  {}
+  ObPartitionStatParam& operator=(const ObPartitionStatParam& other)
+  {
+    part_type_ = other.part_type_;
+    need_modify_ = other.need_modify_;
+    gather_histogram_ = other.gather_histogram_;
+    return *this;
+  }
+  void assign_without_part_type(const ObPartitionStatParam& other)
+  {
+    need_modify_ = other.need_modify_;
+    gather_histogram_ = other.gather_histogram_;
+  }
+  void set_gather_stat()
+  {
+    need_modify_ = true;
+    gather_histogram_ = true;
+  }
+  void reset_gather_stat()
+  {
+    need_modify_ = false;
+    gather_histogram_ = false;
+  }
+  TO_STRING_KV(K_(part_type),
+               K_(need_modify),
+               K_(gather_histogram));
+  share::schema::ObPartitionFuncType part_type_;
+  bool need_modify_;
+  bool gather_histogram_;
+};
+
 enum SampleType
 {
   RowSample,
@@ -197,7 +358,6 @@ struct ObAnalyzeSampleInfo
   double sample_value_;
 };
 
-
 struct ObColumnStatParam {
   inline void set_size_manual() { size_mode_ = 1; }
   inline void set_size_auto() { size_mode_ = 2; }
@@ -215,6 +375,14 @@ struct ObColumnStatParam {
   inline bool is_hidden_column() const { return column_attribute_ & ColumnAttrFlag::IS_HIDDEN_COL; }
   inline bool is_unique_column() const { return column_attribute_ & ColumnAttrFlag::IS_UNIQUE_COL; }
   inline bool is_not_null_column() const { return column_attribute_ & ColumnAttrFlag::IS_NOT_NULL_COL; }
+  inline void set_valid_opt_col() { gather_flag_ |= ColumnGatherFlag::VALID_OPT_COL; }
+  inline void set_need_basic_stat() { gather_flag_ |= ColumnGatherFlag::NEED_BASIC_STAT; }
+  inline void set_need_avg_len() { gather_flag_ |= ColumnGatherFlag::NEED_AVG_LEN; }
+  inline void set_need_truncate_str() { gather_flag_ |= ColumnGatherFlag::NEED_TRUNCATE_STR; }
+  inline bool is_valid_opt_col() const { return gather_flag_ & ColumnGatherFlag::VALID_OPT_COL; }
+  inline bool need_basic_stat() const { return gather_flag_ & ColumnGatherFlag::NEED_BASIC_STAT; }
+  inline bool need_avg_len() const { return gather_flag_ & ColumnGatherFlag::NEED_AVG_LEN; }
+  inline bool need_truncate_str() const { return gather_flag_ & ColumnGatherFlag::NEED_TRUNCATE_STR; }
 
   ObString column_name_;
   uint64_t column_id_;
@@ -223,12 +391,11 @@ struct ObColumnStatParam {
   int64_t size_mode_;
   int64_t bucket_num_;
   int64_t column_attribute_;
-  bool is_valid_hist_type_;
-  bool need_basic_static_;
   int64_t column_usage_flag_;
-  bool need_truncate_str_;
+  int64_t gather_flag_;
 
-  static bool is_valid_histogram_type(const ObObjType type);
+  static bool is_valid_opt_col_type(const ObObjType type);
+  static bool is_valid_avglen_type(const ObObjType type);
   static const int64_t DEFAULT_HISTOGRAM_BUCKET_NUM;
 
   TO_STRING_KV(K_(column_name),
@@ -237,10 +404,8 @@ struct ObColumnStatParam {
                K_(size_mode),
                K_(bucket_num),
                K_(column_attribute),
-               K_(is_valid_hist_type),
-               K_(need_basic_static),
                K_(column_usage_flag),
-               K_(need_truncate_str));
+               K_(gather_flag));
 };
 
 struct ObTableStatParam {
@@ -253,6 +418,9 @@ struct ObTableStatParam {
     tab_name_(),
     table_id_(OB_INVALID_ID),
     part_level_(share::schema::ObPartitionLevel::PARTITION_LEVEL_ZERO),
+    global_stat_param_(),
+    part_stat_param_(share::schema::ObPartitionFuncType::PARTITION_FUNC_TYPE_MAX),
+    subpart_stat_param_(share::schema::ObPartitionFuncType::PARTITION_FUNC_TYPE_MAX),
     total_part_cnt_(0),
     part_name_(),
     part_infos_(),
@@ -261,10 +429,6 @@ struct ObTableStatParam {
     sample_info_(),
     method_opt_(),
     degree_(1),
-    need_global_(true),
-    need_approx_global_(false),
-    need_part_(true),
-    need_subpart_(true),
     granularity_(),
     cascade_(false),
     stat_tab_(),
@@ -291,7 +455,10 @@ struct ObTableStatParam {
     global_tablet_id_(0),
     global_data_part_id_(INVALID_GLOBAL_PART_ID),
     data_table_id_(INVALID_GLOBAL_PART_ID),
-    need_estimate_block_(true)
+    need_estimate_block_(true),
+    is_temp_table_(false),
+    allocator_(NULL),
+    ref_table_type_(share::schema::ObTableType::MAX_TABLE_TYPE)
   {}
 
   int assign(const ObTableStatParam &other);
@@ -315,6 +482,9 @@ struct ObTableStatParam {
   ObString tab_name_;
   uint64_t table_id_;
   share::schema::ObPartitionLevel part_level_;
+  ObGlobalStatParam global_stat_param_;
+  ObPartitionStatParam part_stat_param_;
+  ObPartitionStatParam subpart_stat_param_;
   int64_t total_part_cnt_;
 
   ObString part_name_;
@@ -325,11 +495,6 @@ struct ObTableStatParam {
   ObAnalyzeSampleInfo sample_info_;
   ObString method_opt_;
   int64_t degree_;
-
-  bool need_global_;
-  bool need_approx_global_;
-  bool need_part_;
-  bool need_subpart_;
 
   ObString granularity_;
   bool cascade_;
@@ -363,6 +528,9 @@ struct ObTableStatParam {
   int64_t global_data_part_id_; // used to check wether table is locked, while gathering index stats.
   int64_t data_table_id_; // the data table id for index schema
   bool need_estimate_block_;//need estimate macro/micro block count
+  bool is_temp_table_;
+  common::ObIAllocator *allocator_;
+  share::schema::ObTableType ref_table_type_;
 
   TO_STRING_KV(K(tenant_id_),
                K(db_name_),
@@ -376,10 +544,9 @@ struct ObTableStatParam {
                K(sample_info_),
                K(method_opt_),
                K(degree_),
-               K(need_global_),
-               K(need_approx_global_),
-               K(need_part_),
-               K(need_subpart_),
+               K(global_stat_param_),
+               K(part_stat_param_),
+               K(subpart_stat_param_),
                K(granularity_),
                K(cascade_),
                K(stat_tab_),
@@ -406,7 +573,9 @@ struct ObTableStatParam {
                K(global_tablet_id_),
                K(global_data_part_id_),
                K(data_table_id_),
-               K(need_estimate_block_));
+               K(need_estimate_block_),
+               K(is_temp_table_),
+               K(ref_table_type_));
 };
 
 struct ObOptStat
@@ -541,6 +710,23 @@ struct ObOptDmlStat
                K(update_row_count_),
                K(delete_row_count_));
 };
+
+enum OSG_TYPE
+{
+  NORMAL_OSG = 0,
+  GATHER_OSG = 1,
+  MERGE_OSG = 2
+};
+
+struct OSGPartInfo {
+  OB_UNIS_VERSION(1);
+public:
+  OSGPartInfo() : part_id_(OB_INVALID_ID), tablet_id_(OB_INVALID_ID) {}
+  ObObjectID part_id_;
+  ObTabletID tablet_id_;
+  TO_STRING_KV(K_(part_id), K_(tablet_id));
+};
+typedef common::hash::ObHashMap<ObObjectID, OSGPartInfo, common::hash::NoPthreadDefendMode> OSGPartMap;
 
 }
 }

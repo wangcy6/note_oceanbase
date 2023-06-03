@@ -21,6 +21,7 @@
 #include "lib/net/ob_net_util.h"
 #include "common/ob_record_header.h"
 #include "common/ob_zone.h"
+#include "observer/ob_server.h"
 #include "share/ob_dml_sql_splicer.h"
 #include "share/inner_table/ob_inner_table_schema.h"
 #include "share/unit/ob_unit_resource.h"     // ObUnitResource
@@ -78,6 +79,11 @@ bool ObServerConfig::in_upgrade_mode() const
   return bret;
 }
 
+bool ObServerConfig::in_dbupgrade_stage() const
+{
+  return obrpc::OB_UPGRADE_STAGE_DBUPGRADE == GCTX.get_upgrade_stage();
+}
+
 int ObServerConfig::read_config()
 {
   int ret = OB_SUCCESS;
@@ -87,7 +93,6 @@ int ObServerConfig::read_config()
   if (OB_UNLIKELY(true != self_addr_.ip_to_string(local_ip, sizeof(local_ip)))) {
     ret = OB_CONVERT_ERROR;
   } else {
-    DRWLock::RDLockGuard lguard(ObConfigManager::get_serialize_lock());
     key.set_varchar(ObString::make_string("svr_type"), print_server_role(get_server_type()));
     key.set_int(ObString::make_string("svr_port"), rpc_port);
     key.set_varchar(ObString::make_string("svr_ip"), local_ip);
@@ -120,7 +125,7 @@ int ObServerConfig::check_all() const
       OB_LOG(ERROR, "config item is null", "name", it->first.str(), K(ret));
     } else if (!it->second->check()) {
       int temp_ret = OB_INVALID_CONFIG;
-      OB_LOG(WARN, "Configure setting invalid",
+      OB_LOG_RET(WARN, temp_ret, "Configure setting invalid",
              "name", it->first.str(), "value", it->second->str(), K(temp_ret));
     } else {
       // do nothing
@@ -136,6 +141,9 @@ int ObServerConfig::strict_check_special() const
     if (!cluster_id.check()) {
       ret = OB_INVALID_CONFIG;
       SHARE_LOG(WARN, "invalid cluster id", K(ret), K(cluster_id.str()));
+    } else if (strlen(zone.str()) <= 0) {
+      ret = OB_INVALID_CONFIG;
+      SHARE_LOG(WARN, "config zone cannot be empty", KR(ret), K(zone.str()));
     }
   }
   return ret;
@@ -147,7 +155,7 @@ void ObServerConfig::print() const
   ObConfigContainer::const_iterator it = container_.begin();
   for (; it != container_.end(); ++it) {
     if (OB_ISNULL(it->second)) {
-      OB_LOG(WARN, "config item is null", "name", it->first.str());
+      OB_LOG_RET(WARN, OB_ERROR, "config item is null", "name", it->first.str());
     } else {
       _OB_LOG(INFO, "| %-36s = %s", it->first.str(), it->second->str());
     }
@@ -188,7 +196,7 @@ int ObServerConfig::deserialize_with_compat(const char *buf, const int64_t data_
                   K(data_len), K(pos_data), K_(header.data_zlength), K(ret));
       } else if (OB_FAIL(header.check_payload_checksum(p_data, data_len - pos_data))) {
         LOG_ERROR("check data checksum failed", K(ret));
-      } else if (OB_FAIL(add_extra_config(buf + pos))) {
+      } else if (OB_FAIL(add_extra_config(buf + pos, 0, false, false))) {
         LOG_ERROR("Read server config failed", K(ret));
       } else {
         pos += header.data_length_;
@@ -208,33 +216,60 @@ ObServerMemoryConfig &ObServerMemoryConfig::get_instance()
   return memory_config;
 }
 
+<<<<<<< HEAD
+=======
+int64_t ObServerMemoryConfig::get_capacity_default_memory(CapacityType type, int64_t memory_limit)
+{
+  // According to different memory_limit, the kernel can provide adaptive memory_size for default capacity.
+  // For example, memory_limit = 16G, adaptive system_memory and hidden_sys_memory are 6G and 2G.
+  static const int64_t      memory_limit_array[] = {4LL<<30, 8LL<<30, 14LL<<30, 28LL<<30, 48LL<<30, 56LL<<30, 65LL<<30, 96LL<<30, 128LL<<30};
+  static const int64_t     system_memory_array[] = {2LL<<30, 3LL<<30,  6LL<<30, 10LL<<30, 12LL<<30, 13LL<<30, 15LL<<30, 18LL<<30,  20LL<<30};
+  static const int64_t hidden_sys_memory_array[] = {1LL<<30, 2LL<<30,  2LL<<30,  2LL<<30,  4LL<<30,  4LL<<30,  6LL<<30,  7LL<<30,   8LL<<30};
+
+  int64_t memory_size = 0;
+  for (int i = ARRAYSIZEOF(memory_limit_array) - 1; i >= 0; --i) {
+    if (memory_limit_array[i] <= memory_limit) {
+      switch (type) {
+        case SYSTEM_MEMORY:
+          memory_size = system_memory_array[i];
+          break;
+        case HIDDEN_SYS_MEMORY:
+          memory_size = hidden_sys_memory_array[i];
+          break;
+      }
+      break;
+    }
+  }
+  return memory_size;
+}
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 int ObServerMemoryConfig::reload_config(const ObServerConfig& server_config)
 {
   int ret = OB_SUCCESS;
+  const bool is_arbitration_mode = OBSERVER.is_arbitration_mode();
   int64_t memory_limit = server_config.memory_limit;
   if (0 == memory_limit) {
     memory_limit = get_phy_mem_size() * server_config.memory_limit_percentage / 100;
   }
   int64_t system_memory = server_config.system_memory;
-  if (0 == system_memory) {
-    int64_t memory_limit_g = memory_limit >> 30;
-    if (memory_limit_g < 4) {
-      LOG_ERROR("memory_limit with unexpected value", K(memory_limit));
-    } else if (memory_limit_g <= 8) {
-      system_memory = 2LL << 30;
-    } else if (memory_limit_g <= 16) {
-      system_memory = 3LL << 30;
-    } else if (memory_limit_g <= 32) {
-      system_memory = 5LL << 30;
-    } else if (memory_limit_g <= 48) {
-      system_memory = 7LL << 30;
-    } else if (memory_limit_g <= 64) {
-      system_memory = 10LL << 30;
-    } else {
-      system_memory = int64_t(15 + 3 * (sqrt(memory_limit_g) - 8)) << 30;
+  if (memory_limit < (1 << 30) ) {
+    // The memory_limit should not be less than 1G for arbitration mode
+    ret = OB_INVALID_CONFIG;
+    LOG_ERROR("memory_limit with unexpected value", K(ret), K(memory_limit), "phy mem", get_phy_mem_size());
+  } else if (is_arbitration_mode) {
+    // do nothing
+  } else if (0 == system_memory) {
+    system_memory = get_capacity_default_memory(SYSTEM_MEMORY, memory_limit);
+    if (0 == system_memory) {
+      ret = OB_INVALID_CONFIG;
+      LOG_ERROR("memory_limit with unexpected value", K(ret), K(memory_limit), "phy mem", get_phy_mem_size());
     }
   }
-  if (memory_limit > system_memory) {
+
+  if (OB_FAIL(ret)) {
+  // do nothing
+  } else if (memory_limit > system_memory) {
     memory_limit_ = memory_limit;
     system_memory_ = system_memory;
     LOG_INFO("update memory_limit or system_memory success",
@@ -244,6 +279,17 @@ int ObServerMemoryConfig::reload_config(const ObServerConfig& server_config)
     LOG_ERROR("update memory_limit or system_memory failed",
               K(memory_limit), K(system_memory));
   }
+
+  int64_t observer_tenant_hold = lib::get_tenant_memory_hold(OB_SERVER_TENANT_ID);
+  if (observer_tenant_hold > system_memory_) {
+    if (server_config._ignore_system_memory_over_limit_error) {
+      LOG_WARN("the hold of observer tenant is over the system_memory",
+               K(observer_tenant_hold), K_(system_memory));
+    } else {
+      LOG_ERROR("the hold of observer tenant is over the system_memory",
+                K(observer_tenant_hold), K_(system_memory));
+    }
+  }
   return ret;
 }
 
@@ -252,11 +298,11 @@ void ObServerMemoryConfig::set_server_memory_limit(int64_t memory_limit)
   if (memory_limit > system_memory_) {
     LOG_INFO("update memory_limit success", K(memory_limit), K(system_memory_));
   } else {
-    LOG_ERROR("update memory_limit failed", K(memory_limit), K(system_memory_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "update memory_limit failed", K(memory_limit), K(system_memory_));
   }
 }
 
-OB_DEF_SERIALIZE(ObServerConfig)
+int ObServerConfig::serialize_(char *buf, const int64_t buf_len, int64_t &pos) const
 {
   int ret = OB_SUCCESS;
   ObRecordHeader header;
@@ -280,13 +326,32 @@ OB_DEF_SERIALIZE(ObServerConfig)
     header.data_length_ = static_cast<int32_t>(pos - data_pos);
     header.data_zlength_ = header.data_length_;
     if (header.data_zlength_ != expect_data_len) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("unexpected data size", K_(header.data_zlength),
+      LOG_WARN("unexpected data size", K_(header.data_zlength),
                                           K(expect_data_len));
     } else {
       header.data_checksum_ = ob_crc64(p_data, pos - data_pos);
       header.set_header_checksum();
       ret = header.serialize(buf, buf_len, saved_header_pos);
+    }
+  }
+  return ret;
+}
+
+int ObServerConfig::serialize(char *buf, const int64_t buf_len, int64_t &pos) const
+{
+  int ret = OB_SUCCESS;
+  OB_UNIS_ENCODE(UNIS_VERSION);
+  if (OB_SUCC(ret)) {
+    int64_t size_nbytes = NS_::OB_SERIALIZE_SIZE_NEED_BYTES;
+    int64_t pos_bak = (pos += size_nbytes);
+    if (OB_FAIL(serialize_(buf, buf_len, pos))) {
+      LOG_WARN("ObServerConfig serialize fail", K(ret));
+    }
+    int64_t serial_size = pos - pos_bak;
+    int64_t tmp_pos = 0;
+    if (OB_SUCC(ret)) {
+      ret = NS_::encode_fixed_bytes_i64(buf + pos_bak - size_nbytes,
+        size_nbytes, tmp_pos, serial_size);
     }
   }
   return ret;
@@ -340,6 +405,11 @@ OB_DEF_SERIALIZE_SIZE(ObServerConfig)
 }
 
 } // end of namespace common
+namespace obrpc {
+bool enable_pkt_nio() {
+  return GCONF._enable_pkt_nio && GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_2_0_0;
+}
+}
 } // end of namespace oceanbase
 
 namespace easy

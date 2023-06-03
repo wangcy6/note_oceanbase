@@ -56,14 +56,15 @@ public:
            LogEngine *log_engine,
            LogConfigMgr *mm,
            LogModeMgr *mode_mgr_,
-           palf::PalfRoleChangeCbWrapper *palf_role_change_cb);
+           palf::PalfRoleChangeCbWrapper *palf_role_change_cb,
+           LogPlugins *plugins);
   virtual bool is_state_changed();
   virtual int switch_state();
   virtual int handle_prepare_request(const common::ObAddr &new_leader,
                              const int64_t &proposal_id);
   virtual int set_scan_disk_log_finished();
   virtual bool can_append(const int64_t proposal_id, const bool need_check_proposal_id) const;
-  virtual bool can_raw_write() const;
+  virtual bool can_raw_write(const int64_t proposal_id, const bool need_check_proposal_id) const;
   virtual bool can_slide_sw() const;
   virtual bool can_handle_committed_info(const int64_t &proposal_id) const;
   virtual bool can_revoke(const int64_t proposal_id) const;
@@ -78,6 +79,7 @@ public:
   virtual bool can_handle_prepare_response(const int64_t &proposal_id) const;
   virtual bool can_handle_prepare_request(const int64_t &proposal_id) const;
   virtual bool can_receive_log(const int64_t &proposal_id) const;
+  virtual bool can_receive_config_log(const int64_t &proposal_id) const;
   virtual bool can_send_log_ack(const int64_t &proposal_id) const;
   virtual bool can_receive_log_ack(const int64_t &proposal_id) const;
   virtual bool can_truncate_log() const;
@@ -91,19 +93,35 @@ public:
   virtual int disable_sync();
   virtual bool is_sync_enabled() const;
   virtual bool is_allow_vote() const;
+  virtual bool is_allow_vote_persisted() const;
+  //only modify allow_vote_
+  virtual int disable_vote_in_mem();
+  //modify allow_vote_ and allow_vote_persisted_
   virtual int disable_vote();
   virtual int enable_vote();
   virtual LogReplicaType get_replica_type() const;
   virtual int get_election_role(common::ObRole &role, int64_t &epoch) const;
+<<<<<<< HEAD
   TO_STRING_KV(KP(this), K_(self), K_(palf_id), "role", role_to_string(role_),                         \
       "state", replica_state_to_string(state_), K_(prepare_meta), K_(leader), K_(leader_epoch),        \
       K_(is_sync_enabled), K_(pending_end_lsn), K_(scan_disk_log_finished), K_(last_check_start_id),   \
+=======
+  virtual bool is_arb_replica() const;
+  virtual int set_changing_config_with_arb();
+  virtual int reset_changing_config_with_arb();
+  virtual bool is_changing_config_with_arb() const;
+  TO_STRING_KV(KP(this), K_(self), K_(palf_id), "role", role_to_string(role_), "replica_type",         \
+      replica_type_2_str(replica_type_), "state", replica_state_to_string(state_), K_(prepare_meta),   \
+      K_(leader), K_(leader_epoch), K_(is_sync_enabled), K_(allow_vote), K_(allow_vote_persisted), K_(pending_end_lsn),          \
+      K_(scan_disk_log_finished), K_(last_check_start_id), K_(is_changing_config_with_arb),            \
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       K_(reconfirm_start_time_us), KP_(palf_role_change_cb), K_(allow_vote));
 private:
   bool check_role_and_state_(const common::ObRole &role, const ObReplicaState &state) const;
   void update_role_and_state_(const common::ObRole &new_role, const ObReplicaState &new_state);
   int reject_prepare_request_(const common::ObAddr &server,
                               const int64_t &proposal_id);
+  bool is_reconfirm_can_receive_log_() const;
   bool is_follower_active_() const;
   bool is_follower_init_() const;
   bool is_leader_reconfirm_() const;
@@ -157,6 +175,7 @@ private:
   LogModeMgr *mode_mgr_;
   palf::PalfRoleChangeCbWrapper *palf_role_change_cb_;
   election::Election* election_;
+  LogPlugins *plugins_;
   union
   {
     int64_t role_state_val_;
@@ -184,8 +203,13 @@ private:
   // whether this replica is allowed to reply ack when receiving logs
   // it's true by default
   bool allow_vote_;
+  // value of allow_vote persisted_, will be modified after meta is flushed
+  bool allow_vote_persisted_;
   // whether this replica is an arbitration replica
   LogReplicaType replica_type_;
+  // is changing config with arbitration member, stop appending logs
+  bool is_changing_config_with_arb_;
+  int64_t last_set_changing_config_with_arb_time_us_;
   bool is_inited_;
 
   DISALLOW_COPY_AND_ASSIGN(LogStateMgr);

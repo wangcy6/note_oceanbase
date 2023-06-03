@@ -16,6 +16,8 @@
 #include "lib/stat/ob_latch_define.h"
 #include "lib/allocator/ob_mod_define.h"
 #include "lib/container/ob_array.h"
+#include "lib/time/ob_tsc_timestamp.h"
+#include "common/ob_clock_generator.h"
 
 namespace oceanbase
 {
@@ -31,6 +33,10 @@ public:
       const uint32_t latch_id = ObLatchIds::DEFAULT_BUCKET_LOCK,
       const lib::ObLabel &label = ObModIds::BUCKET_LOCK,
       const uint64_t tenant_id = OB_SERVER_TENANT_ID);
+  int init(
+      const uint64_t bucket_cnt,
+      const uint32_t latch_id,
+      const lib::ObMemAttr &attr);
   void destroy();
   int try_rdlock(const uint64_t bucket_idx);
   int try_wrlock(const uint64_t bucket_idx);
@@ -56,6 +62,7 @@ private:
   OB_INLINE uint64_t bucket_to_latch_idx(const uint64_t bucket_idx) const;
   int try_lock_all(const bool is_write_lock);
 private:
+  lib::ObMemAttr attr_;
   uint64_t bucket_cnt_;
   uint64_t latch_cnt_;
   ObLatch *latches_;
@@ -75,18 +82,18 @@ public:
        lock_start_ts_(0)
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.rdlock(index_)))) {
-      COMMON_LOG(WARN, "Fail to read lock bucket, ", K_(index), K_(ret));
+      COMMON_LOG_RET(WARN, ret_, "Fail to read lock bucket, ", K_(index), K_(ret));
     } else {
-      lock_start_ts_ = ObTimeUtility::fast_current_time();
+      lock_start_ts_ = common::ObClockGenerator::getClock();
     }
   };
   ~ObBucketRLockGuard()
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock(index_)))) {
-        COMMON_LOG(WARN, "Fail to unlock bucket, ", K_(ret));
+        COMMON_LOG_RET(WARN, ret_, "Fail to unlock bucket, ", K_(ret));
       } else {
-        const int64_t lock_end_ts = ObTimeUtility::fast_current_time();
+        const int64_t lock_end_ts = common::ObClockGenerator::getClock();
         if (lock_end_ts - lock_start_ts_ > 5 * 1000 * 1000) {
           STORAGE_LOG(INFO, "bucket lock handle cost too much time",
                                             K_(lock_start_ts),
@@ -116,18 +123,18 @@ public:
        lock_start_ts_(0)
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.wrlock(index_)))) {
-      COMMON_LOG(WARN, "Fail to write lock bucket, ", K_(index), K_(ret));
+      COMMON_LOG_RET(WARN, ret_, "Fail to write lock bucket, ", K_(index), K_(ret));
     } else {
-      lock_start_ts_ = ObTimeUtility::current_time();
+      lock_start_ts_ = common::ObClockGenerator::getClock();
     }
   };
   ~ObBucketWLockGuard()
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock(index_)))) {
-        COMMON_LOG(WARN, "Fail to unlock bucket, ", K_(index), K_(ret));
+        COMMON_LOG_RET(WARN, ret_, "Fail to unlock bucket, ", K_(index), K_(ret));
       } else {
-        const int64_t lock_end_ts = ObTimeUtility::current_time();
+        const int64_t lock_end_ts = common::ObClockGenerator::getClock();
         if (lock_end_ts - lock_start_ts_ > 5 * 1000 * 1000) {
           STORAGE_LOG(INFO, "bucket lock handle cost too much time",
                                             K_(lock_start_ts),
@@ -156,7 +163,7 @@ public:
        lock_start_ts_(0)
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.wrlock_all()))) {
-      COMMON_LOG(WARN, "Fail to try write lock all buckets", K_(ret));
+      COMMON_LOG_RET(WARN, ret_, "Fail to try write lock all buckets", K_(ret));
     } else {
       lock_start_ts_ = ObTimeUtility::current_time();
     }
@@ -165,7 +172,7 @@ public:
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock_all()))) {
-        COMMON_LOG(WARN, "Fail to unlock all buckets, ", K_(ret));
+        COMMON_LOG_RET(WARN, ret_, "Fail to unlock all buckets, ", K_(ret));
       } else {
         const int64_t lock_end_ts = ObTimeUtility::current_time();
         if (lock_end_ts - lock_start_ts_ > 5 * 1000 * 1000) {
@@ -196,10 +203,10 @@ public:
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.try_wrlock_all()))) {
       if (OB_EAGAIN != ret_) {
-        COMMON_LOG(WARN, "Fail to try read lock all buckets", K_(ret), K(lbt()));
+        COMMON_LOG_RET(WARN, ret_, "Fail to try read lock all buckets", K_(ret), K(lbt()));
       } else {
         if (REACH_COUNT_INTERVAL(1000)) {// print one log per 1000 times.
-          COMMON_LOG(WARN, "fail to lock all buckets, need to try again", K_(ret), K(lbt()));
+          COMMON_LOG_RET(WARN, ret_, "fail to lock all buckets, need to try again", K_(ret), K(lbt()));
         }
       }
     } else {
@@ -210,7 +217,7 @@ public:
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock_all()))) {
-        COMMON_LOG(WARN, "Fail to unlock all buckets, ", K_(ret));
+        COMMON_LOG_RET(WARN, ret_, "Fail to unlock all buckets, ", K_(ret));
       } else {
         const int64_t lock_end_ts = ObTimeUtility::current_time();
         if (lock_end_ts - lock_start_ts_ > 5 * 1000 * 1000) {
@@ -241,23 +248,23 @@ public:
   {
     if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.try_rdlock_all()))) {
       if (OB_EAGAIN != ret_) {
-        COMMON_LOG(WARN, "Fail to try read lock all buckets", K_(ret), K(lbt()));
+        COMMON_LOG_RET(WARN, ret_, "Fail to try read lock all buckets", K_(ret), K(lbt()));
       } else {
         if (REACH_COUNT_INTERVAL(1000)) {// print one log per 1000 times.
-          COMMON_LOG(WARN, "fail to lock all buckets, need to try again", K_(ret), K(lbt()));
+          COMMON_LOG_RET(WARN, ret_, "fail to lock all buckets, need to try again", K_(ret), K(lbt()));
         }
       }
     } else {
-      lock_start_ts_ = ObTimeUtility::current_time();
+      lock_start_ts_ = common::ObClockGenerator::getClock();
     }
   };
   ~ObBucketTryRLockAllGuard()
   {
     if (OB_LIKELY(OB_SUCCESS == ret_)) {
       if (OB_UNLIKELY(OB_SUCCESS != (ret_ = lock_.unlock_all()))) {
-        COMMON_LOG(WARN, "Fail to unlock all buckets, ", K_(ret));
+        COMMON_LOG_RET(WARN, ret_, "Fail to unlock all buckets, ", K_(ret));
       } else {
-        const int64_t lock_end_ts = ObTimeUtility::current_time();
+        const int64_t lock_end_ts = common::ObClockGenerator::getClock();
         if (lock_end_ts - lock_start_ts_ > 5 * 1000 * 1000) {
           STORAGE_LOG(INFO, "bucket lock handle cost too much time",
                                             K_(lock_start_ts),

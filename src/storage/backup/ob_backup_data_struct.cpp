@@ -18,6 +18,10 @@
 #include "lib/oblog/ob_log_module.h"
 #include "storage/backup/ob_backup_task.h"
 #include "storage/blocksstable/ob_logic_macro_id.h"
+<<<<<<< HEAD
+=======
+#include "share/backup/ob_backup_struct.h"
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -258,18 +262,25 @@ int ObBackupDataFileTrailer::check_valid() const
 
 /* ObBackupMacroBlockId */
 
-ObBackupMacroBlockId::ObBackupMacroBlockId() : logic_id_(), macro_block_id_()
+ObBackupMacroBlockId::ObBackupMacroBlockId()
+ : logic_id_(), macro_block_id_(),
+   nested_offset_(0), nested_size_(0)
 {}
 
-bool ObBackupMacroBlockId::is_valid()
+bool ObBackupMacroBlockId::is_valid() const
 {
-  return logic_id_.is_valid() && macro_block_id_.is_valid();
+  return logic_id_.is_valid() &&
+         macro_block_id_.is_valid() &&
+         nested_offset_ >= 0 &&
+         nested_size_ >= 0;
 }
 
 void ObBackupMacroBlockId::reset()
 {
   logic_id_.reset();
   macro_block_id_.reset();
+  nested_offset_ = 0;
+  nested_size_ = 0;
 }
 
 /* ObBackupPhysicalID */
@@ -1197,7 +1208,7 @@ void ObBackupLSTaskInfo::reset()
 /* ObBackupSkippedTablet */
 
 ObBackupSkippedTablet::ObBackupSkippedTablet()
-    : task_id_(), tenant_id_(), turn_id_(), retry_id_(), tablet_id_(), ls_id_(), backup_set_id_()
+    : task_id_(), tenant_id_(), turn_id_(), retry_id_(), tablet_id_(), ls_id_(), backup_set_id_(), skipped_type_()
 {}
 
 ObBackupSkippedTablet::~ObBackupSkippedTablet()
@@ -1206,7 +1217,7 @@ ObBackupSkippedTablet::~ObBackupSkippedTablet()
 bool ObBackupSkippedTablet::is_valid() const
 {
   return task_id_ > 0 && OB_INVALID_ID != tenant_id_ && turn_id_ > 0 && retry_id_ >= 0 && tablet_id_.is_valid() &&
-         ls_id_.is_valid() && backup_set_id_ > 0;
+         ls_id_.is_valid() && backup_set_id_ > 0 && skipped_type_.is_valid();
 }
 
 /* ObBackupReportCtx */

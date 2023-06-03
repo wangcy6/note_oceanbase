@@ -107,6 +107,7 @@ int ObIMvccCtx::register_row_replay_cb(
   int ret = OB_SUCCESS;
   const bool is_replay = true;
   ObMvccRowCallback *cb = NULL;
+  common::ObTimeGuard timeguard("ObIMvccCtx::register_row_replay_cb", 5 * 1000);
   if (OB_ISNULL(key) || OB_ISNULL(value) || OB_ISNULL(node)
       || data_size <= 0 || OB_ISNULL(memtable)) {
     ret = OB_INVALID_ARGUMENT;
@@ -114,6 +115,7 @@ int ObIMvccCtx::register_row_replay_cb(
   } else if (OB_ISNULL(cb = alloc_row_callback(*this, *value, memtable))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     TRANS_LOG(WARN, "alloc row callback failed", K(ret));
+  } else if (FALSE_IT(timeguard.click("alloc_row_callback"))) {
   } else {
     cb->set(key,
             node,
@@ -125,6 +127,7 @@ int ObIMvccCtx::register_row_replay_cb(
       ObRowLatchGuard guard(value->latch_);
       cb->link_trans_node();
     }
+    timeguard.click("link_trans_node");
 
     cb->set_scn(scn);
     if (OB_FAIL(append_callback(cb))) {
@@ -134,9 +137,11 @@ int ObIMvccCtx::register_row_replay_cb(
       }
       TRANS_LOG(WARN, "append callback failed", K(ret));
     }
+    timeguard.click("append_callback");
 
     if (OB_FAIL(ret)) {
       callback_free(cb);
+      timeguard.click("callback_free");
       TRANS_LOG(WARN, "append callback failed", K(ret));
     }
   }
@@ -256,7 +261,7 @@ void ObIMvccCtx::check_row_callback_registration_between_stmt_()
   transaction::ObPartTransCtx *trans_ctx =
     (transaction::ObPartTransCtx *)(i_mem_ctx->get_trans_ctx());
   if (NULL != trans_ctx && !trans_ctx->has_pending_write()) {
-    TRANS_LOG(ERROR, "register commit not match expection", K(*trans_ctx));
+    TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "register commit not match expection", K(*trans_ctx));
   }
 }
 }
@@ -272,10 +277,15 @@ ObMvccWriteGuard::~ObMvccWriteGuard()
     int ret = OB_SUCCESS;
     auto tx_ctx = ctx_->get_trans_ctx();
     ctx_->write_done();
-    if (OB_NOT_NULL(memtable_) && memtable_->is_frozen_memtable()) {
-      if (OB_FAIL(tx_ctx->submit_redo_log(true/*is_freeze*/))) {
-        TRANS_LOG(WARN, "failed to submit freeze log", K(ret), KPC(tx_ctx));
-        memtable_->get_freezer()->set_need_resubmit_log(true);
+    if (OB_NOT_NULL(memtable_)) {
+      bool is_freeze = memtable_->is_frozen_memtable();
+      if (OB_FAIL(tx_ctx->submit_redo_log(is_freeze))) {
+        if (REACH_TIME_INTERVAL(100 * 1000)) {
+          TRANS_LOG(WARN, "failed to submit log if neccesary", K(ret), K(is_freeze), KPC(tx_ctx));
+        }
+        if (is_freeze) {
+          memtable_->get_freezer()->set_need_resubmit_log(true);
+        }
       }
     }
   }

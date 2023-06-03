@@ -15,14 +15,16 @@
 #include "observer/ob_sql_client_decorator.h"
 #include "sql/engine/basic/ob_chunk_row_store.h"
 #include "share/stat/ob_dbms_stats_utils.h"
+#include "sql/engine/aggregate/ob_aggregate_processor.h"
 
 namespace oceanbase
 {
+using namespace sql;
 namespace common
 {
 
-ObHybridHistEstimator::ObHybridHistEstimator(ObExecContext &ctx)
-  : ObStatsEstimator(ctx)
+ObHybridHistEstimator::ObHybridHistEstimator(ObExecContext &ctx, ObIAllocator &allocator)
+  : ObStatsEstimator(ctx, allocator)
 {}
 
 template<class T>
@@ -32,7 +34,7 @@ int ObHybridHistEstimator::add_stat_item(const T &item, ObIArray<ObStatItem *> &
   ObStatItem *cpy = NULL;
   if (!item.is_needed()) {
     // do nothing
-  } else if (OB_ISNULL(cpy = copy_stat_item(ctx_.get_allocator(), item))) {
+  } else if (OB_ISNULL(cpy = copy_stat_item(allocator_, item))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to copy stat item", K(ret));
   } else if (OB_FAIL(stat_items.push_back(cpy))) {
@@ -46,6 +48,7 @@ int ObHybridHistEstimator::add_stat_item(const T &item, ObIArray<ObStatItem *> &
 // select hybrid_hist(c1,20)，hybrid_hist(c2,20)，.... from t1 partition(p1) simple ...
 // union all
 // select hybrid_hist(c1,20)，hybrid_hist(c2,20)，.... from t1 partition(p2) simple ...
+// no need to hit plan cache or rewrite
 int ObHybridHistEstimator::estimate(const ObTableStatParam &param,
                                     ObExtraParam &extra,
                                     ObIArray<ObOptStat> &dst_opt_stats)
@@ -55,7 +58,7 @@ int ObHybridHistEstimator::estimate(const ObTableStatParam &param,
   ObOptStat src_opt_stat;
   src_opt_stat.table_stat_ = &tab_stat;
   ObIArray<ObOptColumnStat*> &src_col_stats = src_opt_stat.column_stats_;
-  ObArenaAllocator allocator(ObModIds::OB_SQL_PARSER);
+  ObArenaAllocator allocator("ObHybridHist");
   ObString raw_sql;
   ObString refine_raw_sql;
   int64_t refine_cnt = 0;
@@ -314,10 +317,13 @@ int ObHybridHistEstimator::gen_query_sql(ObIAllocator &allocator,
   reset_select_items();
   sample_hint_ = simple_hint;
   int64_t duration_time = -1;
+  ObString hint_str("NO_REWRITE USE_PLAN_CACHE(NONE) DBMS_STATS");
   //add select items
   if (OB_ISNULL(dst_opt_stat.table_stat_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret), K(dst_opt_stat.table_stat_));
+  } else if (OB_FAIL(add_hint(hint_str, allocator))) {
+    LOG_WARN("failed to add hint");
   } else if (OB_FAIL(add_stat_item(ObPartitionId(&param, src_opt_stat.table_stat_, empty_str,
                                                  dst_opt_stat.table_stat_->get_partition_id()),
                                    stat_items))) {
@@ -435,12 +441,14 @@ int ObHybridHistEstimator::try_build_hybrid_hist(const ObColumnStatParam &param,
         LOG_WARN("failed to do build hybrid hist", K(ret));
       } else {
         col_stat.get_histogram().get_buckets().reset();
-        if (OB_FAIL(append(col_stat.get_histogram().get_buckets(), hybrid_hist.get_buckets()))) {
-          LOG_WARN("failed to append hist bucket", K(ret));
+        if (OB_FAIL(col_stat.get_histogram().prepare_allocate_buckets(allocator_,
+                                                                      hybrid_hist.get_buckets().count()))) {
+          LOG_WARN("failed to prepare allocate buckets", K(ret));
+        } else if (OB_FAIL(col_stat.get_histogram().assign_buckets(hybrid_hist.get_buckets()))) {
+          LOG_WARN("failed to assign buckets", K(ret));
         } else {
           col_stat.get_histogram().set_type(ObHistType::HYBIRD);
           col_stat.get_histogram().set_sample_size(total_count);
-          col_stat.get_histogram().set_bucket_cnt(col_stat.get_histogram().get_buckets().count());
           col_stat.get_histogram().calc_density(ObHistType::HYBIRD,
                                                 total_count,
                                                 hybrid_hist.get_pop_freq(),
@@ -462,8 +470,8 @@ int ObHybridHistEstimator::try_build_hybrid_hist(const ObColumnStatParam &param,
  *  b. if total_row_count >= MAGIC_MAX_AUTO_SAMPLE_SIZE then:
  *      i: if max_num_bkts <= DEFAULT_HISTOGRAM_BUCKET_NUM then choosing MAGIC_SAMPLE_SIZE;
  *      ii: if max_num_bkts > DEFAULT_HISTOGRAM_BUCKET_NUM:
- *          (1): if max_num_bkts >= total_row_count * MAX_CUT_RATIO then choosing full table scan;
- *          (2): if max_num_bkts <= total_row_count * MAX_CUT_RATIO then choosing:
+ *          (1): if max_num_bkts >= total_row_count * MAGIC_SAMPLE_CUT_RATIO then choosing full table scan;
+ *          (2): if max_num_bkts <= total_row_count * MAGIC_SAMPLE_CUT_RATIO then choosing:
  *               sample_size = MAGIC_SAMPLE_SIZE + MAGIC_BASE_SAMPLE_SIZE + (max_num_bkts -
  *                               DEFAULT_HISTOGRAM_BUCKET_NUM) * MAGIC_MIN_SAMPLE_SIZE * 0.01;
  *
@@ -481,11 +489,6 @@ int ObHybridHistEstimator::compute_estimate_percent(int64_t total_row_count,
                                                     bool &is_block_sample)
 {
   int ret = OB_SUCCESS;
-  const int64_t MAGIC_SAMPLE_SIZE = 5500;
-  const int64_t MAGIC_MAX_AUTO_SAMPLE_SIZE = 22000;
-  const int64_t MAGIC_MIN_SAMPLE_SIZE = 2500;
-  const int64_t MAGIC_BASE_SAMPLE_SIZE = 1000;
-  const double MAX_CUT_RATIO = 0.00962;
   if (0 == total_row_count) {
     need_sample = false;
   } else if (sample_info.is_sample_) {
@@ -521,7 +524,7 @@ int ObHybridHistEstimator::compute_estimate_percent(int64_t total_row_count,
       is_block_sample = false;
       est_percent = (MAGIC_SAMPLE_SIZE * 100.0) / total_row_count;
     } else {
-      int64_t num_bound_bkts = static_cast<int64_t>(std::round(total_row_count * MAX_CUT_RATIO));
+      int64_t num_bound_bkts = static_cast<int64_t>(std::round(total_row_count * MAGIC_SAMPLE_CUT_RATIO));
       if (max_num_bkts >= num_bound_bkts) {
         need_sample = false;
       } else {
@@ -630,6 +633,114 @@ int ObHybridHistograms::build_hybrid_hist(ObIArray<BucketNode> &bucket_pairs,
       }
     }
   }
+  if (OB_SUCC(ret)) {
+    total_count_ = total_count;
+    num_distinct_ = num_distinct;
+    pop_count_ = pop_count;
+    pop_freq_ = pop_freq;
+    LOG_TRACE("succeed to build hybrid histogram", K(bucket_num), K(bucket_size), K(total_count),
+                            K(pop_count), K(pop_freq), K(num_distinct), K(hybrid_buckets_.count()));
+  }
+  return ret;
+}
+int ObHybridHistograms::build_hybrid_hist(ObAggregateProcessor::HybridHistExtraResult *extra,
+                                          ObIAllocator *alloc,
+                                          int64_t bucket_num,
+                                          int64_t total_count,
+                                          int64_t num_distinct,
+                                          int64_t pop_count,
+                                          int64_t pop_freq,
+                                          const ObObjMeta &obj_meta)
+{
+  int ret = OB_SUCCESS;
+  int64_t bucket_size = -1;
+  bool dynamic_size = false;
+  int64_t dynamic_step = 0;
+  const ObChunkDatumStore::StoredRow *row = nullptr;
+  if (OB_ISNULL(extra) || OB_ISNULL(alloc)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(extra), K(alloc));
+  } else if (num_distinct == 0) {
+    // do nothing
+  } else {
+    // determine bucket size
+    if (OB_FAIL(extra->get_next_row_from_material(row))) {
+      LOG_WARN("failed to get next row from material");
+    } else if (OB_ISNULL(row) || OB_UNLIKELY(row->cnt_ != 1)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get null stored row", K(row));
+    } else if (num_distinct <= bucket_num + 2) {
+      bucket_size = 1;
+    } else if (bucket_num <= pop_count) {
+      bucket_size = total_count / bucket_num;
+    } else {
+      dynamic_size = true;
+      // first bucket always contain only one values. following code will handle first value is
+      // popular value or not.
+      BucketDesc *desc = reinterpret_cast<BucketDesc*>(row->get_extra_payload());
+      if (desc->is_pop_) {
+        bucket_size = (total_count - pop_freq) / (bucket_num - pop_count);
+      } else {
+        bucket_size = (total_count - pop_freq - desc->ep_count_) / (bucket_num - pop_count - 1);
+      }
+    }
+
+    int64_t bucket_rows = 0;
+    int64_t ep_num = 0;
+    int64_t un_pop_count = 0;
+    int64_t un_pop_bucket = 0;
+    int64_t i = 0;
+    if (OB_SUCC(ret)) {
+      do {
+        if (OB_ISNULL(row) || OB_UNLIKELY(row->cnt_ != 1)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("get null stored row", K(row));
+        } else {
+          BucketDesc *desc = reinterpret_cast<BucketDesc*>(row->get_extra_payload());
+          int64_t ep_count = desc->ep_count_;
+          bool is_pop = desc->is_pop_;
+          bucket_rows += ep_count;
+          ep_num += ep_count;
+          if (!is_pop) {
+            un_pop_count += ep_count;
+          }
+          if (bucket_rows > bucket_size || 0 == i || extra->get_material_row_count() - 1 == i) {
+            bucket_rows = 0;
+            ObObj ep_val;
+            if (OB_FAIL(row->cells()[0].to_obj(ep_val, obj_meta))) {
+              LOG_WARN("failed to obj", K(ret));
+            } else if (OB_FAIL(ob_write_obj(*alloc, ep_val, ep_val))) {
+              LOG_WARN("failed to write obj", K(ret), K(ep_val));
+            } else {
+              ObHistBucket bkt(ep_val, ep_count, ep_num);
+              if (!is_pop) {
+                ++un_pop_bucket;
+              }
+              if (OB_FAIL(add_hist_bucket(bkt))) {
+                LOG_WARN("failed add hist bucket", K(ret));
+              }
+            }
+
+            if (dynamic_size && bucket_num > pop_count + un_pop_bucket) {
+              bucket_size = (total_count - pop_freq - un_pop_count)
+                            / (bucket_num - pop_count - un_pop_bucket);
+            }
+          }
+          ++i;
+        }
+        if (OB_SUCC(ret)) {
+          ret = extra->get_next_row_from_material(row);
+        }
+      } while (OB_SUCC(ret));
+    }
+
+    if (OB_LIKELY(OB_ITER_END == ret)) {
+      ret = OB_SUCCESS;
+    } else {
+      LOG_WARN("failed to build hybrid histogram");
+    }
+  }
+
   if (OB_SUCC(ret)) {
     total_count_ = total_count;
     num_distinct_ = num_distinct;

@@ -34,6 +34,7 @@ ObAllVirtualTabletSSTableMacroInfo::MacroInfo::MacroInfo()
     data_checksum_(0),
     occupy_size_(0),
     original_size_(0),
+    data_size_(0),
     data_zsize_(0),
     store_range_(),
     row_count_(0),
@@ -56,6 +57,7 @@ void ObAllVirtualTabletSSTableMacroInfo::MacroInfo::reset()
   data_checksum_ = 0;
   occupy_size_ = 0;
   original_size_ = 0;
+  data_size_ = 0;
   data_zsize_ = 0;
   store_range_.reset();
   row_count_ = 0;
@@ -67,6 +69,7 @@ ObAllVirtualTabletSSTableMacroInfo::ObAllVirtualTabletSSTableMacroInfo()
   : ObVirtualTableScannerIterator(),
     addr_(),
     tablet_iter_(nullptr),
+    tablet_allocator_("VTTable"),
     tablet_handle_(),
     ls_id_(share::ObLSID::INVALID_LS_ID),
     all_tables_(),
@@ -111,6 +114,7 @@ void ObAllVirtualTabletSSTableMacroInfo::reset()
   memset(objs_, 0, sizeof(objs_));
   iter_allocator_.reset();
   rowkey_allocator_.reset();
+  tablet_allocator_.reset();
 
   ObVirtualTableScannerIterator::reset();
 }
@@ -186,7 +190,6 @@ int ObAllVirtualTabletSSTableMacroInfo::get_macro_info(
   ObMacroBlockHandle macro_handle;
   ObMacroBlockReadInfo macro_read_info;
   macro_read_info.macro_block_id_ = macro_id;
-  macro_read_info.io_desc_.set_category(ObIOCategory::USER_IO);
   macro_read_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_DATA_READ);
   macro_read_info.offset_ = 0;
   macro_read_info.size_ = OB_SERVER_BLOCK_MGR.get_macro_block_size();
@@ -234,6 +237,7 @@ int ObAllVirtualTabletSSTableMacroInfo::get_macro_info(
     MacroInfo &info)
 {
   int ret = OB_SUCCESS;
+  rowkey_allocator_.reuse();
   const ObTableReadInfo &read_info = tablet_handle_.get_obj()->get_index_read_info();
   if (OB_UNLIKELY(!macro_desc.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
@@ -260,11 +264,11 @@ int ObAllVirtualTabletSSTableMacroInfo::get_macro_info(
     ObStoreRowkey &end_key = info.store_range_.get_end_key();
     if (start_key != ObStoreRowkey::MIN_STORE_ROWKEY
         && OB_FAIL(start_key.assign(start_key.get_obj_ptr(),
-            start_key.get_obj_cnt() - ObMultiVersionRowkeyHelpper::MAX_EXTRA_ROWKEY_CNT))) {
+            start_key.get_obj_cnt() - OB_MAX_EXTRA_ROWKEY_COLUMN_NUMBER))) {
       SERVER_LOG(WARN, "fail to set start key", K(ret), K(start_key));
     } else if (end_key != ObStoreRowkey::MAX_STORE_ROWKEY
         && OB_FAIL(end_key.assign(end_key.get_obj_ptr(),
-            end_key.get_obj_cnt() - ObMultiVersionRowkeyHelpper::MAX_EXTRA_ROWKEY_CNT))) {
+            end_key.get_obj_cnt() - OB_MAX_EXTRA_ROWKEY_COLUMN_NUMBER))) {
       SERVER_LOG(WARN, "fail to set end key", K(ret), K(end_key));
     }
   }
@@ -465,6 +469,7 @@ void ObAllVirtualTabletSSTableMacroInfo::release_last_tenant()
     macro_iter_ = nullptr;
   }
   curr_range_.reset();
+  tablet_allocator_.reset();
 }
 
 bool ObAllVirtualTabletSSTableMacroInfo::is_need_process(uint64_t tenant_id)
@@ -500,15 +505,19 @@ int ObAllVirtualTabletSSTableMacroInfo::process_curr_tenant(common::ObNewRow *&r
 int ObAllVirtualTabletSSTableMacroInfo::get_next_tablet()
 {
   int ret = OB_SUCCESS;
+  tablet_handle_.reset();
+  tablet_allocator_.reuse();
   if (nullptr == tablet_iter_) {
+    tablet_allocator_.set_tenant_id(MTL_ID());
     ObTenantMetaMemMgr *t3m = MTL(ObTenantMetaMemMgr*);
-    tablet_iter_ = new (iter_buf_) ObTenantTabletIterator(*t3m, *allocator_);
-    if (OB_ISNULL(tablet_iter_)) {
+    if (OB_ISNULL(tablet_iter_ = new (iter_buf_) ObTenantTabletIterator(*t3m, tablet_allocator_))) {
       ret = OB_ERR_UNEXPECTED;
       SERVER_LOG(WARN, "fail to new tablet_iter_", K(ret));
     }
   }
   while(OB_SUCC(ret)) {
+    tablet_handle_.reset();
+    tablet_allocator_.reuse();
     if (OB_FAIL(tablet_iter_->get_next_tablet(tablet_handle_))) {
       if (OB_UNLIKELY(OB_ITER_END != ret)) {
         SERVER_LOG(WARN, "fail to get tablet iter", K(ret));

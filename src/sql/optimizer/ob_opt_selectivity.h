@@ -21,6 +21,7 @@
 #include "sql/resolver/expr/ob_raw_expr.h"
 #include "sql/optimizer/ob_opt_default_stat.h"
 #include "sql/optimizer/ob_optimizer_context.h"
+#include "sql/optimizer/ob_dynamic_sampling.h"
 
 namespace oceanbase
 {
@@ -116,7 +117,8 @@ class OptSelectivityCtx
   }
 
   void init_join_ctx(const ObJoinType join_type, const ObRelIds *left_rel_ids,
-                     const ObRelIds *right_rel_ids, const double rc1, const double rc2)
+                     const ObRelIds *right_rel_ids, const double rc1, const double rc2,
+                     const EqualSets *equal_sets = NULL)
   {
     join_type_ = join_type;
     left_rel_ids_ = left_rel_ids;
@@ -124,7 +126,10 @@ class OptSelectivityCtx
     row_count_1_ = rc1;
     row_count_2_ = rc2;
     current_rows_ = -1.0;
+    equal_sets_ = equal_sets;
   }
+
+  void clear_equal_sets() { equal_sets_ = NULL; }
 
   TO_STRING_KV(KP_(stmt), KP_(equal_sets), K_(join_type), KP_(left_rel_ids), KP_(right_rel_ids),
                K_(row_count_1), K_(row_count_2), K_(current_rows));
@@ -201,6 +206,13 @@ private:
   bool min_max_inited_;
 };
 
+enum OptTableStatType {
+  DEFAULT_TABLE_STAT = 0,    //default table stat.
+  OPT_TABLE_STAT,            //optimizer gather table stat.
+  OPT_TABLE_GLOBAL_STAT,     //optimizer gather table global stat when no table part stat.
+  DS_TABLE_STAT              //dynamic sampling table stat
+};
+
 class OptTableMeta
 {
 public:
@@ -208,20 +220,28 @@ public:
     table_id_(OB_INVALID_ID),
     ref_table_id_(OB_INVALID_ID),
     rows_(0),
-    stat_type_(0),
+    stat_type_(OptTableStatType::DEFAULT_TABLE_STAT),
+    last_analyzed_(0),
     all_used_parts_(),
+    all_used_tablets_(),
     pk_ids_(),
-    column_metas_()
+    column_metas_(),
+    ds_level_(ObDynamicSamplingLevel::NO_DYNAMIC_SAMPLING),
+    all_used_global_parts_(),
+    scale_ratio_(1.0)
   {}
   int assign(const OptTableMeta &other);
 
   int init(const uint64_t table_id,
            const uint64_t ref_table_id,
            const int64_t rows,
-           const int64_t stat_type,
+           const OptTableStatType stat_type,
            ObSqlSchemaGuard &schema_guard,
            common::ObIArray<int64_t> &all_used_part_id,
+           common::ObIArray<ObTabletID> &all_used_tablets,
            common::ObIArray<uint64_t> &column_ids,
+           ObIArray<int64_t> &all_used_global_parts,
+           const double scale_ratio,
            const OptSelectivityCtx &ctx);
 
   // int update_stat(const double rows, const bool can_reduce, const bool can_enlarge);
@@ -234,27 +254,56 @@ public:
   void set_ref_table_id(const uint64_t &ref_table_id) { ref_table_id_ = ref_table_id; }
   double get_rows() const { return rows_; }
   void set_rows(const double rows) { rows_ = rows; }
+  int64_t get_version() const { return last_analyzed_; }
+  void set_version(const int64_t version) { last_analyzed_ = version; }
   const common::ObIArray<int64_t>& get_all_used_parts() const { return all_used_parts_; }
   common::ObIArray<int64_t> &get_all_used_parts() { return all_used_parts_; }
+  const common::ObIArray<ObTabletID>& get_all_used_tablets() const { return all_used_tablets_; }
+  common::ObIArray<ObTabletID> &get_all_used_tablets() { return all_used_tablets_; }
   const common::ObIArray<uint64_t>& get_pkey_ids() const { return pk_ids_; }
   common::ObIArray<OptColumnMeta>& get_column_metas() { return column_metas_; }
+  const common::ObIArray<int64_t>& get_all_used_global_parts() const { return all_used_global_parts_; }
+  common::ObIArray<int64_t> &get_all_used_global_parts() { return all_used_global_parts_; }
+  double get_scale_ratio() const { return scale_ratio_; }
+  void set_scale_ratio(const double scale_ratio) { scale_ratio_ = scale_ratio; }
 
-  bool use_default_stat() const { return stat_type_ == 0; }
-  bool use_opt_stat() const { return stat_type_ == 1; }
+  void set_ds_level(const int64_t ds_level) { ds_level_ = ds_level; }
+  int64_t get_ds_level() const { return ds_level_; }
+  bool use_default_stat() const { return stat_type_ == OptTableStatType::DEFAULT_TABLE_STAT; }
+  bool use_opt_stat() const { return stat_type_ == OptTableStatType::OPT_TABLE_STAT ||
+                                     stat_type_ == OptTableStatType::OPT_TABLE_GLOBAL_STAT; }
+  bool use_opt_global_stat() const { return stat_type_ == OptTableStatType::OPT_TABLE_GLOBAL_STAT; }
+  bool use_ds_stat() const { return stat_type_ == OptTableStatType::DS_TABLE_STAT; }
+  void set_use_ds_stat() { stat_type_ = OptTableStatType::DS_TABLE_STAT; }
 
-  TO_STRING_KV(K_(table_id), K_(ref_table_id), K_(rows), K_(stat_type),
-               K_(all_used_parts), K_(pk_ids), K_(column_metas));
+  TO_STRING_KV(K_(table_id), K_(ref_table_id), K_(rows), K_(stat_type), K_(ds_level),
+               K_(all_used_parts), K_(all_used_tablets), K_(pk_ids), K_(column_metas),
+               K_(all_used_global_parts), K_(scale_ratio));
 private:
   uint64_t table_id_;
   uint64_t ref_table_id_;
   double rows_;
-  /// 0 for default stat
-  /// 1 for optimizer-gathered stat
-  int64_t stat_type_;
+  OptTableStatType stat_type_;
+  int64_t last_analyzed_;
 
   ObSEArray<int64_t, 64, common::ModulePageAllocator, true> all_used_parts_;
+  ObSEArray<ObTabletID, 64, common::ModulePageAllocator, true> all_used_tablets_;
   ObSEArray<uint64_t, 4, common::ModulePageAllocator, true> pk_ids_;
   ObSEArray<OptColumnMeta, 32, common::ModulePageAllocator, true> column_metas_;
+  int64_t ds_level_;//dynamic sampling level
+  ObSEArray<int64_t, 64, common::ModulePageAllocator, true> all_used_global_parts_;
+  double scale_ratio_;
+};
+
+struct OptSelectivityDSParam {
+  OptSelectivityDSParam() :
+    table_meta_(NULL),
+    quals_()
+  {}
+  TO_STRING_KV(KPC(table_meta_),
+               K(quals_));
+  const OptTableMeta *table_meta_;
+  ObSEArray<ObRawExpr*, 4, common::ModulePageAllocator, true> quals_;
 };
 
 class OptTableMetas
@@ -268,8 +317,12 @@ public:
                                const uint64_t ref_table_id,
                                const int64_t rows,
                                common::ObIArray<int64_t> &all_used_part_id,
+                               common::ObIArray<ObTabletID> &all_used_tablets,
                                common::ObIArray<uint64_t> &column_ids,
-                               const int64_t stat_type);
+                               const OptTableStatType stat_type,
+                               ObIArray<int64_t> &all_used_global_parts,
+                               const double scale_ratio,
+                               int64_t last_analyzed);
 
   int add_set_child_stmt_meta_info(const ObDMLStmt *parent_stmt,
                                    const ObSelectStmt *child_stmt,
@@ -590,7 +643,8 @@ private:
   static int get_like_sel(const OptTableMetas &table_metas,
                           const OptSelectivityCtx &ctx,
                           const ObRawExpr &qual,
-                          double &selectivity);
+                          double &selectivity,
+                          bool &can_calc_sel);
 
   //c1 between $val1 and $val2     -> equal with [$val2 - $val1] range sel
   //c1 not between $val1 and $val2 -> equal with (min, $val1) or ($val2, max) range sel
@@ -683,6 +737,12 @@ private:
                                     const ObRawExpr &expr,
                                     double *ndv_ptr,
                                     double *not_null_sel_ptr);
+  static int get_column_ndv_and_nns_by_equal_set(const OptTableMetas &table_metas,
+                                                 const OptSelectivityCtx &ctx,
+                                                 const ObRawExpr *&expr,
+                                                 double &ndv,
+                                                 double &not_null_sel);
+
   
   static int get_column_min_max(const OptTableMetas &table_metas,
                                 const OptSelectivityCtx &ctx,
@@ -785,6 +845,16 @@ private:
                                         const OptSelectivityCtx &ctx,
                                         const common::ObIArray<ObRawExpr*> &column_exprs,
                                         common::ObIArray<ObRawExpr*> &filtered_exprs);
+  static int filter_one_column_by_equal_set(const OptTableMetas &table_metas,
+                                            const OptSelectivityCtx &ctx,
+                                            const ObRawExpr *column_exprs,
+                                            const ObRawExpr *&filtered_exprs);
+  static int get_min_ndv_by_equal_set(const OptTableMetas &table_metas,
+                                      const OptSelectivityCtx &ctx,
+                                      const ObRawExpr *col_expr,
+                                      bool &find,
+                                      ObRawExpr *&expr,
+                                      double &ndv);
 
   /**
   * 判断多列连接是否只涉及到两个表
@@ -832,9 +902,42 @@ private:
                                 const bool is_semi,
                                 double &rows);
 
-  static int convert_valid_obj_for_opt_stats(const ObObj *old_obj,
-                                             ObIAllocator &alloc,
-                                             const ObObj *&new_obj);
+  static int calc_complex_predicates_selectivity_by_ds(const OptTableMetas &table_metas,
+                                                       const OptSelectivityCtx &ctx,
+                                                       const ObIArray<ObRawExpr*> &predicates,
+                                                       ObIArray<ObExprSelPair> &all_predicate_sel);
+
+  static int calc_selectivity_by_dynamic_sampling(const OptSelectivityCtx &ctx,
+                                                  const OptSelectivityDSParam &ds_param,
+                                                  ObIArray<ObExprSelPair> &all_predicate_sel);
+
+  static int resursive_extract_valid_predicate_for_ds(const OptTableMetas &table_metas,
+                                                      const OptSelectivityCtx &ctx,
+                                                      const ObRawExpr *qual,
+                                                      ObIArray<OptSelectivityDSParam> &ds_params);
+
+  static int add_ds_result_items(const ObIArray<ObRawExpr*> &quals,
+                                 const uint64_t ref_table_id,
+                                 ObIArray<ObDSResultItem> &ds_result_items);
+
+  static int add_ds_result_into_selectivity(const ObIArray<ObDSResultItem> &ds_result_items,
+                                            const uint64_t ref_table_id,
+                                            ObIArray<ObExprSelPair> &all_predicate_sel);
+
+  static int add_valid_ds_qual(const ObRawExpr *qual,
+                               const OptTableMetas &table_metas,
+                               ObIArray<OptSelectivityDSParam> &ds_params);
+
+  // static int calculate_join_selectivity_by_dynamic_sampling(const OptTableMetas &table_metas,
+  //                                                           const OptSelectivityCtx &ctx,
+  //                                                           const ObIArray<ObRawExpr*> &predicates,
+  //                                                           double &selectivity,
+  //                                                           bool &is_calculated);
+
+  // static int collect_ds_join_param(const OptTableMetas &table_metas,
+  //                                  const OptSelectivityCtx &ctx,
+  //                                  const ObIArray<ObRawExpr*> &predicates,
+  //                                  ObOptDSJoinParam &ds_join_param);
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObOptSelectivity);

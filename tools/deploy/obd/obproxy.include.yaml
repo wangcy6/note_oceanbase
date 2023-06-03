@@ -6,4 +6,3 @@ config:
   enable_qa_mode: 'TRUE'
   location_expire_period: '1'
 __mirror_repository_section_name: taobao-test
-

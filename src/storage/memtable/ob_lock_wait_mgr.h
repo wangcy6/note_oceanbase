@@ -57,6 +57,9 @@ public:
                          const ObMemtableKey &key,
                          const ObTransID &tx_id);
   int get_hash_holder(uint64_t hash, ObTransID &holder) { return map_.get(ObIntWarp(hash), holder); }
+  int get_rowkey_holder(const ObTabletID &tablet_id,
+                        const memtable::ObMemtableKey &key,
+                        transaction::ObTransID &holder);
   void dump_mapper_info() const {
     int64_t count = map_.count();
     int64_t bkt_cnt = map_.get_bkt_cnt();
@@ -232,7 +235,6 @@ public:
                 const ObStoreRowkey &key,
                 const int64_t timeout,
                 const bool is_remote_sql,
-                const bool can_elr,
                 const int64_t last_compact_cnt,
                 const int64_t total_trans_node_cnt,
                 const transaction::ObTransID &tx_id,
@@ -243,11 +245,11 @@ public:
                 const transaction::tablelock::ObLockID &lock_id,
                 const int64_t timeout,
                 const bool is_remote_sql,
-                const bool can_elr,
                 const int64_t last_compact_cnt,
                 const int64_t total_trans_node_cnt,
                 const transaction::ObTransID &tx_id,
                 const transaction::ObTransID &holder_tx_id,
+                const transaction::tablelock::ObTableLockMode &lock_mode,
                 ObFunction<int(bool &need_wait)> &check_need_wait);
   // when removing the callbacks of uncommitted transaction, we need transfer
   // the conflict dependency from rows to transactions
@@ -263,8 +265,10 @@ public:
   void wakeup(const transaction::tablelock::ObLockID &lock_id);
   // for deadlock
   DELEGATE_WITH_RET(row_holder_mapper_, set_hash_holder, void);
+  DELEGATE_WITH_RET(row_holder_mapper_, get_hash_holder, int);
   DELEGATE_WITH_RET(row_holder_mapper_, reset_hash_holder, void);
-  
+  DELEGATE_WITH_RET(row_holder_mapper_, get_rowkey_holder, int);
+
   Node* next(Node*& iter, Node* target);
 
   static Node*& get_thread_node()
@@ -334,6 +338,7 @@ private:
   Hash hash_;
   int64_t sequence_[LOCK_BUCKET_COUNT];
   char hash_buf_[sizeof(SpHashNode) * LOCK_BUCKET_COUNT];
+  int64_t last_check_session_idle_ts_;
 
 public:
   int fullfill_row_key(uint64_t hash, char *row_key, int64_t length);
@@ -353,6 +358,44 @@ private:
   DeadlockedSessionArray deadlocked_sessions_[2];
 private:
   RowHolderMapper row_holder_mapper_;
+};
+
+class LockHashHelper {
+private:
+  static const uint64_t TRANS_FLAG = 1L << 63L;       // 10
+  static const uint64_t TABLE_LOCK_FLAG = 1L << 62L;  // 01
+  static const uint64_t ROW_FLAG = 0L;                // 00
+  static const uint64_t HASH_MASK = ~(TRANS_FLAG | TABLE_LOCK_FLAG);
+public:
+  static inline
+  uint64_t hash_rowkey(const ObTabletID &tablet_id, const memtable::ObMemtableKey &key)
+  {
+    uint64_t hash_id = tablet_id.hash();
+    uint64_t hash_key = key.hash();
+    uint64_t hash = murmurhash(&hash_key, sizeof(hash_key), hash_id);
+    return ((hash & HASH_MASK) | ROW_FLAG) | 1;
+  }
+
+  static inline
+  uint64_t hash_trans(const ObTransID &tx_id)
+  {
+    return ((murmurhash(&tx_id, sizeof(tx_id), 0) & HASH_MASK) | TRANS_FLAG) | 1;
+  }
+
+  static inline
+  uint64_t hash_lock_id(const ObLockID &lock_id)
+  {
+    return ((lock_id.hash() & HASH_MASK) | TABLE_LOCK_FLAG) | 1;
+  }
+
+  static inline
+  bool is_rowkey_hash(const uint64_t hash) { return (hash & ~HASH_MASK) == ROW_FLAG; }
+
+  static inline
+  bool is_trans_hash(const uint64_t hash) { return (hash & ~HASH_MASK) == TRANS_FLAG; }
+
+  static inline
+  bool is_table_lock_hash(const uint64_t hash) { return (hash & ~HASH_MASK) == TABLE_LOCK_FLAG; }
 };
 
 }; // end namespace memtable

@@ -29,15 +29,14 @@ inline void ob_print_mod_memory_usage(bool print_to_std = false,
   UNUSEDx(print_to_std, print_glibc_malloc_stats);
 }
 
-extern ObMemAttr default_memattr;
-inline void *ob_malloc(const int64_t nbyte, const ObMemAttr &attr = default_memattr)
+inline void *ob_malloc(const int64_t nbyte, const ObMemAttr &attr)
 {
   void *ptr = NULL;
   auto allocator = lib::ObMallocAllocator::get_instance();
   if (!OB_ISNULL(allocator)) {
     ptr = allocator->alloc(nbyte, attr);
     if (OB_ISNULL(ptr)) {
-      LIB_LOG(WARN, "allocate memory fail", K(attr), K(nbyte));
+      LIB_LOG_RET(WARN, OB_ALLOCATE_MEMORY_FAILED, "allocate memory fail", K(attr), K(nbyte));
     }
   }
   return ptr;
@@ -61,7 +60,7 @@ inline void *ob_realloc(void *ptr, const int64_t nbyte, const ObMemAttr &attr)
     if (!OB_ISNULL(allocator)) {
       nptr = allocator->realloc(ptr, nbyte, attr);
       if (OB_ISNULL(nptr)) {
-        LIB_LOG(ERROR, "allocate memory fail", K(attr), K(nbyte));
+        LIB_LOG_RET(ERROR, OB_ALLOCATE_MEMORY_FAILED, "allocate memory fail", K(attr), K(nbyte));
       }
     }
   }
@@ -70,7 +69,7 @@ inline void *ob_realloc(void *ptr, const int64_t nbyte, const ObMemAttr &attr)
 
 void *ob_malloc_align(
     const int64_t alignment, const int64_t nbyte,
-    const ObMemAttr &attr = default_memattr);
+    const ObMemAttr &attr);
 void ob_free_align(void *ptr);
 
 // Deprecated interface
@@ -260,7 +259,7 @@ extern "C" void ob_zfree(void *ptr);
   ({                                            \
     T* ret = NULL;                              \
     if (OB_NOT_NULL(pool)) {                    \
-      void *buf = pool->alloc(sizeof(T));       \
+      void *buf = (pool)->alloc(sizeof(T));       \
       if (OB_NOT_NULL(buf))                     \
       {                                         \
         ret = new(buf) T(__VA_ARGS__);          \

@@ -144,6 +144,41 @@ public:
   }
 
   /*
+   * write a stream to my buffer at front,
+   * return buffer
+   *
+   */
+
+  inline obstr_size_t write_front(const char *bytes, const obstr_size_t length)
+  {
+    obstr_size_t writed = 0;
+    if (OB_ISNULL(bytes) || OB_UNLIKELY(length <= 0)) {
+      // do nothing
+    } else {
+      if (OB_LIKELY(data_length_ + length <= buffer_size_)) {
+        if (data_length_ > 0) {
+          MEMMOVE(ptr_ + length, ptr_, data_length_);
+        }
+        MEMCPY(ptr_, bytes, length);
+        data_length_ += length;
+        writed = length;
+      }
+    }
+    return writed;
+  }
+  /*
+   * DO NOT USE THIS ANY MORE
+   */
+
+  inline void assign(char *bytes, const int64_t length) //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later
+  {
+    if (length > INT32_MAX) {
+      LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign", K(length));
+    }
+    assign(bytes, static_cast<int32_t>(length));
+  }
+
+  /*
    * DO NOT USE THIS ANY MORE
    */
 
@@ -172,6 +207,29 @@ public:
     }
   }
 
+  inline void assign_ptr(const char *bytes, const int64_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later
+  {
+    if (length < 0 || length > INT32_MAX) {
+      LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign ptr", K(length));
+    }
+    assign_ptr(bytes, static_cast<int32_t>(length));
+  }
+
+  inline void assign_ptr(const char *bytes, const uint64_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later
+  {
+    if (length < 0 || length > INT32_MAX) {
+      LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign ptr", K(length));
+    }
+    assign_ptr(bytes, static_cast<int32_t>(length));
+  }
+
+  inline void assign_ptr(const char *bytes, const uint32_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later
+  {
+    if (length > INT32_MAX) {
+      LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign ptr", K(length));
+    }
+    assign_ptr(bytes, static_cast<int32_t>(length));
+  }
   /*
    * attach myself to a buffer, whoes capacity is size
    */
@@ -226,13 +284,24 @@ public:
   inline const char *ptr() const { return ptr_; }
   inline char *ptr() { return ptr_; }
 
-  inline uint64_t hash(uint64_t seed = 0) const
+  inline uint64_t hash() const
   {
-    if (OB_LIKELY(NULL != ptr_) && OB_LIKELY(data_length_ > 0)) {
-      seed = murmurhash(ptr_, data_length_, seed);
-    }
+    return hash(0);
+  }
 
-    return seed;
+  inline uint64_t hash(uint64_t seed) const
+  {
+    uint64_t hash_val = seed;
+    if (OB_LIKELY(NULL != ptr_) && OB_LIKELY(data_length_ > 0)) {
+      hash_val = murmurhash(ptr_, data_length_, hash_val);
+    }
+    return hash_val;
+  }
+
+  inline int hash(uint64_t &hash_val, uint64_t seed) const
+  {
+    hash_val = hash(seed);
+    return OB_SUCCESS;
   }
 
   inline int case_compare(const ObString &obstr) const

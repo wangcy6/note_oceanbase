@@ -55,6 +55,7 @@ public:
   bool operator!=(const ObBackupServerStatKey &that) const { return !(*this == that); }
   ObBackupServerStatKey &operator=(const ObBackupServerStatKey &that);
   uint64_t hash() const;
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; };
   int init(const common::ObAddr &addr, const BackupJobType type);
   int init(const ObBackupServerStatKey &that);
   TO_STRING_KV(K_(type), K_(addr), K_(hash_value));
@@ -151,6 +152,7 @@ public:
   bool operator!=(const ObBackupScheduleTaskKey &that) const { return !(*this == that); }
   ObBackupScheduleTaskKey &operator=(const ObBackupScheduleTaskKey &that);
   uint64_t hash() const;
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; };
   int init(const uint64_t tenant_id,
            const uint64_t job_id,
            const uint64_t task_id_,
@@ -319,6 +321,10 @@ private:
   virtual int do_update_dst_and_doing_status_(common::ObMySQLProxy &sql_proxy, common::ObAddr &dst, share::ObTaskId &trace_id) override;
 public:
   int build(const share::ObBackupJobAttr &job_attr, const share::ObBackupSetTaskAttr &set_task_attr, const share::ObBackupLSTaskAttr &ls_attr);
+
+private:
+  int calc_start_replay_scn_(const share::ObBackupJobAttr &job_attr, const share::ObBackupSetTaskAttr &set_task_attr,
+      const share::ObBackupLSTaskAttr &ls_attr, share::SCN &scn);
 
   INHERIT_TO_STRING_KV("ObBackupScheduleTask", ObBackupScheduleTask, K_(incarnation_id), K_(backup_set_id), K_(backup_type), K_(backup_date),
       K_(ls_id), K_(start_scn), K_(end_scn), K_(backup_path), K_(backup_status));

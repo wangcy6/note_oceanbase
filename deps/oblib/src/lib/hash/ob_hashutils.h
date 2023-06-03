@@ -40,8 +40,12 @@
 #define HASH_WRITE_LOG(_loglevel_, _fmt_, args...) { \
     _OB_LOG(_loglevel_, _fmt_, ##args); \
   }
+#define HASH_WRITE_LOG_RET(_loglevel_, errcode, _fmt_, args...) { \
+    _OB_LOG_RET(_loglevel_, errcode, _fmt_, ##args); \
+  }
 #else
 #define HASH_WRITE_LOG(_loglevel_, _fmt_, args...) { \
+#define HASH_WRITE_LOG_RET(_loglevel_, errcode, _fmt_, args...) { \
   }
 #endif
 
@@ -89,7 +93,7 @@ public:
   explicit SpinLocker(pthread_spinlock_t &spin) : succ_(false), spin_(NULL)
   {
     if (0 != pthread_spin_lock(&spin)) {
-      HASH_WRITE_LOG(HASH_WARNING, "lock spin fail errno=%u", errno);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "lock spin fail errno=%u", errno);
     } else {
       //HASH_WRITE_LOG(HASH_DEBUG, "lock spin succ spin=%p", &spin);
       spin_ = &spin;
@@ -120,7 +124,7 @@ public:
   explicit MutexLocker(pthread_mutex_t &mutex) : succ_(false), mutex_(NULL)
   {
     if (0 != pthread_mutex_lock(&mutex)) {
-      HASH_WRITE_LOG(HASH_WARNING, "lock mutex fail errno=%u", errno);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "lock mutex fail errno=%u", errno);
     } else {
       //HASH_WRITE_LOG(HASH_DEBUG, "lock mutex succ mutex=%p", &mutex);
       mutex_ = &mutex;
@@ -152,7 +156,7 @@ public:
   ~MutexWaiter() {}
   int operator()(pthread_cond_t &cond, pthread_mutex_t &lock, struct timespec &ts)
   {
-    return pthread_cond_timedwait(&cond, &lock, &ts);
+    return ob_pthread_cond_timedwait(&cond, &lock, &ts);
   }
 };
 
@@ -173,7 +177,7 @@ public:
   explicit ReadLocker(pthread_rwlock_t &rwlock) : succ_(false), rwlock_(NULL)
   {
     if (0 != pthread_rwlock_rdlock(&rwlock)) {
-      HASH_WRITE_LOG(HASH_WARNING, "rdlock rwlock fail errno=%u", errno);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "rdlock rwlock fail errno=%u", errno);
     } else {
       //HASH_WRITE_LOG(HASH_DEBUG, "rdlock rwlock succ rwlock=%p", &rwlock);
       rwlock_ = &rwlock;
@@ -204,7 +208,7 @@ public:
   explicit WriteLocker(pthread_rwlock_t &rwlock) : succ_(false), rwlock_(NULL)
   {
     if (0 != pthread_rwlock_wrlock(&rwlock)) {
-      HASH_WRITE_LOG(HASH_WARNING, "wrlock wrlock fail errno=%u", errno);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "wrlock wrlock fail errno=%u", errno);
     } else {
       //HASH_WRITE_LOG(HASH_DEBUG, "wrlock rwlock succ rwlock=%p", &rwlock);
       rwlock_ = &rwlock;
@@ -235,7 +239,7 @@ public:
   explicit RWLockIniter(pthread_rwlock_t &rwlock) : succ_(false)
   {
     if (0 != pthread_rwlock_init(&rwlock, NULL)) {
-      HASH_WRITE_LOG(HASH_WARNING, "init rwlock fail errno=%u rwlock=%p", errno, &rwlock);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "init rwlock fail errno=%u rwlock=%p", errno, &rwlock);
     } else {
       succ_ = true;
     }
@@ -320,7 +324,7 @@ public:
   explicit SpinReadLocker(SpinRWLock &rwlock) : succ_(false), rwlock_(NULL)
   {
     if (0 != rwlock.rdlock()) {
-      HASH_WRITE_LOG(HASH_WARNING, "rdlock rwlock fail errno=%u", errno);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "rdlock rwlock fail errno=%u", errno);
     } else {
       rwlock_ = &rwlock;
       succ_ = true;
@@ -349,7 +353,7 @@ public:
   explicit SpinWriteLocker(SpinRWLock &rwlock) : succ_(false), rwlock_(NULL)
   {
     if (0 != rwlock.wrlock()) {
-      HASH_WRITE_LOG(HASH_WARNING, "wrlock wrlock fail errno=%u", errno);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "wrlock wrlock fail errno=%u", errno);
     } else {
       rwlock_ = &rwlock;
       succ_ = true;
@@ -378,7 +382,7 @@ public:
   explicit SpinIniter(pthread_spinlock_t &spin) : succ_(false)
   {
     if (0 != pthread_spin_init(&spin, PTHREAD_PROCESS_PRIVATE)) {
-      HASH_WRITE_LOG(HASH_WARNING, "init mutex fail errno=%u spin=%p", errno, &spin);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "init mutex fail errno=%u spin=%p", errno, &spin);
     } else {
       succ_ = true;
     }
@@ -399,7 +403,7 @@ public:
   explicit MutexIniter(pthread_mutex_t &mutex) : succ_(false)
   {
     if (0 != pthread_mutex_init(&mutex, NULL)) {
-      HASH_WRITE_LOG(HASH_WARNING, "init mutex fail errno=%u mutex=%p", errno, &mutex);
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_SYS, "init mutex fail errno=%u mutex=%p", errno, &mutex);
     } else {
       succ_ = true;
     }
@@ -660,82 +664,89 @@ struct equal_to <const _ParseNode *>
 template <class _key>
 struct hash_func
 {
-  int64_t operator()(const _key &key) const
+  int operator()(const _key &key, uint64_t &res) const
   {
-    return key.hash();
+    return key.hash(res);
   }
 };
 template <class _key>
 struct hash_func <_key *>
 {
-  int64_t operator()(_key *key) const
+  int operator()(_key *key, uint64_t &res) const
   {
-    return key->hash();
+    return key->hash(res);
   }
 };
 template <class _key>
 struct hash_func <const _key *>
 {
-  int64_t operator()(const _key *key) const
+  int operator()(const _key *key, uint64_t &res) const
   {
-    return key->hash();
+    return key->hash(res);
   }
 };
 template <>
 struct hash_func <ObString>
 {
-  uint64_t operator()(const ObString &key) const
+  int operator()(const ObString &key, uint64_t &res) const
   {
-    return murmurhash(key.ptr(), key.length(), 0);
+    res = murmurhash(key.ptr(), key.length(), 0);
+    return OB_SUCCESS;
   }
 };
 template <>
 struct hash_func <const char *>
 {
-  uint64_t operator()(const char *key) const
+  int operator()(const char *key, uint64_t &res) const
   {
-    return murmurhash(key, static_cast<int32_t>(strlen(key)), 0);
+    res = murmurhash(key, static_cast<int32_t>(strlen(key)), 0);
+    return OB_SUCCESS;
   }
 };
 template <>
 struct hash_func <char *>
 {
-  uint64_t operator()(const char *key) const
+  int operator()(const char *key, uint64_t &res) const
   {
-    return murmurhash(key, static_cast<int32_t>(strlen(key)), 0);
+    res = murmurhash(key, static_cast<int32_t>(strlen(key)), 0);
+    return OB_SUCCESS;
   }
 };
 template <>
 struct hash_func <std::pair<int, uint32_t> >
 {
-  int64_t operator()(std::pair<int, uint32_t> key) const
+  int operator()(std::pair<int, uint32_t> key, uint64_t &res) const
   {
-    return key.first + key.second;
+    res = key.first + key.second;
+    return OB_SUCCESS;
   }
 };
 template<>
 struct hash_func <std::pair<uint64_t, uint64_t> >
 {
-  int64_t operator()(std::pair<uint64_t, uint64_t> key) const
+  int operator()(std::pair<uint64_t, uint64_t> key, uint64_t &res) const
   {
-    return (int64_t)(key.first + key.second);
+    res = (uint64_t)(int64_t)(key.first + key.second);
+    return OB_SUCCESS;
   }
 };
 
 template <>
 struct hash_func <_ParseNode *>
 {
-  uint64_t operator() (const _ParseNode *key) const
+  int operator() (const _ParseNode *key, uint64_t &res) const
   {
-    return parsenode_hash(key, NULL);
+    res = parsenode_hash(key, NULL);
+    return OB_SUCCESS;
   }
 };
 template <>
 struct hash_func <const _ParseNode *>
 {
-  uint64_t operator() (const _ParseNode *key) const
+  int operator() (const _ParseNode *key, uint64_t &res) const
   {
-    return parsenode_hash(key, NULL);
+    res = parsenode_hash(key, NULL);
+    return OB_SUCCESS;
   }
 };
 
@@ -743,9 +754,10 @@ struct hash_func <const _ParseNode *>
   template <> \
   struct hash_func <type> \
   { \
-    int64_t operator() (const type &key) const \
+    int operator() (const type &key, uint64_t &res) const \
     { \
-      return (int64_t)key; \
+      res = (uint64_t)(int64_t)key; \
+      return OB_SUCCESS; \
     } \
   };
 _HASH_FUNC_SPEC(int8_t);
@@ -1117,8 +1129,8 @@ int do_create(Array &array, const int64_t total_size, const int64_t array_size, 
   if (total_size <= 0 || item_size <= 0) {
     ret = -1;
   } else if (NULL == (array = (Array)alloc.alloc(total_size * item_size))) {
-    _OB_LOG(WARN, "alloc memory failed,size:%ld", total_size * item_size);
     ret = -1;
+    _OB_LOG(WARN, "alloc memory failed,size:%ld", total_size * item_size);
   } else {
     //BACKTRACE(WARN, total_size * item_size > 65536, "hashutil create init size=%ld", total_size * item_size);
     memset(array, 0, total_size * item_size);
@@ -1221,8 +1233,9 @@ struct SimpleAllocerBlock
 
   int32_t ref_cnt;
   int32_t cur_pos;
-  char nodes_buffer[NODE_NUM *sizeof(Node)];
-  Node *nodes;
+  Node nodes[NODE_NUM];
+  Node *node_free_list;
+  Block *prev;
   Block *next;
 };
 
@@ -1235,7 +1248,7 @@ template <class T>
 struct NodeNumTraits<false, T>
 {
   static const int32_t NODE_NUM = (common::OB_MALLOC_NORMAL_BLOCK_SIZE -
-                                   24/*=sizeof(SimpleAllocerBlock 's members except nodes_buffer)*/ - 128/*for robust*/) /
+                                   24/*=sizeof(SimpleAllocerBlock 's members except nodes)*/ - 128/*for robust*/) /
                                   (32/*sizeof(SimpleAllocerNode's members except data)*/ + sizeof(T));
 };
 
@@ -1248,6 +1261,28 @@ struct NodeNumTraits<true, T>
 #define IS_BIG_OBJ(T) \
   ((common::OB_MALLOC_NORMAL_BLOCK_SIZE - 24 - 128) < (32 + sizeof(T)))
 
+/*
+block_free_list_:
+  Block C: node1->node2->node3...
+    ^
+    |
+  Block B: node1->node2->node3...
+    ^
+    |
+  Block A: node1->node2->node3...
+
+alloc:
+  1. fetch from block_free_list_
+  2. fetch from block_remainder_
+  3. alloc new block
+
+free:
+  check reference of block, zero-block will be destroy, block has 4 status:
+  1. in the block_free_list_
+  2. is the block_remainder_
+  3. in the block_remainder_ && is the block_remainder_
+  4. neither
+*/
 template <class T,
           int32_t NODE_NUM = NodeNumTraits<IS_BIG_OBJ(T), T>::NODE_NUM,
           class DefendMode = SpinMutexDefendMode,
@@ -1262,67 +1297,50 @@ class SimpleAllocer
   typedef typename DefendMode::lock_type lock_type;
   typedef typename DefendMode::lock_initer lock_initer;
 public:
-  SimpleAllocer() : block_list_head_(NULL), free_list_head_(NULL)
+  SimpleAllocer() : block_remainder_(NULL), block_free_list_(NULL)
   {
     lock_initer initer(lock_);
   }
   ~SimpleAllocer()
   {
-    clear();
+    OB_ASSERT(NULL == block_remainder_ &&
+              NULL == block_free_list_);
   }
   void set_attr(const ObMemAttr &attr) { allocer_.set_attr(attr); }
   void set_label(const lib::ObLabel &label) { allocer_.set_label(label); }
-  void clear()
-  {
-    Block *iter = block_list_head_;
-    while (NULL != iter) {
-      Block *next = iter->next;
-      if (0 != iter->ref_cnt) {
-        HASH_WRITE_LOG(HASH_FATAL, "there is still node has not been free, ref_cnt=%d block=%p cur_pos=%d",
-                       iter->ref_cnt, iter, iter->cur_pos);
-      } else {
-        //delete iter;
-        allocer_.free(iter);
-      }
-      iter = next;
-    }
-    block_list_head_ = NULL;
-    free_list_head_ = NULL;
-  }
   template <class ... TYPES>
   T *alloc(TYPES&... args)
   {
     T *ret = NULL;
     mutexlocker locker(lock_);
-    if (NULL != free_list_head_) {
-      Node *node = free_list_head_;
+    if (NULL != block_free_list_) {
+      Block *block = block_free_list_;
+      Node *node = block->node_free_list;
       if (NODE_MAGIC1 != node->magic1 || NODE_MAGIC2 != node->magic2 || NULL == node->block) {
-        HASH_WRITE_LOG(HASH_FATAL, "magic broken magic1=%x magic2=%x", node->magic1, node->magic2);
+        HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "magic broken magic1=%x magic2=%x", node->magic1, node->magic2);
       } else {
-        free_list_head_ = node->next;
+        block->node_free_list = node->next;
+        if (block->node_free_list == NULL) {
+          take_off_from_fl(block);
+        }
         node->block->ref_cnt++;
         ret = &(node->data);
       }
     } else {
-      Block *block = block_list_head_;
+      Block *block = block_remainder_;
       if (NULL == block || block->cur_pos >= (int32_t)NODE_NUM) {
-        //if (NULL == (block = new(std::nothrow) Block()))
         if (NULL == (block = (Block *)allocer_.alloc(sizeof(Block)))) {
-          HASH_WRITE_LOG(HASH_WARNING, "new block fail");
+          HASH_WRITE_LOG_RET(HASH_WARNING, OB_ERR_UNEXPECTED, "new block fail");
         } else {
-          // BACKTRACE(WARN, ((int64_t)sizeof(Block))>DEFAULT_BLOCK_SIZE,
-          // "hashutil alloc block=%ld node=%ld T=%ld N=%d",
-          //               sizeof(Block), sizeof(Node), sizeof(T), NODE_NUM);
-          //memset(block, 0, sizeof(Block));
           block->ref_cnt = 0;
           block->cur_pos = 0;
-          block->nodes = (Node *)(block->nodes_buffer);
-          block->next = block_list_head_;
-          block_list_head_ = block;
+          block->prev = block->next = NULL;
+          block->node_free_list = NULL;
+          block_remainder_ = block;
         }
       }
       if (NULL != block) {
-        Node *node = block->nodes + block->cur_pos;
+        Node *node = &block->nodes[block->cur_pos];
         block->cur_pos++;
         block->ref_cnt++;
         node->magic1 = NODE_MAGIC1;
@@ -1341,72 +1359,62 @@ public:
   {
     mutexlocker locker(lock_);
     if (NULL == data) {
-      HASH_WRITE_LOG(HASH_WARNING, "invalid param null pointer");
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_INVALID_ARGUMENT, "invalid param null pointer");
     } else {
       Node *node = (Node *)data;
       if (NODE_MAGIC1 != node->magic1 || NODE_MAGIC2 != node->magic2) {
-        HASH_WRITE_LOG(HASH_FATAL, "magic broken magic1=%x magic2=%x", node->magic1, node->magic2);
+        HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "magic broken magic1=%x magic2=%x", node->magic1, node->magic2);
       } else {
         data->~T();
-        node->block->ref_cnt--;
-        node->next = free_list_head_;
-        free_list_head_ = node;
+        Block *block = node->block;
+        block->ref_cnt--;
+        if (0 == block->ref_cnt) {
+          if (block == block_remainder_) {
+            block_remainder_ = NULL;
+          }
+          // non-NULL means this block is in the freelist
+          if (block->next != NULL) {
+            take_off_from_fl(block);
+          }
+          allocer_.free(block);
+        } else {
+          node->next = block->node_free_list;
+          block->node_free_list = node;
+          // NULL means this block isn't in the freelist
+          if (block->next == NULL) {
+            add_to_fl(block);
+          }
+        }
       }
     }
   }
-  void inc_ref()
+  void add_to_fl(Block *block)
   {
+    if (block_free_list_ == NULL) {
+      block->prev = block->next = block;
+      block_free_list_ = block;
+    } else {
+      block->prev = block_free_list_->prev;
+      block->next = block_free_list_;
+      block_free_list_->prev->next = block;
+      block_free_list_->prev = block;
+      block_free_list_ = block;
+    }
   }
-  void dec_ref()
+  void take_off_from_fl(Block *block)
   {
-  }
-  void gc()
-  {
-    mutexlocker locker(lock_);
-    if (NULL != free_list_head_ && NULL != block_list_head_) {
-      Block *block_iter = block_list_head_;
-      Block *block_next = NULL;
-      Block *block_prev = NULL;
-      while (NULL != block_iter) {
-        block_next = block_iter->next;
-        if (0 == block_iter->ref_cnt && 0 != block_iter->cur_pos) {
-          Node *node_iter = free_list_head_;
-          Node *node_prev = free_list_head_;
-          volatile int32_t counter = 0;
-          while (NULL != node_iter
-                 && counter < NODE_NUM) {
-            if (block_iter == node_iter->block) {
-              if (free_list_head_ == node_iter) {
-                free_list_head_ = node_iter->next;
-              } else {
-                node_prev->next = node_iter->next;
-              }
-              counter++;
-            } else {
-              node_prev = node_iter;
-            }
-            node_iter = node_iter->next;
-          }
-
-          if (block_list_head_ == block_iter) {
-            block_list_head_ = block_iter->next;
-          } else {
-            block_prev->next = block_iter->next;
-          }
-          //delete block_iter;
-          allocer_.free(block_iter);
-          HASH_WRITE_LOG(HASH_DEBUG, "free succ block=%p", block_iter);
-          block_iter = NULL;
-        } else {
-          block_prev = block_iter;
-        }
-        block_iter = block_next;
-      }
+    if (block == block->next) {
+      block_free_list_ = NULL;
+    } else {
+      block->prev->next = block->next;
+      block->next->prev = block->prev;
+      block_free_list_ = block->next;
+      block->prev = block->next = NULL;
     }
   }
 private:
-  Block *block_list_head_;
-  Node *free_list_head_;
+  Block *block_remainder_;
+  Block *block_free_list_;
   lock_type lock_;
   Allocer allocer_;
 };

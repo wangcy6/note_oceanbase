@@ -17,6 +17,7 @@
 #include "lib/container/ob_iarray.h"
 #include "share/schema/ob_schema_struct.h"
 #include "pl/parser/ob_pl_parser.h"
+#include "share/schema/ob_table_schema.h"
 
 namespace oceanbase
 {
@@ -54,7 +55,7 @@ class ObConstraint;
 class ObSchemaPrinter
 {
 public:
-  explicit ObSchemaPrinter(ObSchemaGetterGuard &schema_guard);
+  explicit ObSchemaPrinter(ObSchemaGetterGuard &schema_guard, bool strict_compat = false);
   virtual ~ObSchemaPrinter() { }
 private:
   ObSchemaPrinter();
@@ -181,6 +182,11 @@ public:
                                   char *buf,
                                   int64_t buf_len,
                                   int64_t &pos) const;
+  int print_spatial_index_column(const ObTableSchema &table_schema,
+                                 const ObColumnSchemaV2 &column,
+                                 char *buf,
+                                 int64_t buf_len,
+                                 int64_t &pos) const;
   int print_prefix_index_column(const ObColumnSchemaV2 &column,
                                 bool is_last,
                                 char *buf,
@@ -250,6 +256,7 @@ public:
                                     char* buf,
                                     const int64_t& buf_len,
                                     int64_t& pos,
+                                    bool print_sub_part_element,
                                     bool agent_mode = false,
                                     bool tablegroup_def = false,
                                     const common::ObTimeZoneInfo *tz_info = NULL) const;
@@ -257,6 +264,7 @@ public:
                                char* buf,
                                const int64_t& buf_len,
                                int64_t& pos,
+                               bool print_sub_part_element,
                                bool agent_mode,
                                bool tablegroup_def,
                                const common::ObTimeZoneInfo *tz_info) const;
@@ -327,6 +335,7 @@ public:
                                const ObStmtNodeTree *param_list,
                                const ObStmtNodeTree *return_type,
                                const common::ObString &body,
+                               const common::ObString &clause,
                                char* buf,
                                const int64_t& buf_len,
                                int64_t &pos,
@@ -435,10 +444,26 @@ public:
                                     char* buf,
                                     const int64_t& buf_len,
                                     int64_t& pos,
+                                    bool print_sub_part_element,
                                     bool agent_mode,
                                     const common::ObTimeZoneInfo *tz_info) const;
+  int print_external_table_file_info(const ObTableSchema &table_schema,
+                                     ObIAllocator& allocator,
+                                     char* buf,
+                                     const int64_t& buf_len,
+                                     int64_t& pos) const;
 private:
+  static bool is_subpartition_valid_in_mysql(const ObTableSchema &table_schema)
+  {
+    const ObPartitionOption &part_opt = table_schema.get_part_option();
+    const ObPartitionOption &sub_part_opt = table_schema.get_sub_part_option();
+    ObPartitionFuncType type = part_opt.get_part_func_type();
+    ObPartitionFuncType sub_type = sub_part_opt.get_part_func_type();
+    return is_hash_like_part(sub_type) && !is_hash_like_part(type);
+  }
+
   ObSchemaGetterGuard &schema_guard_;
+  bool strict_compat_;
 };
 
 

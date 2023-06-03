@@ -25,13 +25,13 @@ using namespace obutil;
 using namespace lib;
 
 
-int ObTimer::init(const char* thread_name)
+int ObTimer::init(const char* thread_name, const ObMemAttr &attr)
 {
   int ret = OB_SUCCESS;
   if (is_inited_) {
     ret = OB_INIT_TWICE;
   } else {
-    tokens_ = reinterpret_cast<Token*>(ob_malloc(sizeof(Token) * max_task_num_, "timer"));
+    tokens_ = reinterpret_cast<Token*>(ob_malloc(sizeof(Token) * max_task_num_, attr));
     if (nullptr == tokens_) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       OB_LOG(ERROR, "failed to alloc memory", K(ret));
@@ -125,7 +125,7 @@ void ObTimer::destroy()
       ObMonitor<Mutex>::Lock guard(monitor_);
       for (int64_t i = 0; i < tasks_num_; ++i) {
         tokens_[i].task->cancelCallBack();
-        ATOMIC_STORE(&(tokens_[i].task->timer_), nullptr); 
+        ATOMIC_STORE(&(tokens_[i].task->timer_), nullptr);
       }
       tasks_num_ = 0;
     }
@@ -261,7 +261,7 @@ int ObTimer::cancel(const ObTimerTask &task)
     }
     if (pos != -1) {
       tokens_[pos].task->cancelCallBack();
-      ATOMIC_STORE(&(tokens_[pos].task->timer_), nullptr); 
+      ATOMIC_STORE(&(tokens_[pos].task->timer_), nullptr);
       memmove(&tokens_[pos], &tokens_[pos + 1],
               sizeof(tokens_[0]) * (tasks_num_ - pos - 1));
       --tasks_num_;
@@ -276,7 +276,7 @@ void ObTimer::cancel_all()
   ObMonitor<Mutex>::Lock guard(monitor_);
   for (int64_t i = 0; i < tasks_num_; ++i) {
     tokens_[i].task->cancelCallBack();
-    ATOMIC_STORE(&(tokens_[i].task->timer_), nullptr); 
+    ATOMIC_STORE(&(tokens_[i].task->timer_), nullptr);
   }
   tasks_num_ = 0;
   OB_LOG(INFO, "cancel all", KP(this), K_(thread_id), K(wakeup_time_), K(tasks_num_));
@@ -294,6 +294,7 @@ void ObTimer::run1()
     set_thread_name("ObTimer");
   }
   while (true) {
+    IGNORE_RETURN lib::Thread::update_loop_ts();
     {
       ObMonitor<Mutex>::Lock guard(monitor_);
       static const int64_t STATISTICS_INTERVAL_US = 600L * 1000 * 1000; // 10m
@@ -313,7 +314,7 @@ void ObTimer::run1()
         token.scheduled_time = ObSysTime::now(ObSysTime::Monotonic).toMicroSeconds() + token.delay;
         if (OB_SUCCESS != (tmp_ret = insert_token(
             Token(token.scheduled_time, token.delay, token.task)))) {
-          OB_LOG(WARN, "insert token error", K(tmp_ret), K(token));
+          OB_LOG_RET(WARN, tmp_ret, "insert token error", K(tmp_ret), K(token));
         }
       }
       has_running_task_ = false;
@@ -356,16 +357,16 @@ void ObTimer::run1()
         } else {
           wakeup_time_ = tokens_[0].scheduled_time;
           {
-            // clock safty check. @see http://k3.alibaba-inc.com/issue/5068683
+            // clock safty check. @see
             const int64_t rt1 = ObTimeUtility::current_time();
             const int64_t rt2 = ObTimeUtility::current_time_coarse();
             const int64_t delta = rt1 > rt2 ? (rt1 - rt2) : (rt2 - rt1);
             static const int64_t MAX_REALTIME_DELTA1 = 20000; // 20ms
             static const int64_t MAX_REALTIME_DELTA2 = 500000; // 500ms
             if (delta > MAX_REALTIME_DELTA1) {
-              OB_LOG(WARN, "Hardware clock skew", K(rt1), K(rt2), K_(wakeup_time), K(now));
+              OB_LOG_RET(WARN, OB_ERR_SYS, "Hardware clock skew", K(rt1), K(rt2), K_(wakeup_time), K(now));
             } else if (delta > MAX_REALTIME_DELTA2) {
-              OB_LOG(ERROR, "Hardware clock error", K(rt1), K(rt2), K_(wakeup_time), K(now));
+              OB_LOG_RET(ERROR, OB_ERR_SYS, "Hardware clock error", K(rt1), K(rt2), K_(wakeup_time), K(now));
             }
           }
           monitor_.timed_wait(ObSysTime(wakeup_time_ - now));
@@ -391,8 +392,8 @@ void ObTimer::run1()
         ObTimerMonitor::get_instance().end_task(thread_id_, end_time);
       }
 
-      if (elapsed_time > 1000 * 1000) {
-        OB_LOG(WARN, "timer task cost too much time", "task", to_cstring(*token.task),
+      if (elapsed_time > ELAPSED_TIME_LOG_THREASHOLD) {
+        OB_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "timer task cost too much time", "task", to_cstring(*token.task),
             K(start_time), K(end_time), K(elapsed_time), KP(this), K_(thread_id));
       }
     }

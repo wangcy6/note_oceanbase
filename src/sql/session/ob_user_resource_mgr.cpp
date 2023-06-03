@@ -31,7 +31,9 @@ static const char *MEMORY_LABEL = "UserResourceMgr";
 
 ObConnectResource* ObConnectResAlloc::alloc_value()
 {
-  return OB_NEW(ObConnectResource, MEMORY_LABEL);
+  ObMemAttr attr(OB_SERVER_TENANT_ID, MEMORY_LABEL);
+  SET_USE_500(attr);
+  return OB_NEW(ObConnectResource, attr);
 }
 
 void ObConnectResAlloc::free_value(ObConnectResource* tz_info)
@@ -43,7 +45,9 @@ void ObConnectResAlloc::free_value(ObConnectResource* tz_info)
 ObConnectResHashNode* ObConnectResAlloc::alloc_node(ObConnectResource* value)
 {
   UNUSED(value);
-  return OB_NEW(ObConnectResHashNode, MEMORY_LABEL);
+  ObMemAttr attr(OB_SERVER_TENANT_ID, MEMORY_LABEL);
+  SET_USE_500(attr);
+  return OB_NEW(ObConnectResHashNode, attr);
 }
 
 void ObConnectResAlloc::free_node(ObConnectResHashNode* node)
@@ -97,7 +101,9 @@ int ObConnectResourceMgr::apply_for_tenant_conn_resource(const uint64_t tenant_i
     if (OB_ENTRY_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
       // not exist, alloc and insert
-      if (OB_ISNULL(tenant_res = OB_NEW(ObConnectResource, MEMORY_LABEL))) {
+      ObMemAttr attr(OB_SERVER_TENANT_ID, MEMORY_LABEL);
+      SET_USE_500(attr);
+      if (OB_ISNULL(tenant_res = OB_NEW(ObConnectResource, attr))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("allocate tenant resource failed", K(ret));
       } else {
@@ -150,7 +156,7 @@ void ObConnectResourceMgr::release_tenant_conn_resource(const uint64_t tenant_id
   ObConnectResource *tenant_res = NULL;
   bool has_insert = false;
   if (OB_FAIL(tenant_res_map_.get(tenant_key, tenant_res))) {
-    LOG_ERROR("get tenant res map failed", K(ret));
+    LOG_WARN("get tenant res map failed", K(ret));
   } else {
     ObLatchWGuard wr_guard(tenant_res->rwlock_, ObLatchIds::DEFAULT_MUTEX);
     if (OB_UNLIKELY(0 == tenant_res->cur_connections_)) {
@@ -161,12 +167,42 @@ void ObConnectResourceMgr::release_tenant_conn_resource(const uint64_t tenant_id
   }
 }
 
+int ObConnectResourceMgr::get_tenant_cur_connections(const uint64_t tenant_id,
+                                                     bool &tenant_exists,
+                                                     uint64_t &cur_connections)
+{
+  int ret = OB_SUCCESS;
+  tenant_exists = false;
+  cur_connections = 0;
+  ObTenantUserKey tenant_key(tenant_id, 0);
+  ObConnectResource *tenant_res = NULL;
+  if (OB_FAIL(tenant_res_map_.get(tenant_key, tenant_res))) {
+    if (OB_ENTRY_NOT_EXIST == ret) {
+      ret = OB_SUCCESS;
+    } else {
+      LOG_WARN("get tenant resource failed", K(ret));
+    }
+  } else {
+    tenant_exists = true;
+  }
+  if (OB_SUCC(ret) && tenant_exists) {
+    if (OB_ISNULL(tenant_res)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("tenant resource is null", K(ret));
+    } else {
+      cur_connections = tenant_res->cur_connections_;
+      tenant_res_map_.revert(tenant_res);
+    }
+  }
+  return ret;
+}
+
 // get user resource from hash map, insert if not exist.
 int ObConnectResourceMgr::get_or_insert_user_resource(const uint64_t tenant_id,
       const uint64_t user_id,
       const uint64_t max_user_connections,
       const uint64_t max_connections_per_hour,
-      ObConnectResource *&user_res, bool &has_insert)
+      ObConnectResource *&user_res, bool &has_insert, bool &user_conn_increased)
 {
   int ret = OB_SUCCESS;
   user_res = NULL;
@@ -175,8 +211,10 @@ int ObConnectResourceMgr::get_or_insert_user_resource(const uint64_t tenant_id,
   if (OB_FAIL(user_res_map_.get(user_key, user_res))) {
     if (OB_ENTRY_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
+      ObMemAttr attr(OB_SERVER_TENANT_ID, MEMORY_LABEL);
+      SET_USE_500(attr);
       // not exist, alloc and insert
-      if (OB_ISNULL(user_res = OB_NEW(ObConnectResource, MEMORY_LABEL))) {
+      if (OB_ISNULL(user_res = OB_NEW(ObConnectResource, attr))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("allocate user resource failed", K(ret));
       } else {
@@ -194,6 +232,7 @@ int ObConnectResourceMgr::get_or_insert_user_resource(const uint64_t tenant_id,
         }
       } else {
         has_insert = true;
+        user_conn_increased = max_user_connections != 0;
         user_res_map_.revert(user_res);
       }
     } else {
@@ -207,7 +246,8 @@ int ObConnectResourceMgr::increase_user_connections_count(
       const uint64_t max_user_connections,
       const uint64_t max_connections_per_hour,
       const ObString &user_name,
-      ObConnectResource *user_res)
+      ObConnectResource *user_res,
+      bool &user_conn_increased)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(user_res)) {
@@ -240,6 +280,7 @@ int ObConnectResourceMgr::increase_user_connections_count(
     if (OB_SUCC(ret)) {
       user_res->history_connections_ += 0 == max_connections_per_hour ? 0 : 1;
       user_res->cur_connections_ += 0 == max_user_connections ? 0 : 1;
+      user_conn_increased = 0 != max_user_connections;
     }
   }
   if (OB_SUCC(ret)) {
@@ -263,36 +304,44 @@ int ObConnectResourceMgr::on_user_connect(
 {
   int ret = OB_SUCCESS;
   lib::Worker::CompatMode compat_mode = lib::Worker::CompatMode::ORACLE;
-  if (OB_UNLIKELY(session.has_got_conn_res())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("session trying to connect already occupy connection resource", K(tenant_id),
-      K(user_id), K(session.get_sessid()));
+  if (!session.is_user_session()) {
+    // do not limit connection count for inner sesion.
   } else if (OB_FAIL(share::ObCompatModeGetter::get_tenant_mode(tenant_id, compat_mode))) {
     LOG_WARN("get tenant mode failed", K(ret), K(tenant_id));
-  } else if (compat_mode != lib::Worker::CompatMode::MYSQL) {
-  } else if (OB_FAIL(apply_for_tenant_conn_resource(tenant_id, priv, max_tenant_connections))) {
-    LOG_WARN("reach teannt max connections", K(ret));
-  } else if (0 == max_connections_per_hour && 0 == max_user_connections) {
-    session.set_got_conn_res(true);
-  } else {
-    // only increase cur_connections_ if max_user_connections is not zero
-    // only record history_connections_ if max_connections_per_hour is not zero.
-    ObConnectResource *user_res = NULL;
-    bool has_insert = false;
-    if (OB_FAIL(get_or_insert_user_resource(tenant_id, user_id, max_user_connections,
-                                            max_connections_per_hour, user_res, has_insert))) {
-      LOG_WARN("get or insert user resource failed", K(ret));
-    } else if (!has_insert) {
-      // if user resource already exists in the hash map, increase its connections count.
-      if (OB_FAIL(increase_user_connections_count(max_user_connections, max_connections_per_hour,
-          user_name, user_res))) {
-        LOG_WARN("increase user connection count failed", K(ret));
+  } else if (compat_mode == lib::Worker::CompatMode::MYSQL) {
+    if (!session.has_got_tenant_conn_res()) {
+      if (OB_FAIL(apply_for_tenant_conn_resource(tenant_id, priv, max_tenant_connections))) {
+        LOG_WARN("reach teannt max connections", K(ret));
+      } else {
+        session.set_got_tenant_conn_res(true);
       }
     }
     if (OB_FAIL(ret)) {
-      release_tenant_conn_resource(tenant_id);
+    } else if (session.has_got_user_conn_res()) {
+    } else if (0 == max_connections_per_hour && 0 == max_user_connections) {
     } else {
-      session.set_got_conn_res(true);
+      // According to document of MySQL:
+      // "Resource-use counting takes place when any account has a nonzero limit placed on its use of any of the resources."
+      // only increase cur_connections_ if max_user_connections is not zero
+      // only record history_connections_ if max_connections_per_hour is not zero.
+      ObConnectResource *user_res = NULL;
+      bool has_insert = false;
+      bool user_conn_increased = false;
+      if (OB_FAIL(get_or_insert_user_resource(tenant_id, user_id, max_user_connections,
+                                              max_connections_per_hour, user_res,
+                                              has_insert, user_conn_increased))) {
+        LOG_WARN("get or insert user resource failed", K(ret));
+      } else if (!has_insert) {
+        // if user resource already exists in the hash map, increase its connections count.
+        if (OB_FAIL(increase_user_connections_count(max_user_connections, max_connections_per_hour,
+            user_name, user_res, user_conn_increased))) {
+          LOG_WARN("increase user connection count failed", K(ret));
+        }
+      }
+      if (user_conn_increased) {
+        session.set_got_user_conn_res(true);
+        session.set_conn_res_user_id(user_id);
+      }
     }
   }
   return ret;
@@ -305,21 +354,20 @@ int ObConnectResourceMgr::on_user_connect(
 int ObConnectResourceMgr::on_user_disconnect(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
-  lib::Worker::CompatMode compat_mode;
-  uint64_t max_user_connections = 0;
-  uint64_t user_id = session.get_user_id();
-  uint64_t tenant_id = session.get_login_tenant_id();
-  if (OB_UNLIKELY(!session.has_got_conn_res())) {
-    // do nothing
-  } else if (OB_FAIL(share::ObCompatModeGetter::get_tenant_mode(tenant_id, compat_mode))) {
-    LOG_ERROR("get tenant mode failed", K(ret), K(tenant_id));
-  } else if (compat_mode != lib::Worker::CompatMode::MYSQL) {
-  } else if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_MAX_USER_CONNECTIONS,
-                                          max_user_connections))) {
-    LOG_ERROR("get system variable SYS_VAR_MAX_USER_CONNECTIONS failed", K(ret));
+  if (!session.is_user_session()) {
+    // do not limit connection count for inner sesion.
+    if (OB_UNLIKELY(session.has_got_tenant_conn_res() || session.has_got_user_conn_res())) {
+      LOG_ERROR("inner session expect no connection resource", K(session.get_conn_res_user_id()),
+                K(session.has_got_tenant_conn_res()));
+    }
   } else {
-    release_tenant_conn_resource(tenant_id);
-    if (0 != max_user_connections) {
+    uint64_t tenant_id = session.get_login_tenant_id();
+    if (session.has_got_tenant_conn_res()) {
+      release_tenant_conn_resource(tenant_id);
+      session.set_got_tenant_conn_res(false);
+    }
+    if (session.has_got_user_conn_res()) {
+      uint64_t user_id = session.get_conn_res_user_id();
       ObConnectResource *user_res = NULL;
       ObTenantUserKey user_key(tenant_id, user_id);
       if (OB_FAIL(user_res_map_.get(user_key, user_res))) {
@@ -337,8 +385,8 @@ int ObConnectResourceMgr::on_user_disconnect(ObSQLSessionInfo &session)
         }
         user_res_map_.revert(user_res);
       }
+      session.set_got_user_conn_res(false);
     }
-    session.set_got_conn_res(false);
   }
   return ret;
 }

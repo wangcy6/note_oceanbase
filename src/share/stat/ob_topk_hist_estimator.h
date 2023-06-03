@@ -14,6 +14,7 @@
 #define OB_TOPK_HIST_ESTIMATOR_H
 
 #include "share/stat/ob_stat_define.h"
+#include "share/rc/ob_tenant_base.h"
 
 namespace oceanbase
 {
@@ -53,12 +54,17 @@ class ObTopKFrequencyHistograms
       used_list_(),
       free_list_(),
       topk_map_(),
-      topk_buf_(),
+      topk_buf_("OptTopkHist"),
       use_first_alloc_(true),
-      obj_buf1_(),
-      obj_buf2_(),
-      copied_count_()
-    {}
+      obj_buf1_("OptTopkHist"),
+      obj_buf2_("OptTopkHist"),
+      copied_count_(),
+      need_deep_copy_(false)
+    {
+      topk_buf_.set_tenant_id(MTL_ID());
+      obj_buf1_.set_tenant_id(MTL_ID());
+      obj_buf2_.set_tenant_id(MTL_ID());
+    }
 
     int read_result(const ObObj &result_obj);
 
@@ -117,11 +123,11 @@ class ObTopKFrequencyHistograms
     int64_t window_size_; // in default, the  window size is 1000
     int64_t item_size_;
     bool is_topk_hist_need_des_row_; // for parallel topk histogram compuation
-    common::ObSEArray<ObTopkItem, 16, common::ModulePageAllocator, true> topk_fre_items_;
+    common::ObFixedArray<ObTopkItem, common::ObIAllocator> topk_fre_items_;
 
     // the following are used to computation
-    common::ObSEArray<ObTopkItem*, 16, common::ModulePageAllocator, true> used_list_;
-    common::ObSEArray<ObTopkItem*, 16, common::ModulePageAllocator, true> free_list_;
+    common::ObSEArray<ObTopkItem*, 16> used_list_;
+    common::ObSEArray<ObTopkItem*, 16> free_list_;
     ObTopkMap topk_map_;
     ObArenaAllocator topk_buf_;
 
@@ -132,6 +138,7 @@ class ObTopKFrequencyHistograms
     ObArenaAllocator obj_buf2_;
 
     int64_t copied_count_;
+    bool need_deep_copy_;
 };
 
 } // end of namespace common

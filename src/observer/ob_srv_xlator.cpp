@@ -61,6 +61,7 @@
 #include "observer/table/ob_table_batch_execute_processor.h"
 #include "observer/table/ob_table_query_processor.h"
 #include "observer/table/ob_table_query_and_mutate_processor.h"
+#include "logservice/palf/log_rpc_processor.h"
 
 using namespace oceanbase::observer;
 using namespace oceanbase::lib;
@@ -102,10 +103,10 @@ using namespace oceanbase::obmysql;
 
 void ObSrvRpcXlator::register_rpc_process_function(int pcode, RPCProcessFunc func) {
   if(pcode >= MAX_PCODE || pcode < 0) {
-    SERVER_LOG(ERROR, "(SHOULD NEVER HAPPEN) input pcode is out of range in server rpc xlator", K(pcode));
+    SERVER_LOG_RET(ERROR, OB_ERROR, "(SHOULD NEVER HAPPEN) input pcode is out of range in server rpc xlator", K(pcode));
     ob_abort();
   } else if (funcs_[pcode] != nullptr) {
-    SERVER_LOG(ERROR, "(SHOULD NEVER HAPPEN) duplicate pcode in server rpc xlator", K(pcode));
+    SERVER_LOG_RET(ERROR, OB_ERROR, "(SHOULD NEVER HAPPEN) duplicate pcode in server rpc xlator", K(pcode));
     ob_abort();
   } else {
     funcs_[pcode] = func;
@@ -166,15 +167,22 @@ int ObSrvXlator::th_destroy()
   return ret;
 }
 
-typedef struct {
-  char buffer_[sizeof (ObErrorP) + sizeof (ObMPError)];
-} EPBUF;
+typedef union EP_RPCP_BUF {
+  char rpcp_buffer_[RPCP_BUF_SIZE]; // reserve memory for rpc processor
+  char ep_buffer_[sizeof (ObErrorP) + sizeof (ObMPError)];
+} EP_RPCP_BUF;
+// Make sure election rpc processor allocated successfully when OOM occurs
+STATIC_ASSERT(RPCP_BUF_SIZE >= sizeof(oceanbase::palf::ElectionPrepareRequestMsgP), "RPCP_BUF_SIZE should be big enough to allocate election processer");
+STATIC_ASSERT(RPCP_BUF_SIZE >= sizeof(oceanbase::palf::ElectionPrepareResponseMsgP), "RPCP_BUF_SIZE should be big enough to allocate election processer");
+STATIC_ASSERT(RPCP_BUF_SIZE >= sizeof(oceanbase::palf::ElectionAcceptRequestMsgP), "RPCP_BUF_SIZE should be big enough to allocate election processer");
+STATIC_ASSERT(RPCP_BUF_SIZE >= sizeof(oceanbase::palf::ElectionAcceptResponseMsgP), "RPCP_BUF_SIZE should be big enough to allocate election processer");
+STATIC_ASSERT(RPCP_BUF_SIZE >= sizeof(oceanbase::palf::ElectionChangeLeaderMsgP), "RPCP_BUF_SIZE should be big enough to allocate election processer");
 
 typedef struct {
   char buffer_[sizeof (ObMPStmtClose)];
 } CLOSEPBUF;
 
-_RLOCAL(EPBUF, co_epbuf);
+_RLOCAL(EP_RPCP_BUF, co_ep_rpcp_buf);
 _RLOCAL(CLOSEPBUF, co_closepbuf);
 
 int ObSrvMySQLXlator::translate(rpc::ObRequest &req, ObReqProcessor *&processor)
@@ -184,9 +192,6 @@ int ObSrvMySQLXlator::translate(rpc::ObRequest &req, ObReqProcessor *&processor)
 
   if (ObRequest::OB_MYSQL != req.get_type()) {
     LOG_ERROR("can't translate non-mysql request");
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(SQL_REQ_OP.get_sql_session(&req))) {
-    LOG_ERROR("req member is null");
     ret = OB_ERR_UNEXPECTED;
   } else {
     if (req.is_in_connected_phase()) {
@@ -207,7 +212,7 @@ int ObSrvMySQLXlator::translate(rpc::ObRequest &req, ObReqProcessor *&processor)
         MYSQL_PROCESSOR(ObMPStmtPrexecute, gctx_);
         MYSQL_PROCESSOR(ObMPStmtSendPieceData, gctx_);
         MYSQL_PROCESSOR(ObMPStmtGetPieceData, gctx_);
-        //MYSQL_PROCESSOR(ObMPStmtSendLongData, gctx_);
+        MYSQL_PROCESSOR(ObMPStmtSendLongData, gctx_);
         MYSQL_PROCESSOR(ObMPResetConnection, gctx_);
         // ps stmt close request may not response packet.
         // Howerver, in get processor phase, it may report 
@@ -251,14 +256,6 @@ int ObSrvMySQLXlator::translate(rpc::ObRequest &req, ObReqProcessor *&processor)
             }
           } else {
             NEW_MYSQL_PROCESSOR(ObMPQuery, gctx_);
-          }
-          break;
-        }
-        case obmysql::COM_STMT_SEND_LONG_DATA: {
-          if (GCONF._enable_new_sql_nio) {
-            NEW_MYSQL_PROCESSOR(ObMPStmtSendLongData, gctx_);
-          } else {
-            NEW_MYSQL_PROCESSOR(ObMPDefault, gctx_);
           }
           break;
         }
@@ -345,12 +342,13 @@ ObReqProcessor *ObSrvXlator::get_processor(ObRequest &req)
 int ObSrvXlator::release(ObReqProcessor *processor)
 {
   int ret = OB_SUCCESS;
-  const char *epbuf = (&co_epbuf)->buffer_;
+  const char *epbuf = (&co_ep_rpcp_buf)->ep_buffer_;
   const char *cpbuf = (&co_closepbuf)->buffer_;
+  const char *rpcpbuf = (&co_ep_rpcp_buf)->rpcp_buffer_;
   if (NULL == processor) {
     ret = OB_INVALID_ARGUMENT;
     LOG_ERROR("invalid argument", K(processor), K(ret));
-  } else if (reinterpret_cast<char*>(processor) == epbuf) {
+  } else if (reinterpret_cast<char*>(processor) == epbuf || reinterpret_cast<char*>(processor) == rpcpbuf) {
     processor->destroy();
     processor->~ObReqProcessor();
   } else if (reinterpret_cast<char*>(processor) == cpbuf) {
@@ -404,14 +402,14 @@ int ObSrvXlator::release(ObReqProcessor *processor)
 
 ObReqProcessor *ObSrvXlator::get_error_rpc_processor(const int ret)
 {
-  char *epbuf = (&co_epbuf)->buffer_;
+  char *epbuf = (&co_ep_rpcp_buf)->ep_buffer_;
   ObErrorP *p = new (&epbuf[0]) ObErrorP(ret);
   return p;
 }
 
 ObReqProcessor *ObSrvXlator::get_error_mysql_processor(const int ret)
 {
-  char *epbuf = (&co_epbuf)->buffer_;
+  char *epbuf = (&co_ep_rpcp_buf)->ep_buffer_;
   ObMPError *p = new (&epbuf[0]) ObMPError(ret);
   return p;
 }

@@ -151,9 +151,7 @@ public:
 
   static int prepare_data_for_binding_info(const ObTabletID &tablet_id, const ObLS &ls, const transaction::ObMulSourceDataNotifyArg &trans_flags);
 private:
-  static int verify_tablets_existence(
-      const obrpc::ObBatchCreateTabletArg &arg,
-      common::ObIArray<ObTabletCreateInfo> &tablet_create_info_array);
+  static int check_create_new_tablets(const obrpc::ObBatchCreateTabletArg &arg);
   static int verify_tablets_absence(
       const obrpc::ObBatchCreateTabletArg &arg,
       common::ObIArray<ObTabletCreateInfo> &tablet_create_info_array);
@@ -169,7 +167,6 @@ private:
       bool &is_valid);
   static int check_pure_index_or_hidden_tablets_info(
       const share::ObLSID &ls_id,
-      const common::ObTabletID &data_tablet_id,
       const obrpc::ObCreateTabletInfo &info,
       bool &is_valid);
   static int build_tablet_create_info(

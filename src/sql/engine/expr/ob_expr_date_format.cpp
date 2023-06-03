@@ -26,7 +26,7 @@ namespace sql
 {
 
 ObExprDateFormat::ObExprDateFormat(ObIAllocator &alloc)
-    : ObStringExprOperator(alloc, T_FUN_SYS_DATE_FORMAT, N_DATE_FORMAT, 2)
+    : ObStringExprOperator(alloc, T_FUN_SYS_DATE_FORMAT, N_DATE_FORMAT, 2, NOT_VALID_FOR_GENERATED_COL)
 {
 }
 
@@ -100,7 +100,8 @@ int ObExprDateFormat::calc_date_format(const ObExpr &expr, ObEvalCtx &ctx, ObDat
                                             ob_time,
                                             get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()),
                                             false,
-                                            date_sql_mode))) {
+                                            date_sql_mode,
+                                            expr.args_[0]->obj_meta_.has_lob_header()))) {
     LOG_WARN("failed to convert datum to ob time");
     if (CM_IS_WARN_ON_FAIL(cast_mode) && OB_ALLOCATE_MEMORY_FAILED != ret) {
       ret = OB_SUCCESS;
@@ -138,6 +139,21 @@ int ObExprDateFormat::calc_date_format_invalid(const ObExpr &expr, ObEvalCtx &ct
     LOG_WARN("get default cast mode failed", K(ret));
   } else if (!CM_IS_WARN_ON_FAIL(cast_mode)) {
     ret =OB_INVALID_ARGUMENT;
+  }
+  return ret;
+}
+
+int ObExprDateFormat::is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const {
+  int ret = OB_SUCCESS;
+  is_valid = true;
+  if (exprs.count() < 1) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected param num", K(ret), K(exprs.count()));
+  } else if (OB_ISNULL(exprs.at(0))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid param", K(ret), K(exprs.at(0)), K(exprs.at(1)));
+  } else if (ObTimeType == exprs.at(0)->get_result_type().get_type() || ObTimestampType == exprs.at(0)->get_result_type().get_type()) {
+    is_valid = false;
   }
   return ret;
 }
@@ -182,7 +198,7 @@ const char* ObExprGetFormat::DATETIME_FORMAT[FORMAT_MAX + 1] =
 };
 
 ObExprGetFormat::ObExprGetFormat(ObIAllocator &alloc)
-    : ObStringExprOperator(alloc, T_FUN_SYS_GET_FORMAT, N_GET_FORMAT, 2)
+    : ObStringExprOperator(alloc, T_FUN_SYS_GET_FORMAT, N_GET_FORMAT, 2, VALID_FOR_GENERATED_COL)
 {
 }
 

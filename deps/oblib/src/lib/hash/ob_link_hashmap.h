@@ -22,11 +22,11 @@ namespace oceanbase
 {
 namespace common
 {
-inline int32_t faa_if_positive(int32_t* addr, int32_t x)
+inline int32_t faa_if_ge(int32_t* addr, int32_t x, int32_t cmp)
 {
   int32_t ov = ATOMIC_LOAD(addr);
   int32_t nv = 0;
-  while(ov > 0 && ov != (nv = ATOMIC_VCAS(addr, ov, ov + x))) {
+  while (ov >= cmp && ov != (nv = ATOMIC_VCAS(addr, ov, ov + x))) {
     ov = nv;
   }
   return ov;
@@ -43,7 +43,6 @@ class BaseRefHandle
 {
 public:
   typedef RefNode Node;
-  enum { BORN_REF = INT32_MAX/2 };
   explicit BaseRefHandle(RetireStation& retire_station): qclock_(get_global_qclock()), retire_station_(retire_station), qc_slot_(UINT64_MAX) {}
   ~BaseRefHandle() {}
   virtual void enter_critical() { qc_slot_ = qclock_.enter_critical(); }
@@ -68,11 +67,12 @@ protected:
 class ZeroRefHandle final : public BaseRefHandle
 {
 public:
+  enum { BORN_REF = 1 };
   typedef RefNode Node;
   explicit ZeroRefHandle(RetireStation& retire_station) : BaseRefHandle(retire_station) {}
-  void born(Node* node) { (void)ATOMIC_AAF(&node->uref_, 1); }
-  int32_t end(Node* node) { return ATOMIC_AAF(&node->uref_, -1); }
-  bool inc(Node* node) { return faa_if_positive(&node->uref_, 1) > 0; }
+  void born(Node* node) { (void)ATOMIC_AAF(&node->uref_, BORN_REF); }
+  int32_t end(Node* node) { return ATOMIC_AAF(&node->uref_, -BORN_REF); }
+  bool inc(Node* node) { return faa_if_ge(&node->uref_, 1, BORN_REF) >= BORN_REF; }
   int32_t dec(Node* node) { return ATOMIC_AAF(&node->uref_, -1); }
 };
 
@@ -80,15 +80,16 @@ public:
 class RefHandle final : public BaseRefHandle
 {
 public:
+  enum { BORN_REF = INT32_MAX/2 };
   typedef RefNode Node;
   explicit RefHandle(RetireStation& retire_station) : BaseRefHandle(retire_station) {}
   void born(Node* node) { (void)ATOMIC_AAF(&node->uref_, BORN_REF); }
   int32_t end(Node* node) { return ATOMIC_AAF(&node->uref_, -BORN_REF); }
-  bool inc(Node* node) { return faa_if_positive(&node->uref_, 1) > 0; }
+  bool inc(Node* node) { return faa_if_ge(&node->uref_, 1, BORN_REF) >= BORN_REF; }
   int32_t dec(Node* node) { return ATOMIC_AAF(&node->uref_, -1); }
 };
 
-// Doc: https://yuque.antfin-inc.com/ob/transaction/retire_station
+// Doc:
 // class Key must implement compare() and hash() function.
 // class Value must derived from LinkHashValue<Key>
 template<typename Key, typename Value, typename AllocHandle=AllocHandle<Key, Value>, typename RefHandle=RefHandle, int64_t SHRINK_THRESHOLD = 8>
@@ -157,12 +158,16 @@ public:
   int init(const lib::ObLabel &label = ObModIds::OB_CONCURRENT_HASH_MAP,
       const uint64_t tenant_id = OB_SERVER_TENANT_ID)
   {
+    return init(lib::ObMemAttr(tenant_id, label));
+  }
+  int init(const lib::ObMemAttr &attr)
+  {
     int ret = OB_SUCCESS;
-    if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    if (OB_UNLIKELY(!is_valid_tenant_id(attr.tenant_id_))) {
       ret = OB_INVALID_ARGUMENT;
-      COMMON_LOG(WARN, "invalid argument", K(ret), K(label), K(tenant_id));
-    } else if (OB_FAIL(array_alloc_.init(label, tenant_id))) {
-      COMMON_LOG(ERROR, "array_alloc_ init error", K(ret), K(label), K(tenant_id));
+      COMMON_LOG(WARN, "invalid argument", K(ret), K(attr));
+    } else if (OB_FAIL(array_alloc_.init(attr))) {
+      COMMON_LOG(ERROR, "array_alloc_ init error", K(ret), K(attr));
     } else {
       magic_code_ = MAGIC_CODE;
     }
@@ -296,9 +301,17 @@ public:
     if (OB_LIKELY(0 == hash_ret)) {
       HashNode* node = CONTAINER_OF(hash_link, HashNode, hash_link_);
       if (!try_inc_ref(node)) {
-        hash_ret = -ENOENT;
+        if (node->uref_ >= 0) {
+          hash_ret = -ENOENT; // get after del
+        } else {
+          hash_ret = -EPERM; // uref < 0, maybe revert too much time.
+        }
+        COMMON_LOG_RET(WARN, err_code_map(hash_ret), "inc ref error", K(node->uref_), K(lbt()));
       } else {
         value = (Value*)node->hash_val_;
+        if (node->uref_ - RefHandle::BORN_REF > 1000) {
+          COMMON_LOG_RET(WARN, OB_SUCCESS, "uref leak check", K(node->uref_), K(lbt()));
+        }
       }
     }
     return err_code_map(hash_ret);
@@ -324,7 +337,7 @@ public:
     abort_unless(magic_code_ == MAGIC_CODE);
 #else
     if (OB_UNLIKELY(node->host_ != this || magic_code_ != MAGIC_CODE)) {
-      COMMON_LOG(ERROR, "unexpected error", K(node->host_), K(this), K(magic_code_));
+      COMMON_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "unexpected error", K(node->host_), K(this), K(magic_code_));
     }
 #endif
     if (OB_NOT_NULL(node)) {
@@ -384,6 +397,7 @@ private:
       case -EEXIST:     ret = OB_ENTRY_EXIST; break;
       case -ENOMEM:     ret = OB_ALLOCATE_MEMORY_FAILED; break;
       case -EOVERFLOW:  ret = OB_SIZE_OVERFLOW; break;
+      case -EPERM:      ret = OB_ERR_UNEXPECTED; break;
       default:          ret = OB_ERROR;
     }
     return ret;

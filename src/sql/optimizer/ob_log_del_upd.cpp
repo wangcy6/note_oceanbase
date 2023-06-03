@@ -47,12 +47,19 @@ int IndexDMLInfo::deep_copy(ObIRawExprCopier &expr_copier, const IndexDMLInfo &o
   } else if (OB_FAIL(expr_copier.copy(other.column_convert_exprs_,
                                       column_convert_exprs_))) {
     LOG_WARN("failed to copy exprs", K(ret));
+  } else if (OB_FAIL(expr_copier.copy(other.column_old_values_exprs_,
+                                      column_old_values_exprs_))) {
+    LOG_WARN("failed to copy exprs", K(ret));
   } else if (OB_FAIL(assignments_.prepare_allocate(other.assignments_.count()))) {
     LOG_WARN("failed to prepare allocate assignment array", K(ret));
   } else if (OB_FAIL(expr_copier.copy(other.ck_cst_exprs_, ck_cst_exprs_))) {
     LOG_WARN("failed to copy exprs", K(ret));
   } else if (OB_FAIL(part_ids_.assign(other.part_ids_))) {
     LOG_WARN("failed to assign part ids", K(ret));
+  } else if (OB_NOT_NULL(other.trans_info_expr_)) {
+    if (OB_FAIL(expr_copier.copy(other.trans_info_expr_, trans_info_expr_))) {
+      LOG_WARN("failed to trans info exprs", K(ret), KPC(other.trans_info_expr_));
+    }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < other.assignments_.count(); ++i) {
     if (OB_FAIL(assignments_.at(i).deep_copy(expr_copier,
@@ -76,10 +83,13 @@ int IndexDMLInfo::assign_basic(const IndexDMLInfo &other)
   is_primary_index_ = other.is_primary_index_;
   is_update_unique_key_ = other.is_update_unique_key_;
   is_update_part_key_ = other.is_update_part_key_;
+  trans_info_expr_ = other.trans_info_expr_;
   if (OB_FAIL(column_exprs_.assign(other.column_exprs_))) {
     LOG_WARN("failed to assign column exprs", K(ret));
   } else if (OB_FAIL(column_convert_exprs_.assign(other.column_convert_exprs_))) {
     LOG_WARN("failed to assign column conver array", K(ret));
+  } else if (OB_FAIL(column_old_values_exprs_.assign(other.column_old_values_exprs_))) {
+    LOG_WARN("failed to assign column old values exprs", K(ret));
   } else if (OB_FAIL(assignments_.assign(other.assignments_))) {
     LOG_WARN("failed to assign assignments array", K(ret));
   } else if (OB_FAIL(ck_cst_exprs_.assign(other.ck_cst_exprs_))) {
@@ -230,6 +240,37 @@ int IndexDMLInfo::init_column_convert_expr(const ObAssignments &assignments)
   return ret;
 }
 
+int IndexDMLInfo::convert_old_row_exprs(const ObIArray<ObColumnRefRawExpr*> &columns,
+                                          ObIArray<ObRawExpr*> &access_exprs,
+                                          int64_t col_cnt /*= -1*/)
+{
+  int ret = OB_SUCCESS;
+  if (-1 == col_cnt) {
+    col_cnt = columns.count();
+  }
+  if (col_cnt > 0 && col_cnt <= columns.count()) {
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid arguments", K(col_cnt), K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < col_cnt; ++i) {
+    ObColumnRefRawExpr *col_expr = const_cast<ObColumnRefRawExpr*>(columns.at(i));
+    if (OB_FAIL(access_exprs.push_back(col_expr))) {
+      LOG_WARN("store storage access expr failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+int IndexDMLInfo::generate_column_old_values_exprs()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(convert_old_row_exprs(column_exprs_, column_old_values_exprs_))) {
+    LOG_WARN("convert old values exprs", K(ret), K(column_exprs_));
+  }
+  return ret;
+}
+
 ObLogDelUpd::ObLogDelUpd(ObDelUpdLogPlan &plan)
   : ObLogicalOperator(plan),
     my_dml_plan_(plan),
@@ -250,25 +291,37 @@ ObLogDelUpd::ObLogDelUpd(ObDelUpdLogPlan &plan)
     pdml_is_returning_(false),
     err_log_define_(),
     need_alloc_part_id_expr_(false),
-    has_instead_of_trigger_(false)
+    has_instead_of_trigger_(false),
+    produced_trans_exprs_()
 {
 }
 
-int ObLogDelUpd::print_my_plan_annotation(char *buf,
-                                          int64_t &buf_len,
-                                          int64_t &pos,
-                                          ExplainType type)
+int ObLogDelUpd::get_plan_item_info(PlanText &plan_text,
+                                    ObSqlPlanItem &plan_item)
 {
   int ret = OB_SUCCESS;
-  ret = BUF_PRINTF(", ");
-  if (OB_FAIL(ret)) {
-    // do nothing
-  } else if (OB_FAIL(print_table_infos(ObString::make_string("table_columns"),
-                                       buf, buf_len, pos, type))) {
-    LOG_WARN("failed to print table infos", K(ret));
-  } else if (EXPLAIN_EXTENDED == type && need_barrier()) {
-    ret = BUF_PRINTF(", ");
-    ret = BUF_PRINTF("with_barrier");
+  if (OB_FAIL(ObLogicalOperator::get_plan_item_info(plan_text, plan_item))) {
+    LOG_WARN("failed to get base plan item info", K(ret));
+  } else {
+    ObString base_table;
+    ObString index_table;
+    if (is_pdml()
+        && is_index_maintenance()
+        && NULL != get_index_dml_infos().at(0)
+        && OB_SUCC(get_table_index_name(*get_index_dml_infos().at(0),
+                                                base_table,
+                                                index_table))) {
+      BEGIN_BUF_PRINT;
+      if (OB_FAIL(BUF_PRINTF("%.*s(%.*s)",
+                             base_table.length(),
+                             base_table.ptr(),
+                             index_table.length(),
+                             index_table.ptr()))) {
+        LOG_WARN("failed to print str", K(ret));
+      }
+      END_BUF_PRINT(plan_item.object_alias_,
+                    plan_item.object_alias_len_);
+    }
   }
   return ret;
 }
@@ -456,7 +509,6 @@ int ObLogDelUpd::find_pdml_part_id_producer(ObLogicalOperator &op,
         producer = &op;
       }
     } else if (op.get_type() == log_op_def::LOG_TABLE_SCAN) {
-
       // PDML partition id expr在table scan分配的逻辑
       // pdml table scan分配partition id expr的producer
       // table scan中分配partition id expr的producer的逻辑比较特殊：
@@ -474,14 +526,12 @@ int ObLogDelUpd::find_pdml_part_id_producer(ObLogicalOperator &op,
       // 其会被裁剪掉，因此目前insert与subplan之间会添加一个EX算子.
       // 后期会进行优化，如果insert与subplan是一个full partition wise
       // join，那么就在insert算子上分配一个GI算子，目前先使用在subplan上分配EX算子的方式实现
-
       ObLogTableScan &tsc = static_cast<ObLogTableScan &>(op);
       if (tid
           == (tsc.get_is_index_global() ? tsc.get_index_table_id() : tsc.get_ref_table_id())) {
         producer = &op;
       }
     }
-
     for (int64_t i = 0; OB_SUCC(ret) && NULL == producer && i < op.get_num_of_child(); i++) {
       if (OB_ISNULL(op.get_child(i))) {
         ret = OB_ERR_UNEXPECTED;
@@ -506,6 +556,80 @@ int ObLogDelUpd::find_pdml_part_id_producer(ObLogicalOperator &op,
   return ret;
 }
 
+int ObLogDelUpd::find_trans_info_producer() {
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0 ; OB_SUCC(ret) && i < index_dml_infos_.count(); i++) {
+    ObLogicalOperator *producer = NULL;
+    IndexDMLInfo *index_dml_info = index_dml_infos_.at(i);
+    if (OB_ISNULL(index_dml_info)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if ((!is_pdml() && !index_dml_info->is_primary_index_)) {
+      // Don't worry about non-pdml and non-main tables
+      // Every operator in pdml needs to try to press down once
+    } else if (OB_ISNULL(index_dml_info->trans_info_expr_)) {
+      // do nothing
+    } else if (OB_FAIL(find_trans_info_producer(*this, index_dml_info->table_id_, producer))) {
+      LOG_WARN("fail to find trans info producer", K(ret), KPC(index_dml_info), K(get_name()));
+    } else if (NULL == producer) {
+      // No error can be reported here,
+      // the producer of the corresponding trans_info expression was not found, ignore these
+      LOG_TRACE("can not found trans debug info expr producer", K(ret), K(index_dml_info->table_id_));
+    } else if (OB_FAIL(add_var_to_array_no_dup(produced_trans_exprs_,
+                                               index_dml_info->trans_info_expr_))) {
+      LOG_WARN("fail to push trans_info_expr_", K(ret));
+    } else {
+      if (producer->get_type() == log_op_def::LOG_TABLE_SCAN) {
+        if (static_cast<ObLogTableScan *>(producer)->get_trans_info_expr() == index_dml_info->trans_info_expr_) {
+          LOG_DEBUG("this expr has find the producer", K(ret));
+        } else {
+          static_cast<ObLogTableScan *>(producer)->
+                      set_trans_info_expr(static_cast<ObOpPseudoColumnRawExpr *>(index_dml_info->trans_info_expr_));
+        }
+      } else {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected type of pdml partition id producer", K(ret), K(producer));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObLogDelUpd::find_trans_info_producer(ObLogicalOperator &op,
+                                          const uint64_t tid,
+                                          ObLogicalOperator *&producer)
+{
+  int ret = OB_SUCCESS;
+  producer = NULL;
+  if (op.get_type() == log_op_def::LOG_TABLE_SCAN) {
+    ObLogTableScan &tsc = static_cast<ObLogTableScan &>(op);
+    if (tid == tsc.get_table_id()) {
+      producer = &op;
+    }
+  }
+
+  for (int64_t i = 0; OB_SUCC(ret) && NULL == producer && i < op.get_num_of_child(); i++) {
+    if (OB_ISNULL(op.get_child(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("null child", K(ret));
+    } else if (log_op_def::LOG_JOIN == op.get_type()) {
+      ObLogJoin &join_op = static_cast<ObLogJoin&>(op);
+      if (IS_LEFT_SEMI_ANTI_JOIN(join_op.get_join_type()) &&
+          second_child == i) {
+        continue;
+      } else if (IS_RIGHT_SEMI_ANTI_JOIN(join_op.get_join_type()) &&
+                 first_child == i) {
+        continue;
+      }
+      if (OB_FAIL(SMART_CALL(find_trans_info_producer(*op.get_child(i), tid, producer)))) {
+        LOG_WARN("find pdml part id producer failed", K(ret));
+      }
+    } else if (OB_FAIL(SMART_CALL(find_trans_info_producer(*op.get_child(i), tid, producer)))) {
+      LOG_WARN("find pdml part id producer failed", K(ret));
+    }
+  }
+  return ret;
+}
+
 int ObLogDelUpd::inner_get_op_exprs(ObIArray<ObRawExpr*> &all_exprs, bool need_column_expr)
 {
   int ret = OB_SUCCESS;
@@ -514,6 +638,8 @@ int ObLogDelUpd::inner_get_op_exprs(ObIArray<ObRawExpr*> &all_exprs, bool need_c
   } else if (is_pdml() && need_alloc_part_id_expr_ &&
              OB_FAIL(generate_pdml_partition_id_expr())) {
     LOG_WARN("failed to allocate partition id expr", K(ret));
+  } else if (OB_FAIL(find_trans_info_producer())) {
+    LOG_WARN("failed to find trasn info producer", K(ret));
   } else if (OB_FAIL(generate_rowid_expr_for_trigger())) {
     LOG_WARN("failed to try add rowid col expr for trigger", K(ret));
   } else if (NULL != lock_row_flag_expr_ && OB_FAIL(all_exprs.push_back(lock_row_flag_expr_))) {
@@ -522,6 +648,8 @@ int ObLogDelUpd::inner_get_op_exprs(ObIArray<ObRawExpr*> &all_exprs, bool need_c
     LOG_WARN("failed to append exprs", K(ret));
   } else if (NULL != pdml_partition_id_expr_ && OB_FAIL(all_exprs.push_back(pdml_partition_id_expr_))) {
     LOG_WARN("failed to push back exprs", K(ret));
+  } else if (OB_FAIL(append_array_no_dup(all_exprs, produced_trans_exprs_))) {
+    LOG_WARN("failed to push back exprs", K(ret), K(produced_trans_exprs_));
   } else if (OB_FAIL(get_table_columns_exprs(get_index_dml_infos(), all_exprs, need_column_expr))) {
     LOG_WARN("failed to add table columns to ctx", K(ret));
   } else if (OB_FAIL(ObLogicalOperator::get_op_exprs(all_exprs))) {
@@ -588,6 +716,9 @@ int ObLogDelUpd::get_table_columns_exprs(const ObIArray<IndexDMLInfo *> &index_d
     } else if (NULL != index_dml_infos.at(i)->new_rowid_expr_ &&
                OB_FAIL(all_exprs.push_back(index_dml_info->new_rowid_expr_))) {
       LOG_WARN("failed to push back new rowid expr", K(ret));
+    } else if (NULL != index_dml_infos.at(i)->lookup_part_id_expr_ &&
+               OB_FAIL(all_exprs.push_back(index_dml_info->lookup_part_id_expr_))) {
+      LOG_WARN("failed to push back lookup part id expr", K(ret));
     } else if (need_column_expr) {
       ObColumnRefRawExpr *column_expr = NULL;
       for (int64_t k = 0; OB_SUCC(ret) && k < index_dml_info->column_exprs_.count(); k++) {
@@ -965,7 +1096,11 @@ int ObLogDelUpd::get_table_index_name(const IndexDMLInfo &index_info,
   return ret;
 }
 
-int ObLogDelUpd::print_table_infos(const ObString &prefix, char *buf, int64_t &buf_len, int64_t &pos, ExplainType type)
+int ObLogDelUpd::print_table_infos(const ObString &prefix,
+                                   char *buf,
+                                   int64_t &buf_len,
+                                   int64_t &pos,
+                                   ExplainType type)
 {
   int ret = OB_SUCCESS;
   const ObIArray<IndexDMLInfo *> &index_dml_infos = get_index_dml_infos();
@@ -1021,7 +1156,10 @@ int ObLogDelUpd::print_table_infos(const ObString &prefix, char *buf, int64_t &b
 }
 
 int ObLogDelUpd::print_assigns(const ObAssignments &assigns,
-                               char *buf, int64_t &buf_len, int64_t &pos, ExplainType type)
+                               char *buf,
+                               int64_t &buf_len,
+                               int64_t &pos,
+                               ExplainType type)
 {
   int ret = OB_SUCCESS;
   int64_t N = assigns.count();
@@ -1135,6 +1273,22 @@ int ObLogDelUpd::generate_old_calc_partid_expr(IndexDMLInfo &index_info)
   return ret;
 }
 
+// for replace and insert_up conflict scene, generate lookup_part_id_expr.
+int ObLogDelUpd::generate_lookup_part_id_expr(IndexDMLInfo &index_info)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(get_plan())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("plan is null", K(ret));
+  } else if (OB_FAIL(get_plan()->gen_calc_part_id_expr(index_info.loc_table_id_,
+                                                      index_info.ref_table_id_,
+                                                      CALC_PARTITION_TABLET_ID,
+                                                      index_info.lookup_part_id_expr_))) {
+    LOG_WARN("failed to gen calc part id expr", K(ret));
+  }
+  return ret;
+}
+
 int ObLogDelUpd::generate_insert_new_calc_partid_expr(IndexDMLInfo &index_dml_info)
 {
   int ret = OB_SUCCESS;
@@ -1224,24 +1378,16 @@ int ObLogDelUpd::get_insert_exprs(const IndexDMLInfo &dml_info,
   return ret;
 }
 
-int ObLogDelUpd::print_outline(planText &plan_text)
+int ObLogDelUpd::print_outline_data(PlanText &plan_text)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(get_plan())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected NULL", K(ret), K(get_plan()));
-  } else if (USED_HINT == plan_text.outline_type_) {
-    const ObHint *hint = get_plan()->get_log_plan_hint().get_normal_hint(T_USE_DISTRIBUTED_DML);
-    if (NULL != hint) {
-      bool match_hint = is_multi_part_dml() ? hint->is_enable_hint() : hint->is_disable_hint();
-      if (match_hint && OB_FAIL(hint->print_hint(plan_text))) {
-        LOG_WARN("failed to print use multi part dml hint", K(ret), K(*hint));
-      }
-    }
-  } else if (OUTLINE_DATA == plan_text.outline_type_ && is_multi_part_dml()) {
-    char *buf = plan_text.buf;
-    int64_t &buf_len = plan_text.buf_len;
-    int64_t &pos = plan_text.pos;
+  } else if (is_multi_part_dml()) {
+    char *buf = plan_text.buf_;
+    int64_t &buf_len = plan_text.buf_len_;
+    int64_t &pos = plan_text.pos_;
     const ObDMLStmt *stmt = NULL;
     ObString qb_name;
     if (OB_ISNULL(stmt = get_plan()->get_stmt())) {
@@ -1259,17 +1405,79 @@ int ObLogDelUpd::print_outline(planText &plan_text)
   return ret;
 }
 
-int ObLogDelUpd::copy_part_expr_pre(CopyPartExprCtx &ctx)
+int ObLogDelUpd::inner_replace_op_exprs(
+    const common::ObIArray<std::pair<ObRawExpr *, ObRawExpr*>> &to_replace_exprs)
 {
   int ret = OB_SUCCESS;
-  for (int64_t i = 0; OB_SUCC(ret) && i < get_index_dml_infos().count(); ++i) {
-    IndexDMLInfo *dml_info = get_index_dml_infos().at(i);
-    if (OB_ISNULL(dml_info)) {
+  if (OB_FAIL(replace_dml_info_exprs(to_replace_exprs, get_index_dml_infos()))) {
+    LOG_WARN("failed to replace dml info exprs", K(ret));
+  } else if (OB_FAIL(replace_exprs_action(to_replace_exprs, view_check_exprs_))) {
+    LOG_WARN("failed to replace view check exprs", K(ret));
+  } else if (OB_FAIL(replace_exprs_action(to_replace_exprs, produced_trans_exprs_))) {
+    LOG_WARN("failed to replace produced trans exprs", K(ret));
+  } else if (NULL != pdml_partition_id_expr_ &&
+    OB_FAIL(replace_expr_action(to_replace_exprs, pdml_partition_id_expr_))) {
+    LOG_WARN("failed to replace pdml partition id expr", K(ret));
+  }
+  return ret;
+}
+
+int ObLogDelUpd::replace_dml_info_exprs(
+    const common::ObIArray<std::pair<ObRawExpr *, ObRawExpr*>> &to_replace_exprs,
+    const ObIArray<IndexDMLInfo *> &index_dml_infos)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < index_dml_infos.count(); i++) {
+    IndexDMLInfo *index_dml_info = index_dml_infos.at(i);
+    if (OB_ISNULL(index_dml_info)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("index dml info is null", K(ret));
-    } else if (NULL != dml_info->old_part_id_expr_ &&
-               OB_FAIL(copy_part_expr(ctx, dml_info->old_part_id_expr_))) {
-      LOG_WARN("failed to copy part expr", K(ret));
+      LOG_WARN("get unexpected null", K(ret));
+    } else if (OB_FAIL(replace_exprs_action(to_replace_exprs,
+                                            index_dml_info->column_convert_exprs_))) {
+      LOG_WARN("failed to replace exprs", K(ret));
+    } else if (OB_FAIL(replace_exprs_action(to_replace_exprs,
+                                            index_dml_info->ck_cst_exprs_))) {
+      LOG_WARN("failed to replace exprs", K(ret));
+    } else if (NULL != index_dml_info->new_part_id_expr_ &&
+            OB_FAIL(replace_expr_action(to_replace_exprs, index_dml_info->new_part_id_expr_))) {
+      LOG_WARN("failed to replace new parititon id expr", K(ret));
+    } else if (NULL != index_dml_info->old_part_id_expr_ &&
+      OB_FAIL(replace_expr_action(to_replace_exprs, index_dml_info->old_part_id_expr_))) {
+      LOG_WARN("failed to replace old parititon id expr", K(ret));
+    } else if (NULL != index_dml_info->old_rowid_expr_ &&
+      OB_FAIL(replace_expr_action(to_replace_exprs, index_dml_info->old_rowid_expr_))) {
+      LOG_WARN("failed to replace old rowid expr", K(ret));
+    } else if (NULL != index_dml_info->new_rowid_expr_ &&
+      OB_FAIL(replace_expr_action(to_replace_exprs, index_dml_info->new_rowid_expr_))) {
+      LOG_WARN("failed to replace new rowid expr", K(ret));
+    } else if (OB_FAIL(replace_exprs_action(to_replace_exprs,
+                      index_dml_info->column_old_values_exprs_))) {
+      LOG_WARN("failed to replace column old values exprs ", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < index_dml_info->assignments_.count(); ++i) {
+      if (OB_FAIL(replace_expr_action(to_replace_exprs,
+                                      index_dml_info->assignments_.at(i).expr_))) {
+        LOG_WARN("failed to replace expr", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObLogDelUpd::print_used_hint(PlanText &plan_text)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(get_plan())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected NULL", K(ret), K(get_plan()));
+  } else  {
+    const ObHint *hint = get_plan()->get_log_plan_hint().get_normal_hint(T_USE_DISTRIBUTED_DML);
+    if (NULL != hint) {
+      bool match_hint = is_multi_part_dml() ?
+                        hint->is_enable_hint() : hint->is_disable_hint();
+      if (match_hint && OB_FAIL(hint->print_hint(plan_text))) {
+        LOG_WARN("failed to print use multi part dml hint", K(ret));
+      }
     }
   }
   return ret;

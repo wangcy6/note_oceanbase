@@ -168,6 +168,10 @@ public:
       bool &is_cache_hit,
       ObIArray<common::ObAddr> &locations);
 
+  int external_table_get(const uint64_t tenant_id,
+                         const uint64_t table_id,
+                         ObIArray<common::ObAddr> &locations);
+
   // Nonblock way to renew the virtual table location
   //
   // @param [in] tenant_id: Tenant for virtual table.
@@ -183,7 +187,8 @@ public:
       common::ObMySQLProxy &sql_proxy,
       ObIAliveServerTracer &server_tracer,
       ObRsMgr &rs_mgr,
-      obrpc::ObCommonRpcProxy &rpc_proxy);
+      obrpc::ObCommonRpcProxy &rpc_proxy,
+      obrpc::ObSrvRpcProxy &srv_rpc_proxy);
   int start();
   void stop();
   void wait();

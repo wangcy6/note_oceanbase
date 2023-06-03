@@ -127,11 +127,13 @@ public:
   // ObRpcSwitchSchemaP @RS DDL
   int switch_schema(const obrpc::ObSwitchSchemaArg &arg, obrpc::ObSwitchSchemaResult &result);
   int calc_column_checksum_request(const obrpc::ObCalcColumnChecksumRequestArg &arg, obrpc::ObCalcColumnChecksumRequestRes &res);
-  int build_ddl_single_replica_request(const obrpc::ObDDLBuildSingleReplicaRequestArg &arg);
-  int write_ddl_sstable_commit_log(const obrpc::ObDDLWriteSSTableCommitLogArg &arg);
+  int build_ddl_single_replica_request(const obrpc::ObDDLBuildSingleReplicaRequestArg &arg, obrpc::ObDDLBuildSingleReplicaRequestResult &res);
   int stop_partition_write(const obrpc::Int64 &switchover_timestamp, obrpc::Int64 &result);
   int check_partition_log(const obrpc::Int64 &switchover_timestamp, obrpc::Int64 &result);
   int get_wrs_info(const obrpc::ObGetWRSArg &arg, obrpc::ObGetWRSResult &result);
+  int broadcast_consensus_version(
+      const obrpc::ObBroadcastConsensusVersionArg &arg,
+      obrpc::ObBroadcastConsensusVersionRes &result);
   ////////////////////////////////////////////////////////////////
   // ObRpcFetchSysLSP @RS load balance
   int fetch_sys_ls(share::ObLSReplica &replica);
@@ -145,13 +147,17 @@ public:
   int check_sys_task_exist(const share::ObTaskId &arg, bool &res);
   int check_migrate_task_exist(const share::ObTaskId &arg, bool &res);
   int delete_backup_ls_task(const obrpc::ObLSBackupCleanArg &arg);
-
+  int get_ls_sync_scn(const obrpc::ObGetLSSyncScnArg &arg,
+                           obrpc::ObGetLSSyncScnRes &result);
+  int force_set_ls_as_single_replica(const obrpc::ObForceSetLSAsSingleReplicaArg &arg);
+  int refresh_tenant_info(const obrpc::ObRefreshTenantInfoArg &arg,
+                          obrpc::ObRefreshTenantInfoRes &result);
   int estimate_partition_rows(const obrpc::ObEstPartArg &arg,
                               obrpc::ObEstPartRes &res) const;
-
   int estimate_tablet_block_count(const obrpc::ObEstBlockArg &arg,
                                   obrpc::ObEstBlockRes &res) const;
-
+  int update_tenant_info_cache(const obrpc::ObUpdateTenantInfoCacheArg &arg,
+                                  obrpc::ObUpdateTenantInfoCacheRes &result);
   ////////////////////////////////////////////////////////////////
   // ObRpcMinorFreezeP @RS minor freeze
   int minor_freeze(const obrpc::ObMinorFreezeArg &arg,
@@ -178,10 +184,21 @@ public:
   ////////////////////////////////////////////////////////////////
   // ObRpcBootstrapP @RS bootstrap
   int bootstrap(const obrpc::ObBootstrapArg &arg);
+  // ObRpcCheckServerForAddingServerP @RS add server
+  int check_server_for_adding_server(
+      const obrpc::ObCheckServerForAddingServerArg &arg,
+      obrpc::ObCheckServerForAddingServerResult &result);
+  // ObRpcGetServerStatusP @RS
+  int get_server_resource_info(const obrpc::ObGetServerResourceInfoArg &arg, obrpc::ObGetServerResourceInfoResult &result);
+  int get_server_resource_info(share::ObServerResourceInfo &resource_info);
+  static int get_build_version(share::ObServerInfoInTable::ObBuildVersion &build_version);
   // ObRpcIsEmptyServerP @RS bootstrap
   int is_empty_server(const obrpc::ObCheckServerEmptyArg &arg, obrpc::Bool &is_empty);
   // ObRpcCheckDeploymentModeP
   int check_deployment_mode_match(const obrpc::ObCheckDeploymentModeArg &arg, obrpc::Bool &match);
+  int get_leader_locations(
+      const obrpc::ObGetLeaderLocationsArg &arg,
+      obrpc::ObGetLeaderLocationsResult &result);
   int batch_broadcast_schema(
       const obrpc::ObBatchBroadcastSchemaArg &arg,
       obrpc::ObBatchBroadcastSchemaResult &result);
@@ -203,10 +220,6 @@ public:
   int sync_partition_table(const obrpc::Int64 &arg);
   // ObRpcSetTPP @RS::admin to set tracepoint
   int set_tracepoint(const obrpc::ObAdminSetTPArg &arg);
-  // for ObPartitionService::check_mc_allowed_by_server_lease
-  int get_server_heartbeat_expire_time(int64_t &lease_expire_time);
-  bool is_heartbeat_expired() const;
-  bool is_svr_lease_valid() const;
   int cancel_sys_task(const share::ObTaskId &task_id);
   int refresh_memory_stat();
   int wash_memory_fragmentation();
@@ -224,7 +237,18 @@ public:
   int submit_async_refresh_schema_task(const uint64_t tenant_id, const int64_t schema_version);
   int renew_in_zone_hb(const share::ObInZoneHbRequest &arg,
                        share::ObInZoneHbResponse &result);
+  int init_tenant_config(
+      const obrpc::ObInitTenantConfigArg &arg,
+      obrpc::ObInitTenantConfigRes &result);
+  int handle_heartbeat(
+      const share::ObHBRequest &hb_request,
+      share::ObHBResponse &hb_response);
 private:
+  int get_role_from_palf_(
+      logservice::ObLogService &log_service,
+      const share::ObLSID &ls_id,
+      common::ObRole &role,
+      int64_t &proposal_id);
   int inner_fill_tablet_info_(
       const int64_t tenant_id,
       const ObTabletID &tablet_id,
@@ -234,9 +258,16 @@ private:
       const bool need_checksum);
 
   int register_self();
-  int check_server_empty(const obrpc::ObCheckServerEmptyArg &arg, const bool wait_log_scan, bool &server_empty);
-  int tenant_freeze(const uint64_t tenant_id);
-  int tablet_freeze(const uint64_t tenant_id, const common::ObTabletID &tablet_id);
+  int check_server_empty(bool &server_empty);
+
+  int handle_server_freeze_req_(const obrpc::ObMinorFreezeArg &arg);
+  int handle_tenant_freeze_req_(const obrpc::ObMinorFreezeArg &arg);
+  int handle_ls_freeze_req_(const obrpc::ObMinorFreezeArg &arg);
+  int tenant_freeze_(const uint64_t tenant_id);
+  int ls_freeze_(const uint64_t tenant_id, const share::ObLSID &ls_id, const common::ObTabletID &tablet_id);
+  int generate_master_rs_ls_info_(
+      const share::ObLSReplica &cur_leader,
+      share::ObLSInfo &ls_info);
 private:
   bool inited_;
   bool in_register_process_;

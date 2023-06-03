@@ -164,7 +164,7 @@ private:
 class TransModulePageAllocator : public common::ModulePageAllocator
 {
 public:
-  TransModulePageAllocator(const lib::ObLabel &label = common::ObModIds::OB_MODULE_PAGE_ALLOCATOR,
+  TransModulePageAllocator(const lib::ObLabel &label = "TransModulePage",
                            int64_t tenant_id = common::OB_SERVER_TENANT_ID,
                            int64_t ctx_id = 0)
     : ModulePageAllocator(label, tenant_id, ctx_id) {}
@@ -177,8 +177,7 @@ public:
     if (OB_UNLIKELY(ObTransErrsim::is_memory_errsim())) {
       ret = NULL;
     } else {
-      const common::ObMemAttr attr(tenant_id_, label_, ctx_id_);
-      ret = inner_alloc_(sz, attr);
+      ret = inner_alloc_(sz, attr_);
     }
     return ret;
   }
@@ -229,8 +228,8 @@ class ObTransID
   OB_UNIS_VERSION(1);
 public:
   ObTransID() : tx_id_(0) {}
+  ObTransID(const int64_t tx_id) : tx_id_(tx_id) {}
   ~ObTransID() { tx_id_ = 0; }
-  ObTransID(const int64_t v) :tx_id_(v) {}
   ObTransID &operator=(const ObTransID &r) {
     if (this != &r) {
       tx_id_ = r.tx_id_;
@@ -259,6 +258,11 @@ public:
   uint64_t hash() const
   {
     return murmurhash(&tx_id_, sizeof(tx_id_), 0);
+  }
+  int hash(uint64_t &hash_val) const
+  {
+    hash_val = hash();
+    return OB_SUCCESS;
   }
   bool is_valid() const { return tx_id_ > 0; }
   void reset() { tx_id_ = 0; }
@@ -425,8 +429,8 @@ public:
 
 enum TransType : int32_t
 {
-  UNKNOWN_TRANS = -1, 
-  SP_TRANS = 0, 
+  UNKNOWN_TRANS = -1,
+  SP_TRANS = 0,
   DIST_TRANS = 2
 };
 
@@ -463,6 +467,13 @@ public:
 private:
   ObTransType() {}
   ~ObTransType() {}
+};
+
+enum class ObGlobalTxType : uint8_t
+{
+  PLAIN = 0,
+  XA_TRANS = 1,
+  DBLINK_TRANS = 2,
 };
 
 /*
@@ -676,11 +687,11 @@ private:
 
 typedef common::ObReserveArenaAllocator<1024> ObTxReserveArenaAllocator;
 
-class ObTransTraceLog : public common::ObTraceEventRecorderBase<100, 4000>
+class ObTransTraceLog : public common::ObTraceEventRecorder
 {
 public:
   ObTransTraceLog()
-      : common::ObTraceEventRecorderBase<100, 4000>::ObTraceEventRecorderBase(
+      : common::ObTraceEventRecorder::ObTraceEventRecorderBase(
           true, common::ObLatchIds::TRANS_TRACE_RECORDER_LOCK) {}
   ~ObTransTraceLog() {}
   void destroy() {}
@@ -730,6 +741,7 @@ public:
   int64_t seq_no_;
 };
 
+<<<<<<< HEAD
 class ObTransTaskInfo //unreferenced, need remove
 {
   OB_UNIS_VERSION(1);
@@ -847,6 +859,8 @@ private:
   int64_t msg_seq_;
 };
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 class ObTransVersion
 {
 public:
@@ -859,27 +873,7 @@ private:
   ~ObTransVersion() {}
 };
 
-typedef struct MonotonicTs
-{
-  OB_UNIS_VERSION(1);
-public:
-  explicit MonotonicTs(int64_t mts) : mts_(mts) {}
-  MonotonicTs() { reset(); }
-  ~MonotonicTs() { reset(); }
-  void reset() { mts_ = 0; }
-  bool is_valid() const { return mts_ > 0; }
-  bool operator!=(const struct MonotonicTs other) const { return  mts_ != other.mts_; }
-  bool operator==(const struct MonotonicTs other) const { return  mts_ == other.mts_; }
-  bool operator>(const struct MonotonicTs other) const { return  mts_ > other.mts_; }
-  bool operator>=(const struct MonotonicTs other) const { return  mts_ >= other.mts_; }
-  bool operator<(const struct MonotonicTs other) const { return  mts_ < other.mts_; }
-  bool operator<=(const struct MonotonicTs other) const { return  mts_ <= other.mts_; }
-  struct MonotonicTs operator+(const struct MonotonicTs other) const { return MonotonicTs(mts_ + other.mts_); }
-  struct MonotonicTs operator-(const struct MonotonicTs other) const { return MonotonicTs(mts_ - other.mts_); }
-  static struct MonotonicTs current_time() { return MonotonicTs(common::ObTimeUtility::current_time()); }
-  TO_STRING_KV(K_(mts));
-  int64_t mts_;
-} MonotonicTs;
+typedef ObMonotonicTs MonotonicTs;
 
 class ObTransNeedWaitWrap
 {
@@ -898,7 +892,7 @@ public:
   MonotonicTs get_receive_gts_ts() const { return receive_gts_ts_; }
   int64_t get_need_wait_interval_us() const { return need_wait_interval_us_; }
   bool need_wait() const { return get_remaining_wait_interval_us() > 0; }
-  TO_STRING_KV(K_(receive_gts_ts), K_(need_wait_interval_us));
+  TO_STRING_KV(K(receive_gts_ts_), K_(need_wait_interval_us));
 private:
   MonotonicTs receive_gts_ts_;
   int64_t need_wait_interval_us_;
@@ -1203,7 +1197,7 @@ public:
   static const int64_t UNKNOWN = -1;
   static const int64_t END_TRANS_CB_TASK = 0;
   static const int64_t ADVANCE_LS_CKPT_TASK = 1;
-  static const int64_t MAX = 14;
+  static const int64_t MAX = 3;
 public:
   static bool is_valid(const int64_t task_type)
   { return task_type > UNKNOWN && task_type < MAX; }
@@ -1574,10 +1568,45 @@ private:
   palf::LSN offset_;
 };
 
+class ObStateInfo
+{
+public:
+  ObStateInfo() : state_(ObTxState::UNKNOWN), version_(), snapshot_version_() {}
+  ObStateInfo(const share::ObLSID &ls_id,
+              const ObTxState &state,
+              const share::SCN &version,
+              const share::SCN &snapshot_version) :
+              ls_id_(ls_id), state_(state)
+  {
+    version_ = version;
+    snapshot_version_ = snapshot_version;
+  }
+  ~ObStateInfo() {}
+  bool is_valid() const
+  {
+    return ls_id_.is_valid() && version_.is_valid() && snapshot_version_.is_valid();  }
+  void operator=(const ObStateInfo &state_info)
+  {
+    ls_id_ = state_info.ls_id_;
+    state_ = state_info.state_;
+    version_ = state_info.version_;
+    snapshot_version_ = state_info.snapshot_version_;
+  }
+  bool need_update(const ObStateInfo &state_info);
+  TO_STRING_KV(K_(ls_id), K_(state), K_(version), K_(snapshot_version))
+  OB_UNIS_VERSION(1);
+public:
+  share::ObLSID ls_id_;
+  ObTxState state_;
+  share::SCN version_;
+  share::SCN snapshot_version_;
+};
+
 typedef common::ObSEArray<ObElrTransInfo, 1, TransModulePageAllocator> ObElrTransInfoArray;
 typedef common::ObSEArray<int64_t, 10, TransModulePageAllocator> ObRedoLogIdArray;
 typedef common::ObSEArray<palf::LSN, 10, ModulePageAllocator> ObRedoLSNArray;
 typedef common::ObSEArray<ObLSLogInfo, 10, ModulePageAllocator> ObLSLogInfoArray;
+typedef common::ObSEArray<ObStateInfo, 1, ModulePageAllocator> ObStateInfoArray;
 
 struct CtxInfo final
 {
@@ -1682,7 +1711,7 @@ public:
   int range_submitted(ObTxMDSCache &cache);
   void range_sync_failed();
 
-  int count() const { return count_; };
+  int64_t count() const { return count_; };
 
   TO_STRING_KV(K(count_));
 
@@ -1692,7 +1721,7 @@ private:
   int64_t count_;
 };
 
-
+static const int64_t MAX_TABLET_MODIFY_RECORD_COUNT = 16;
 // exec info need to be persisted by "trans context table"
 struct ObTxExecInfo
 {
@@ -1732,7 +1761,8 @@ public:
                //K_(touched_pkeys),
                K_(prepare_log_info_arr),
                K_(xid),
-               K_(need_checksum));
+               K_(need_checksum),
+               K_(is_sub2pc));
   ObTxState state_;
   share::ObLSID upstream_;
   share::ObLSArray participants_;
@@ -1760,6 +1790,8 @@ public:
   // for xa
   ObXATransID xid_;
   bool need_checksum_;
+  common::ObSEArray<common::ObTabletID, MAX_TABLET_MODIFY_RECORD_COUNT> tablet_modify_record_;
+  bool is_sub2pc_;
 };
 
 static const int64_t GET_GTS_AHEAD_INTERVAL = 300;
@@ -1777,13 +1809,31 @@ struct ObMulSourceDataNotifyArg
   bool redo_submitted_;
   bool redo_synced_;
 
+  // force kill trans without abort scn
+  bool is_force_kill_;
+
+  ObMulSourceDataNotifyArg() { reset(); }
+
+  void reset()
+  {
+    tx_id_.reset();
+    scn_.reset();
+    trans_version_.reset();
+    for_replay_ = false;
+    notify_type_ = NotifyType::ON_ABORT;
+    redo_submitted_ = false;
+    redo_synced_ = false;
+    is_force_kill_ = false;
+  }
+
   TO_STRING_KV(K_(tx_id),
                K_(scn),
                K_(trans_version),
                K_(for_replay),
                K_(notify_type),
                K_(redo_submitted),
-               K_(redo_synced));
+               K_(redo_synced),
+               K_(is_force_kill));
 
   // The redo log of current buf_node has been submitted;
   bool is_redo_submitted() const;
@@ -1798,8 +1848,23 @@ enum class TxEndAction : int8_t
 {
   COMMIT_TX,
   ABORT_TX,
+  DELAY_ABORT_TX,
   KILL_TX_FORCEDLY
 };
+
+inline bool IS_CORNER_IMPL(const char *func, const int64_t line, const int64_t ppm)
+{
+  int ret = common::OB_SUCCESS;
+  bool bool_ret = false;
+#ifdef ENABLE_DEBUG_LOG
+  bool_ret = (ObRandom::rand(0, 999999) < ppm);
+  TRANS_LOG(WARN, "IS_CORNER", K(func), K(line));
+#endif
+  UNUSED(ret);
+  return bool_ret;
+}
+
+#define IS_CORNER(ppm) IS_CORNER_IMPL(__FUNCTION__, __LINE__, ppm)
 
 } // transaction
 } // oceanbase

@@ -32,12 +32,9 @@ namespace memtable
 int ObMvccValueIterator::init(ObMvccAccessCtx &ctx,
                               const ObMemtableKey *key,
                               ObMvccRow *value,
-                              const ObQueryFlag &query_flag,
-                              const bool skip_compact)
+                              const ObQueryFlag &query_flag)
 {
   int ret = OB_SUCCESS;
-  skip_compact_ = skip_compact;
-  bool enable_sql_audit = GCONF.enable_sql_audit;;
   reset();
   int64_t lock_for_read_start = ObClockGenerator::getClock();
   ctx_ = &ctx;
@@ -59,16 +56,10 @@ int ObMvccValueIterator::init(ObMvccAccessCtx &ctx,
     }
   }
 
-  if (OB_SUCC(ret) && enable_sql_audit) {
-    // stat lock for read time : FIXME: (yunxing.cyx) feedback via ..
-    // const_cast<ObIMvccCtx&>(ctx).add_lock_for_read_elapse(
-    //   ObClockGenerator::getClock() -  lock_for_read_start);
-  }
   TRANS_LOG(TRACE, "value_iter.init", K(ret),
             KPC(value),
             KPC_(version_iter),
             K(query_flag.is_read_latest()),
-            K(skip_compact),
             KPC(key),
             K(ctx),
             K(lbt()));
@@ -83,7 +74,9 @@ int ObMvccValueIterator::lock_for_read_(const ObQueryFlag &flag)
   ObMvccTransNode *iter = value_->get_list_head();
   // the resolved mvcc read position
   version_iter_ = NULL;
-  lock_begin(lock_start_time);
+  if (GCONF.enable_sql_audit) {
+    lock_start_time =  ObClockGenerator::getClock();
+  }
 
   while (OB_SUCC(ret) && NULL != iter && NULL == version_iter_) {
     if (OB_FAIL(lock_for_read_inner_(flag, iter))) {
@@ -95,30 +88,30 @@ int ObMvccValueIterator::lock_for_read_(const ObQueryFlag &flag)
   if (NULL != version_iter_) {
     if (ctx_->is_weak_read()) {
       version_iter_->set_safe_read_barrier(true);
+<<<<<<< HEAD
       version_iter_->set_snapshot_version_barrier(ctx_->snapshot_.version_);
     }
     if (!flag.is_prewarm()
         && !version_iter_->is_elr()) {
       version_iter_->set_snapshot_version_barrier(ctx_->snapshot_.version_);
+=======
+      version_iter_->set_snapshot_version_barrier(ctx_->snapshot_.version_,
+                                                  ObMvccTransNode::WEAK_READ_BIT);
+    } else if (!flag.is_prewarm() && !version_iter_->is_elr()) {
+      version_iter_->set_snapshot_version_barrier(ctx_->snapshot_.version_,
+                                                  ObMvccTransNode::NORMAL_READ_BIT);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     }
   }
 
-  lock_for_read_end(lock_start_time, ret);
   return ret;
-}
-
-void ObMvccValueIterator::lock_begin(int64_t &lock_start_time) const
-{
-  if (GCONF.enable_sql_audit) {
-    lock_start_time = OB_TSC_TIMESTAMP.current_time();
-  }
 }
 
 void ObMvccValueIterator::lock_for_read_end(const int64_t lock_start_time, int64_t ret) const
 {
   // TODO: Add ELR check back
   if (GCONF.enable_sql_audit && OB_INVALID_TIMESTAMP != lock_start_time) {
-    const int64_t lock_use_time = OB_TSC_TIMESTAMP.current_time() - lock_start_time;
+    const int64_t lock_use_time = ObClockGenerator::getClock() - lock_start_time;
     EVENT_ADD(MEMSTORE_WAIT_READ_LOCK_TIME, lock_use_time);
     if (OB_FAIL(ret)) {
       EVENT_INC(MEMSTORE_READ_LOCK_FAIL_COUNT);
@@ -143,6 +136,7 @@ int ObMvccValueIterator::lock_for_read_inner_(const ObQueryFlag &flag,
   //
   //        NB: For cursor, it will have its snapshot_tx_id different from
   //        reader_tx_id.
+<<<<<<< HEAD
   const ObTransID &snapshot_tx_id = ctx_->snapshot_.tx_id_;
   const ObTransID &reader_tx_id = ctx_->tx_id_;
   const int64_t snapshot_seq_no = ctx_->snapshot_.scn_;
@@ -150,10 +144,10 @@ int ObMvccValueIterator::lock_for_read_inner_(const ObQueryFlag &flag,
   const SCN snapshot_version = ctx_->get_snapshot_version();
   const int64_t read_epoch = ctx_->get_tx_table_guard().epoch();
   ObTxTable *tx_table = ctx_->get_tx_table_guard().get_tx_table();
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   const bool read_latest = flag.is_read_latest();
-
   const ObTransID &data_tx_id = iter->get_tx_id();
-  const int64_t data_seq_no = iter->get_seq_no();
 
   // NB: We need pay much attention to the order of the reads to the different
   // variables. Although we update the version before the state for the tnodes
@@ -171,15 +165,19 @@ int ObMvccValueIterator::lock_for_read_inner_(const ObQueryFlag &flag,
       // Opt2: data is not decided while we donot need cleanout
       || (!is_delayed_cleanout
           && (// Opt2.1: snapshot reads the data written by snapshot
-            data_tx_id == snapshot_tx_id ||
+            data_tx_id == ctx_->snapshot_.tx_id_ ||
             // Opt2.2: read reader's latest is matched
-            (read_latest && data_tx_id == reader_tx_id)))) {
+            (read_latest && data_tx_id == ctx_->tx_id_)))) {
     // Case 1: Cleanout can be skipped
     //         because inner tx read only care whether tx node rollbacked
     if (is_committed || is_elr) {
       // Case 2: Data is committed, so the state is decided
       const SCN data_version = iter->trans_version_.atomic_load();
+<<<<<<< HEAD
       if (snapshot_version >= data_version) {
+=======
+      if (ctx_->get_snapshot_version() >= data_version) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         // Case 2.1 Read the version if it is smaller than read version
         version_iter_ = iter;
       } else {
@@ -192,13 +190,13 @@ int ObMvccValueIterator::lock_for_read_inner_(const ObQueryFlag &flag,
       iter = iter->prev_;
     } else {
       // Case 4: data is during execution
-      if (read_latest && data_tx_id == reader_tx_id) {
+      if (read_latest && data_tx_id == ctx_->tx_id_) {
         // Case 4.1: data is written by the current txn and we also need read the
         //           latest data(eg: check existence), then we can read it if it
         //           is not undone
         version_iter_ = iter;
-      } else if (snapshot_tx_id == data_tx_id) {
-        if (data_seq_no <= snapshot_seq_no) {
+      } else if (ctx_->snapshot_.tx_id_ == data_tx_id) {
+        if (iter->get_seq_no() <= ctx_->snapshot_.scn_) {
           // Case 4.2.1: data's sequence number is smaller or equal than the read
           //             txn's sequence number, so we can read it if it is not
           //             undone
@@ -222,35 +220,55 @@ int ObMvccValueIterator::lock_for_read_inner_(const ObQueryFlag &flag,
     //         is_delay_cleanout() to check the state and we only cleanout it
     //         when data is delay cleanout
     bool can_read = false;
+<<<<<<< HEAD
     SCN data_version = SCN::max_scn();
+=======
+    SCN data_version;
+    data_version.set_max();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     bool is_determined_state = false;
+
     // Opt3: we only cleanout tx node who is delay cleanout
-    ObCleanoutOp cleanout_op;
+    ObCleanoutOp *cleanout_op;
+    ObCleanoutTxNodeOperation clean_tx_node_op(*value_, *iter, true /*need_row_latch*/);
+    ObCleanoutNothingOperation clean_nothing_op;
     if (iter->is_delayed_cleanout()) {
-      cleanout_op = ObCleanoutTxNodeOperation(*value_, *iter, true /*need_row_latch*/);
+      cleanout_op = &clean_tx_node_op;
     } else {
-      cleanout_op = ObCleanoutNothingOperation();
+      cleanout_op = &clean_nothing_op;
     }
-    ObReCheckOp recheck_op = ObReCheckTxNodeForLockForReadOperation(*iter,
-                                                                    can_read,
-                                                                    data_version,
-                                                                    is_determined_state);
+
+    ObReCheckTxNodeForLockForReadOperation recheck_tx_node_op(*iter, can_read, data_version, is_determined_state);
+    ObReCheckOp *recheck_op = &recheck_tx_node_op;
+
     ObLockForReadArg lock_for_read_arg(*ctx_,
                                        data_tx_id,
-                                       data_seq_no,
+                                       iter->get_seq_no(),
                                        read_latest);
 
-    if (OB_FAIL(tx_table->lock_for_read(lock_for_read_arg,
-                                        read_epoch,
-                                        can_read,
-                                        data_version,
-                                        is_determined_state,
-                                        cleanout_op,
-                                        recheck_op))) {
+    if (OB_FAIL(ctx_->get_tx_table_guard().lock_for_read(
+            lock_for_read_arg, can_read, data_version, is_determined_state, *cleanout_op, *recheck_op))) {
       TRANS_LOG(WARN, "lock for read failed", KPC(iter), K(lock_for_read_arg));
-    } else if (can_read && snapshot_version >= data_version) {
+    } else if (can_read && ctx_->get_snapshot_version() >= data_version) {
       // Case 5.1: data is cleanout by lock for read and can be read by reader's
       //           snapshot
+      int counter = 0;
+      while (OB_SUCC(ret)
+             && is_determined_state
+             && !(iter->is_committed() || iter->is_aborted() || iter->is_elr())) {
+        if (OB_FAIL(try_cleanout_tx_node_(iter))) {
+          TRANS_LOG(WARN, "cleanout tx state failed", K(ret), KPC(value_), KPC(iter));
+        }
+        // NB: We rely on the row_scn and state on the tx node if we really can
+        // read from the tx node. So if the tx node is not cleanout, we must
+        // wait until the tx node is written back its state.
+        if (0 == (++counter) % 10000
+            && REACH_TIME_INTERVAL(1_s)) {
+          TRANS_LOG(WARN, "waiting for the iter to be cleanout", K(ret),
+                    KPC(iter), K(lock_for_read_arg), KPC(value_), KPC(ctx_));
+        }
+        usleep(10); // 10us
+      }
       version_iter_ = iter;
     } else {
       // Case 5.1: data is cleanout by lock for read and cannot be read by
@@ -265,19 +283,23 @@ int ObMvccValueIterator::lock_for_read_inner_(const ObQueryFlag &flag,
 int ObMvccValueIterator::try_cleanout_tx_node_(ObMvccTransNode *tnode)
 {
   int ret = OB_SUCCESS;
-  auto tx_table = ctx_->get_tx_table_guard().get_tx_table();
-  int64_t read_epoch = ctx_->get_tx_table_guard().epoch();
-  if (!(tnode->is_committed() || tnode->is_aborted())
-      && tnode->is_delayed_cleanout()
-      && OB_FAIL(tx_table->cleanout_tx_node(tnode->tx_id_,
-                                            read_epoch,
-                                            *value_,
-                                            *tnode,
-                                            true     /*need_row_latch*/))) {
+  if (!(tnode->is_committed() || tnode->is_aborted()) && tnode->is_delayed_cleanout() &&
+      OB_FAIL(ctx_->get_tx_table_guard().cleanout_tx_node(tnode->tx_id_, *value_, *tnode, true /*need_row_latch*/))) {
     TRANS_LOG(WARN, "cleanout tx state failed", K(ret), K(*value_), K(*tnode));
   }
-
   return ret;
+}
+
+void ObMvccValueIterator::get_trans_stat_row(concurrency_control::ObTransStatRow &row)
+{
+  if (OB_ISNULL(version_iter_)) {
+    row.reset();
+  } else {
+    row.set(version_iter_->get_tx_version(),
+            version_iter_->get_scn(),
+            version_iter_->get_tx_id(),
+            version_iter_->get_seq_no());
+  }
 }
 
 int ObMvccValueIterator::get_next_node(const void *&tnode)
@@ -294,13 +316,11 @@ int ObMvccValueIterator::get_next_node(const void *&tnode)
       if (NULL == version_iter_) {
         ret = OB_ITER_END;
       } else if (OB_FAIL(try_cleanout_tx_node_(version_iter_))) {
-        TRANS_LOG(ERROR, "fail to cleanout tnode", K(ret), K(*version_iter_));
+        TRANS_LOG(WARN, "fail to cleanout tnode", K(ret), K(*version_iter_));
       } else if (OB_FAIL(version_iter_->is_lock_node(is_lock_node))) {
         TRANS_LOG(WARN, "fail to check is lock node", K(ret), K(*version_iter_));
       } else if (!(version_iter_->is_aborted()              // skip abort version
-                   || is_lock_node
-                   || (NDT_COMPACT == version_iter_->type_
-                       && skip_compact_))) {
+                   || is_lock_node)) {                      // skip lock node
         tnode = static_cast<const void *>(version_iter_);
       }
 
@@ -315,14 +335,27 @@ void ObMvccValueIterator::move_to_next_node_()
 {
   if (OB_ISNULL(version_iter_)) {
   } else if (NDT_COMPACT == version_iter_->type_) {
-    if (skip_compact_) {
-      version_iter_ = version_iter_->prev_;
-    } else {
-      version_iter_ = NULL;
-    }
+    version_iter_ = NULL;
   } else {
     version_iter_ = version_iter_->prev_;
   }
+}
+
+int ObMvccValueIterator::check_row_locked(ObStoreRowLockState &lock_state)
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    TRANS_LOG(WARN, "not init", KP(this));
+    ret = OB_NOT_INIT;
+  } else if (OB_ISNULL(value_)) {
+    ret = OB_SUCCESS;
+    TRANS_LOG(WARN, "get value iter but mvcc row in it is null", K(ret));
+  } else if (OB_FAIL(value_->check_row_locked(*ctx_, lock_state))){
+    TRANS_LOG(WARN, "check row locked fail", K(ret), KPC(value_), KPC(ctx_), K(lock_state));
+  } else {
+    lock_state.mvcc_row_ = value_;
+  }
+  return ret;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -371,8 +404,7 @@ int ObMvccRowIterator::init(
 int ObMvccRowIterator::get_next_row(
     const ObMemtableKey *&key,
     ObMvccValueIterator *&value_iter,
-    uint8_t& iter_flag,
-    const bool skip_compact)
+    uint8_t& iter_flag)
 {
   int ret = OB_SUCCESS;
   uint8_t read_partial_row = 0;
@@ -399,8 +431,7 @@ int ObMvccRowIterator::get_next_row(
     } else if (OB_FAIL(value_iter_.init(*ctx_,
                                         tmp_key,
                                         value,
-                                        query_flag_,
-                                        skip_compact))) {
+                                        query_flag_))) {
       TRANS_LOG(WARN, "value iter init fail", K(ret), "ctx", *ctx_, KP(value), K(*value));
     } else if (!value_iter_.is_exist()) {
       read_partial_row = (query_engine_iter_->get_iter_flag() & STORE_ITER_ROW_PARTIAL);
@@ -465,6 +496,7 @@ int ObMvccRowIterator::try_purge(const ObTxSnapshot &snapshot_info,
   return ret;
 }
 
+<<<<<<< HEAD
 int ObMvccRowIterator::get_end_gap_key(const ObTxSnapshot &snapshot_info, const ObStoreRowkey *&key, int64_t& size)
 {
   ObIQueryEngineIterator *iter = query_engine_iter_;
@@ -475,6 +507,8 @@ int ObMvccRowIterator::get_end_gap_key(const ObTxSnapshot &snapshot_info, const 
                                  is_reverse,
                                  size);
 }
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 } // namespace memtable
 } // namespace oceanbase
 

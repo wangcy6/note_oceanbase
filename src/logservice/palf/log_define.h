@@ -19,6 +19,7 @@
 #include "lib/utility/ob_print_utils.h"                  // databuff_printf
 #include "lib/container/ob_fixed_array.h"                // ObFixedArray
 #include "share/ob_force_print_log.h"                    // force_print
+#include "common/ob_clock_generator.h"
 
 namespace oceanbase
 {
@@ -33,9 +34,16 @@ class SCN;
 }
 namespace palf
 {
+#define FLASHBACK_SUFFIX ".flashback"
 #define TMP_SUFFIX ".tmp"
 
 #define PALF_EVENT(info_string, palf_id, args...) FLOG_INFO("[PALF_EVENT] "info_string, "palf_id", palf_id, args)
+
+#define PALF_REPORT_INFO_KV(args...) \
+const int64_t MAX_INFO_LENGTH = 512; \
+char EXTRA_INFOS[MAX_INFO_LENGTH]; \
+int64_t pos = 0; \
+::oceanbase::common::databuff_print_kv(EXTRA_INFOS, MAX_INFO_LENGTH, pos, ##args); \
 
 typedef int FileDesc;
 typedef uint64_t block_id_t ;
@@ -43,6 +51,7 @@ typedef uint64_t offset_t;
 constexpr int64_t INVALID_PALF_ID = -1;
 class LSN;
 class LogWriteBuf;
+class ILogBlockPool;
 
 // ==================== palf env start =============================
 const int64_t MIN_DISK_SIZE_PER_PALF_INSTANCE = 512 * 1024 * 1024ul;
@@ -58,10 +67,17 @@ const int64_t PALF_PHY_BLOCK_SIZE = 1 << 26;                                    
 const int64_t PALF_BLOCK_SIZE = PALF_PHY_BLOCK_SIZE - MAX_INFO_BLOCK_SIZE;          // log block size is 64M-MAX_INFO_BLOCK_SIZE by default.
 const int64_t PALF_META_BLOCK_SIZE = PALF_PHY_BLOCK_SIZE - MAX_INFO_BLOCK_SIZE;     // meta block size is 64M-MAX_INFO_BLOCK_SIZE by default.
 
-constexpr offset_t MAX_LOG_BUFFER_SIZE = MAX_LOG_BODY_SIZE + MAX_LOG_HEADER_SIZE;
+constexpr int64_t CLOG_FILE_TAIL_PADDING_TRIGGER = 4096;     // 文件尾剩余空间补padding阈值
+// The valid group_entry (not padding entry) size range is:
+//    (0, (MAX_LOG_BODY_SIZE + MAX_LOG_HEADER_SIZE) ).
+// The padding group_entry size range is:
+//    [4KB, (max_valid_group_entry_size + CLOG_FILE_TAIL_PADDING_TRIGGER) ).
+// So the MAX_LOG_BUFFER_SIZE is defined as below:
+constexpr offset_t MAX_LOG_BUFFER_SIZE = MAX_LOG_BODY_SIZE + MAX_LOG_HEADER_SIZE + CLOG_FILE_TAIL_PADDING_TRIGGER;
 
 constexpr offset_t LOG_DIO_ALIGN_SIZE = 4 * 1024;
-constexpr offset_t LOG_DIO_ALIGNED_BUF_SIZE = MAX_LOG_BUFFER_SIZE + LOG_DIO_ALIGN_SIZE;
+constexpr offset_t LOG_DIO_ALIGNED_BUF_SIZE_REDO = MAX_LOG_BUFFER_SIZE + LOG_DIO_ALIGN_SIZE;
+constexpr offset_t LOG_DIO_ALIGNED_BUF_SIZE_META = MAX_META_ENTRY_SIZE + LOG_DIO_ALIGN_SIZE;
 constexpr block_id_t LOG_MAX_BLOCK_ID = UINT64_MAX/PALF_BLOCK_SIZE - 1;
 constexpr block_id_t LOG_INVALID_BLOCK_ID = LOG_MAX_BLOCK_ID + 1;
 typedef common::ObFixedArray<share::SCN, ObIAllocator> SCNArray;
@@ -74,14 +90,24 @@ const int64_t LEADER_DEFAULT_GROUP_BUFFER_SIZE = 1 << 25;                       
 const int64_t MAX_ALLOWED_SKEW_FOR_REF_US = 3600L * 1000 * 1000;          // 1h
 // follower's group buffer size is 8MB larger than leader's.
 const int64_t FOLLOWER_DEFAULT_GROUP_BUFFER_SIZE = LEADER_DEFAULT_GROUP_BUFFER_SIZE + 8 * 1024 * 1024L;
+const int64_t PALF_STAT_PRINT_INTERVAL_US = 1 * 1000 * 1000L;
+// The advance delay threshold for match lsn is 1s.
+const int64_t MATCH_LSN_ADVANCE_DELAY_THRESHOLD_US = 1 * 1000 * 1000L;
 const int64_t PALF_RECONFIRM_FETCH_MAX_LSN_INTERVAL = 1 * 1000 * 1000;
 const int64_t PALF_FETCH_LOG_INTERVAL_US = 2 * 1000 * 1000L;                 // 2s
+<<<<<<< HEAD
 const int64_t PALF_FETCH_LOG_RENEW_LEADER_INTERVAL_US = 5 * 1000 * 1000;            // 5s
+=======
+// Control the fetch interval trigger by outer(eg. config change pre check) by 500ms.
+const int64_t PALF_FETCH_LOG_OUTER_TRIGGER_INTERVAL = 100 * 1000 * 1000L;
+const int64_t PALF_FETCH_LOG_RENEW_LEADER_INTERVAL_US = 5 * 1000 * 1000;     // 5s
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 const int64_t PALF_LEADER_RECONFIRM_SYNC_TIMEOUT_US = 10 * 1000 * 1000L;     // 10s
 const int64_t PREPARE_LOG_BUFFER_SIZE = 2048;
 const int64_t PALF_LEADER_ACTIVE_SYNC_TIMEOUT_US = 10 * 1000 * 1000L;        // 10s
 const int32_t PALF_MAX_REPLAY_TIMEOUT = 500 * 1000;
-const int32_t PALF_LOG_LOOP_INTERVAL_US = 1 * 1000;                                 // 1ms
+const int32_t DEFAULT_LOG_LOOP_INTERVAL_US = 100 * 1000;                            // 100ms
+const int32_t LOG_LOOP_INTERVAL_FOR_PERIOD_FREEZE_US = 1 * 1000;                       // 1ms
 const int64_t PALF_SLIDING_WINDOW_SIZE = 1 << 11;                                   // must be 2^n(n>0), default 2^11 = 2048
 const int64_t PALF_MAX_LEADER_SUBMIT_LOG_COUNT = PALF_SLIDING_WINDOW_SIZE / 2;      // max number of concurrent submitting group log in leader
 const int64_t PALF_RESEND_MSLOG_INTERVAL_US = 500 * 1000L;                   // 500 ms
@@ -92,7 +118,14 @@ const int64_t PALF_PARENT_KEEPALIVE_INTERVAL_US = 1 * 1000 * 1000L;          // 
 const int64_t PALF_CHILD_RESEND_REGISTER_INTERVAL_US = 4 * 1000 * 1000L;     // 4000ms
 const int64_t PALF_CHECK_PARENT_CHILD_INTERVAL_US = 1 * 1000 * 1000;                // 1000ms
 const int64_t PALF_DUMP_DEBUG_INFO_INTERVAL_US = 10 * 1000 * 1000;                  // 10s
+const int64_t PALF_UPDATE_CACHED_STAT_INTERVAL_US = 500 * 1000;                     // 500 ms
+const int64_t PALF_SYNC_RPC_TIMEOUT_US = 2 * 1000 * 1000;                           // 2 s
+const int64_t PALF_LOG_SYNC_DELAY_THRESHOLD_US = 3 * 1000 * 1000L;                  // 3 s
 constexpr int64_t INVALID_PROPOSAL_ID = INT64_MAX;
+constexpr int64_t PALF_MAX_PROPOSAL_ID = INT64_MAX - 1;
+constexpr int64_t PALF_INITIAL_PROPOSAL_ID = 0;
+constexpr char PADDING_LOG_CONTENT_CHAR = '\0';
+const int64_t MIN_WRITING_THTOTTLING_TRIGGER_PERCENTAGE = 40;
 
 inline int64_t max_proposal_id(const int64_t a, const int64_t b)
 {
@@ -126,7 +159,11 @@ enum ObReplicaState {
   RECONFIRM = 3,
   PENDING = 4,
 };
-
+const int64_t SYS_PALF_ID = 1;
+inline bool is_sys_palf_id(int64_t palf_id)
+{
+  return SYS_PALF_ID == palf_id;
+}
 inline const char *replica_state_to_string(const ObReplicaState &state)
 {
   #define CHECK_OB_REPLICA_STATE(x) case(ObReplicaState::x): return #x
@@ -155,7 +192,7 @@ enum LogReplicaType
 {
   INVALID_REPLICA = 0,
   NORMAL_REPLICA,           // full replica
-  ARBIRTATION_REPLICA,      // arbitration replica
+  ARBITRATION_REPLICA,      // arbitration replica
 };
 
 inline const char *replica_type_2_str(const LogReplicaType state)
@@ -164,7 +201,7 @@ inline const char *replica_type_2_str(const LogReplicaType state)
   switch(state)
   {
     CHECK_REPLICA_TYPE_STR(NORMAL_REPLICA);
-    CHECK_REPLICA_TYPE_STR(ARBIRTATION_REPLICA);
+    CHECK_REPLICA_TYPE_STR(ARBITRATION_REPLICA);
     default:
       return "InvalidReplicaType";
   }
@@ -177,8 +214,8 @@ inline int log_replica_type_to_string(const LogReplicaType replica_type, char *s
   int ret = OB_SUCCESS;
   if (LogReplicaType::NORMAL_REPLICA == replica_type) {
     strncpy(str_buf_, "NORMAL_REPLICA", str_len);
-  } else if (LogReplicaType::ARBIRTATION_REPLICA == replica_type) {
-    strncpy(str_buf_, "ARBIRTATION_REPLICA", str_len);
+  } else if (LogReplicaType::ARBITRATION_REPLICA == replica_type) {
+    strncpy(str_buf_, "ARBITRATION_REPLICA", str_len);
   } else {
     ret = OB_INVALID_ARGUMENT;
   }
@@ -202,6 +239,25 @@ inline bool is_tmp_block(const char *block_name)
     bool_ret = true;
   }
   return bool_ret;
+}
+
+inline bool is_flashback_block(const char *block_name)
+{
+  bool bool_ret = false;
+  if (NULL != block_name && NULL != strstr(block_name, FLASHBACK_SUFFIX)) {
+    bool_ret = true;
+  }
+  return bool_ret;
+}
+
+inline int convert_to_flashback_block(const char *log_dir,
+                                      const block_id_t  block_id,
+                                      char *buf,
+                                      const int64_t buf_len)
+{
+  int64_t pos = 0;
+  return databuff_printf(buf, buf_len, pos, "%s/%lu%s", log_dir,
+          block_id, FLASHBACK_SUFFIX);
 }
 
 inline int convert_to_tmp_block(const char *log_dir,
@@ -257,9 +313,13 @@ struct TimeoutChecker
 inline bool palf_reach_time_interval(const int64_t interval, int64_t &warn_time)
 {
   bool bool_ret = false;
-  if ((common::ObTimeUtility::current_time() - warn_time >= interval) ||
+  if ((ObClockGenerator::getClock() - warn_time >= interval) ||
       common::OB_INVALID_TIMESTAMP == warn_time) {
+<<<<<<< HEAD
     warn_time = common::ObTimeUtility::current_time();
+=======
+    warn_time = ObClockGenerator::getClock();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     bool_ret = true;
   }
   return bool_ret;
@@ -283,30 +343,74 @@ int block_id_to_tmp_string(const block_id_t block_id,
                            char *str,
                            const int64_t str_len);
 
+int block_id_to_flashback_string(const block_id_t block_id,
+																 char *str,
+																 const int64_t str_len);
+
 int convert_sys_errno();
 
-class GetBlockIdRangeFunctor : public ObBaseDirFunctor
+bool is_number(const char *);
+
+class GetBlockCountFunctor : public ObBaseDirFunctor
 {
 public:
-  GetBlockIdRangeFunctor(const char *dir)
-    : dir_(dir),
-      min_block_id_(LOG_INVALID_BLOCK_ID),
-      max_block_id_(LOG_INVALID_BLOCK_ID)
+  GetBlockCountFunctor(const char *dir)
+    : dir_(dir), count_(0)
   {
   }
-  virtual ~GetBlockIdRangeFunctor() = default;
+  virtual ~GetBlockCountFunctor() = default;
+
+  int func(const dirent *entry) override final;
+	int64_t get_block_count() {return count_;}
+private:
+  const char *dir_;
+	int64_t count_;
+
+  DISALLOW_COPY_AND_ASSIGN(GetBlockCountFunctor);
+};
+
+class TrimLogDirectoryFunctor : public ObBaseDirFunctor
+{
+public:
+  TrimLogDirectoryFunctor(const char *dir, ILogBlockPool *log_block_pool)
+    : dir_(dir),
+      min_block_id_(LOG_INVALID_BLOCK_ID),
+      max_block_id_(LOG_INVALID_BLOCK_ID),
+      log_block_pool_(log_block_pool)
+  {
+  }
+  virtual ~TrimLogDirectoryFunctor() = default;
 
   int func(const dirent *entry) override final;
   block_id_t get_min_block_id() const { return min_block_id_; }
   block_id_t get_max_block_id() const { return max_block_id_; }
 private:
+	int rename_flashback_to_normal_(const char *file_name);
+  int try_to_remove_block_(const int dir_fd, const char *file_name);
   const char *dir_;
   block_id_t min_block_id_;
   block_id_t max_block_id_;
+  ILogBlockPool *log_block_pool_;
 
-  DISALLOW_COPY_AND_ASSIGN(GetBlockIdRangeFunctor);
+  DISALLOW_COPY_AND_ASSIGN(TrimLogDirectoryFunctor);
 };
 int reuse_block_at(const int fd, const char *block_path);
+
+enum PurgeThrottlingType
+{
+  INVALID_PURGE_TYPE = 0,
+  PURGE_BY_RECONFIRM = 1,
+  PURGE_BY_CHECK_BARRIER_CONDITION = 2,
+  PURGE_BY_PRE_CHECK_FOR_CONFIG = 3,
+  PURGE_BY_CHECK_SERVERS_LSN_AND_VERSION = 4,
+  PURGE_BY_GET_MC_REQ = 5,
+  PURGE_BY_NOTIFY_FETCH_LOG = 6,
+  MAX_PURGE_TYPE
+};
+
+bool need_force_purge(PurgeThrottlingType type);
+
+const char *get_purge_throttling_type_str(PurgeThrottlingType type);
 } // end namespace palf
 } // end namespace oceanbase
 

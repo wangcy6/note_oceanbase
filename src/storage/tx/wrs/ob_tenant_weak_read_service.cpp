@@ -144,10 +144,12 @@ void ObTenantWeakReadService::wait()
 
 void ObTenantWeakReadService::destroy()
 {
-  LOG_INFO("tenant weak read service destroy", K_(tenant_id));
+  if (inited_) {
+    LOG_INFO("tenant weak read service destroy", K_(tenant_id));
 
-  cluster_service_.destroy();
+    cluster_service_.destroy();
 
+<<<<<<< HEAD
   inited_ = false;
   tenant_id_ = OB_INVALID_ID;
   wrs_rpc_ = NULL;
@@ -165,6 +167,26 @@ void ObTenantWeakReadService::destroy()
   force_self_check_ = false;
   server_version_epoch_tstamp_ = 0;
   TG_DESTROY(tg_id_);
+=======
+    inited_ = false;
+    tenant_id_ = OB_INVALID_ID;
+    wrs_rpc_ = NULL;
+    self_.reset();
+    last_refresh_locaction_cache_tstamp_ = 0;
+    last_post_cluster_heartbeat_tstamp_ = 0;
+    post_cluster_heartbeat_count_ = 0;
+    last_succ_cluster_heartbeat_tstamp_ = 0;
+    succ_cluster_heartbeat_count_ = 0;
+    cluster_heartbeat_interval_ = 0;
+    cluster_service_master_.reset();
+    last_self_check_tstamp_ = 0;
+    last_generate_cluster_version_tstamp_ = 0;
+    local_cluster_version_.reset();
+    force_self_check_ = false;
+    server_version_epoch_tstamp_ = 0;
+    TG_DESTROY(tg_id_);
+  }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 }
 
 SCN ObTenantWeakReadService::get_server_version() const
@@ -205,7 +227,7 @@ int ObTenantWeakReadService::get_cluster_version_internal_(SCN &version,
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(! inited_)) {
     ret = OB_NOT_INIT;
-  } else if (OB_FAIL(cluster_service_.get_version(version))) {
+  } else if (OB_FAIL(cluster_service_.get_cluster_version(version))) {
     LOG_WARN("get weak read cluster version fail", KR(ret), K(version), K(tenant_id_));
     if (OB_NEED_RETRY == ret) {
       // self may be WRS Leader while not ready, need retry
@@ -304,11 +326,25 @@ int ObTenantWeakReadService::update_server_version_with_part_info(const int64_t 
 }
 
 int ObTenantWeakReadService::generate_server_version(const int64_t epoch_tstamp,
-    const bool need_print_status)
+                                                     const bool need_print_status)
 {
+<<<<<<< HEAD
   SCN base_version_when_no_valid_partition = ObWeakReadUtil::generate_min_weak_read_version(tenant_id_);
     return  svr_version_mgr_.generate_new_version(tenant_id_, epoch_tstamp,
         base_version_when_no_valid_partition, need_print_status);
+=======
+  int ret = OB_SUCCESS;
+  SCN base_version_when_no_valid_partition;
+  if (OB_FAIL(ObWeakReadUtil::generate_min_weak_read_version(tenant_id_, base_version_when_no_valid_partition))) {
+    TRANS_LOG(WARN, "generate min weak read version error", K(ret), K_(tenant_id));
+  } else {
+    ret = svr_version_mgr_.generate_new_version(tenant_id_,
+                                                epoch_tstamp,
+                                                base_version_when_no_valid_partition,
+                                                need_print_status);
+  }
+  return ret;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 }
 
 void ObTenantWeakReadService::get_weak_read_stat(ObTenantWeakReadStat &wrs_stat) const
@@ -350,7 +386,7 @@ void ObTenantWeakReadService::get_weak_read_stat(ObTenantWeakReadStat &wrs_stat)
   wrs_stat.self_ = self_;
 
   // cluster info
-  cluster_service_.get_version(current_cluster_version, min_cluster_version, max_cluster_version);
+  cluster_service_.get_cluster_version(current_cluster_version, min_cluster_version, max_cluster_version);
   wrs_stat.cluster_version_ = current_cluster_version;
   wrs_stat.cluster_version_delta_ = in_service? (cur_tstamp - wrs_stat.cluster_version_.convert_to_ts(ignore_invalid)):0;
   wrs_stat.min_cluster_version_ = min_cluster_version;
@@ -427,14 +463,14 @@ void ObTenantWeakReadService::process_cluster_heartbeat_rpc_cb(
     int64_t cur_tstamp = ObTimeUtility::current_time();
     int64_t delta =  cur_tstamp - last_succ_cluster_heartbeat_tstamp_;
     if (delta > 500 * 1000L) {
-      LOG_WARN("tenant weak read service cluster heartbeat cost too much time",
+      LOG_WARN_RET(OB_ERR_UNEXPECTED, "tenant weak read service cluster heartbeat cost too much time",
           K(tenant_id_), K(delta), K(last_succ_cluster_heartbeat_tstamp_));
     }
 
     ATOMIC_INC(&succ_cluster_heartbeat_count_);
     ATOMIC_SET(&last_succ_cluster_heartbeat_tstamp_, cur_tstamp);
   } else {
-    LOG_WARN("tenant weak read service cluster heartbeat RPC fail", K(rcode), K(tenant_id_),
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "tenant weak read service cluster heartbeat RPC fail", K(rcode), K(tenant_id_),
         K(dst), "cluster_service_tablet_id", cluster_service_.get_cluster_service_tablet_id());
     // force refresh cluster service master
     refresh_cluster_service_master_();
@@ -502,7 +538,7 @@ void ObTenantWeakReadService::print_stat_()
 
   svr_version_mgr_.get_version(sv);
   if (in_cluster_service) {
-    get_cluster_version_err = cluster_service_.get_version(cluster_version, min_cluster_version,
+    get_cluster_version_err = cluster_service_.get_cluster_version(cluster_version, min_cluster_version,
         max_cluster_version);
   }
 
@@ -531,7 +567,7 @@ void ObTenantWeakReadService::do_thread_task_(const int64_t begin_tstamp,
     int64_t &last_print_stat_ts)
 {
   bool need_print = false;
-  static const int64_t PRINT_INTERVAL = 500 * 1000L;
+  static const int64_t PRINT_INTERVAL = 5 * 1000 * 1000L;
   if (REACH_TIME_INTERVAL(PRINT_INTERVAL)) {
     need_print = true;
   } else {
@@ -632,7 +668,7 @@ int ObTenantWeakReadService::scan_all_ls_(storage::ObLSService *ls_svr)
       if (cur_time - start_time > 10000) {
         // too many ls, time cost too much in single scan
         // need sleep to prevent CPU cost too much
-        // https://work.aone.alibaba-inc.com/issue/23432662
+        //
         const uint32_t sleep_time = 1000; // 1ms
         ob_usleep(sleep_time); // 1ms
         start_time = cur_time + sleep_time;
@@ -849,7 +885,7 @@ bool ObTenantWeakReadService::need_generate_cluster_version_(const int64_t cur_t
 // need force self check
 // if need retry and affected_row is 0 in persisting __all_weak_read_service
 // need restart service
-// bug: https://aone.alibaba-inc.com/issue/20791083
+// bug:
 bool ObTenantWeakReadService::need_force_self_check_(int ret,
     int64_t affected_rows,
     bool &need_stop_service)
@@ -869,7 +905,7 @@ void ObTenantWeakReadService::generate_cluster_version_()
 {
   int ret = OB_SUCCESS;
   int64_t affected_rows = 0;
-  if (OB_FAIL(cluster_service_.update_version(affected_rows))) {
+  if (OB_FAIL(cluster_service_.update_cluster_version(affected_rows))) {
     bool need_stop_service = false;
     bool need_self_check = need_force_self_check_(ret, affected_rows, need_stop_service);
     if (need_self_check) {
@@ -900,9 +936,6 @@ int ObTenantWeakReadService::mtl_init(ObTenantWeakReadService* &twrs)
   } else if (OB_ISNULL(mysql_proxy) || OB_ISNULL(wrs)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("modules not ready, unexpected", KR(ret), K(mysql_proxy), K(wrs));
-  } else if (OB_ISNULL(twrs = OB_NEW(ObTenantWeakReadService, ObModIds::OB_WRS_TENANT_SERVICE))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_ERROR("allocate memory for ObTenantWeakReadService fail", KR(ret));
   } else if (OB_FAIL(twrs->init(tenant_id, *mysql_proxy, wrs->get_wrs_rpc(), self))) {
     LOG_ERROR("init tenant weak read service instance fail", KR(ret), K(tenant_id), K(mysql_proxy),
         K(wrs), K(self));
@@ -915,14 +948,6 @@ int ObTenantWeakReadService::mtl_init(ObTenantWeakReadService* &twrs)
     twrs = NULL;
   }
   return ret;
-}
-
-void ObTenantWeakReadService::mtl_destroy(ObTenantWeakReadService* &twrs)
-{
-  if (NULL != twrs) {
-    OB_DELETE(ObTenantWeakReadService, unused, twrs);
-    twrs = NULL;
-  }
 }
 
 /////////////////////////// ObTenantWeakReadService::ModuleInfo ////////////////////////////

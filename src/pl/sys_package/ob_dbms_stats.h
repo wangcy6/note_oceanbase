@@ -18,6 +18,7 @@
 #include "sql/engine/ob_exec_context.h"
 #include "pl/ob_pl_type.h"
 #include "share/stat/ob_dbms_stats_preferences.h"
+#include "share/stat/ob_opt_stat_gather_stat.h"
 
 namespace oceanbase
 {
@@ -237,17 +238,21 @@ public:
                                 common::ObObj &result);
 
   static int parse_method_opt(sql::ObExecContext &ctx,
+                              ObIAllocator *allocator,
                               ObIArray<ObColumnStatParam> &column_params,
-                              const ObString &method_opt);
+                              const ObString &method_opt,
+                              bool &use_size_auto);
 
   static int parser_for_all_clause(const ParseNode *for_all_node,
-                                   ObIArray<ObColumnStatParam> &column_params);
+                                   ObIArray<ObColumnStatParam> &column_params,
+                                   bool &use_size_auto);
 
   static int parser_for_columns_clause(const ParseNode *for_col_node,
                                        ObIArray<ObColumnStatParam> &column_params,
                                        common::ObIArray<ObString> &record_cols);
 
-  static int parse_partition_name(const share::schema::ObTableSchema *&table_schema,
+  static int parse_partition_name(ObExecContext &ctx,
+                                  const share::schema::ObTableSchema *&table_schema,
                                   const ObObjParam &part_name,
                                   ObTableStatParam &param);
 
@@ -333,6 +338,9 @@ public:
                                      const share::schema::ObTableSchema &schema,
                                      ObIArray<ObColumnStatParam> &column_params);
 
+  static bool check_column_validity(const share::schema::ObTableSchema &tab_schema,
+                                   const share::schema::ObColumnSchemaV2 &col_schema);
+
   static int set_default_column_params(ObIArray<ObColumnStatParam> &column_params);
 
   static int parse_size_clause(const ParseNode *node, MethodOptSizeConf &size_opt);
@@ -359,10 +367,15 @@ public:
                                   common::ObIArray<PartInfo> &part_infos,
                                   common::ObIArray<PartInfo> &subpart_infos,
                                   common::ObIArray<int64_t> &part_ids,
-                                  common::ObIArray<int64_t> &subpart_ids);
+                                  common::ObIArray<int64_t> &subpart_ids,
+                                  OSGPartMap *part_map = NULL);
 
-  static int update_stat_cache(obrpc::ObCommonRpcProxy *proxy,
-                               const ObTableStatParam &param);
+  static int get_part_ids_from_schema(const share::schema::ObTableSchema *table_schema,
+                                      common::ObIArray<ObObjectID> &target_part_ids);
+
+  static int update_stat_cache(const uint64_t rpc_tenant_id,
+                               const ObTableStatParam &param,
+                               ObOptStatRunningMonitor *running_monitor = NULL);
 
   static int parse_set_table_stat_options(ObExecContext &ctx,
                                           const ObObjParam &stattab,
@@ -409,24 +422,14 @@ public:
                                       ObIArray<PartInfo> &new_subpart_infos,
                                       bool &is_subpart_name);
 
-  static int get_part_infos(const share::schema::ObTableSchema &schema,
-                            ObIArray<PartInfo> &part_infos,
-                            ObIArray<PartInfo> &subpart_infos,
-                            ObIArray<int64_t> &part_ids,
-                            ObIArray<int64_t> &subpart_ids);
-
-  static int get_subpart_infos(const ObTableSchema &table_schema,
-                               const ObPartition *part,
-                               ObIArray<PartInfo> &subpart_infos,
-                               ObIArray<int64_t> &subpart_ids);
-
   static int flush_database_monitoring_info(sql::ObExecContext &ctx,
                                             sql::ParamStore &params,
                                             common::ObObj &result);
 
   static int process_not_size_manual_column(sql::ObExecContext &ctx, ObTableStatParam &table_param);
 
-  static int parse_set_partition_name(const share::schema::ObTableSchema *&table_schema,
+  static int parse_set_partition_name(ObExecContext &ctx,
+                                      const share::schema::ObTableSchema *&table_schema,
                                       const ObObjParam &part_name,
                                       ObTableStatParam &param);
 
@@ -435,39 +438,50 @@ public:
                                             common::ObObj &result);
 
   static int get_need_statistics_tables(sql::ObExecContext &ctx,
-                                        ObIArray<StatTable> &user_missing_tables,
-                                        ObIArray<StatTable> &user_stale_tables,
-                                        ObIArray<StatTable> &sys_missing_tables,
-                                        ObIArray<StatTable> &sys_stale_tables);
+                                        ObGatherTableStatsHelper &helper);
 
   static int get_table_stale_percent(sql::ObExecContext &ctx,
                                      const uint64_t tenant_id,
                                      const share::schema::ObTableSchema &table_schema,
                                      const double stale_percent_threshold,
-                                     StatTable &stat_table);
+                                     StatTable &stat_table,
+                                     bool &is_big_table);
 
   static int gather_tables_stats_with_default_param(ObExecContext &ctx,
-                                                    const bool need_sort,
-                                                    const int64_t start_time,
-                                                    const int64_t duration_time,
-                                                    ObIArray<StatTable> &stat_tables,
-                                                    int64_t &succeed_count,
-                                                    int64_t &failed_count);
+                                                    ObGatherTableStatsHelper &helper,
+                                                    ObOptStatTaskInfo &task_info);
 
   static int gather_table_stats_with_default_param(ObExecContext &ctx,
-                                                   const int64_t start_time,
                                                    const int64_t duration_time,
-                                                   const StatTable &stat_table);
+                                                   const StatTable &stat_table,
+                                                   ObOptStatTaskInfo &task_info);
 
   static int set_param_global_part_id(ObExecContext &ctx,
                                       ObTableStatParam &param,
                                       bool is_data_table = false,
-                                      const int64_t data_table_id = -1);
+                                      const int64_t data_table_id = -1,
+                                      share::schema::ObPartitionLevel data_table_level
+                                          = share::schema::ObPartitionLevel::PARTITION_LEVEL_ZERO);
+
+  static int get_table_partition_map(const ObTableSchema &table_schema,
+                                     OSGPartMap &part_map);
+
+  static int init_gather_task_info(ObExecContext &ctx,
+                                   ObOptStatGatherType type,
+                                   int64_t start_time,
+                                   int64_t task_table_count,
+                                   ObOptStatTaskInfo &task_info);
+
+  static int get_table_stale_percent_threshold(sql::ObExecContext &ctx,
+                                               const uint64_t tenant_id,
+                                               const uint64_t table_id,
+                                               double &stale_percent_threshold);
 
 private:
   static int check_statistic_table_writeable(sql::ObExecContext &ctx);
 
-  static int parse_column_info(const ObObjParam &column_name,
+  static int parse_column_info(sql::ObExecContext &ctx,
+                               const ObObjParam &column_name,
                                ObTableStatParam &param);
 
   static int parse_stat_category(const ObString &stat_category);
@@ -480,30 +494,32 @@ private:
                                            ObIArray<uint64_t> &table_ids);
 
   static int get_new_stat_pref(ObExecContext &ctx,
+                               common::ObIAllocator &allocator,
                                ObString &opt_name,
                                ObString &opt_value,
                                bool is_global_prefs,
                                ObStatPrefs *&stat_pref);
 
-  static int get_table_stale_percent_threshold(sql::ObExecContext &ctx,
-                                               const uint64_t tenant_id,
-                                               const StatTable &stat_table,
-                                               double &stale_percent_threshold);
+  static int convert_vaild_ident_name(common::ObIAllocator &allocator,
+                                      const common::ObDataTypeCastParams &dtc_params,
+                                      ObString &ident_name,
+                                      bool need_extra_conv = false);
 
-  static void try_caseup(ObCollationType cs_type, ObString &str_val);
 
   static int get_common_table_stale_percent(sql::ObExecContext &ctx,
                                             const uint64_t tenant_id,
                                             const share::schema::ObTableSchema &table_schema,
                                             const ObIArray<ObPartitionStatInfo> &partition_stat_infos,
-                                            StatTable &stat_table);
+                                            StatTable &stat_table,
+                                            bool &is_big_table);
 
   static int get_user_partition_table_stale_percent(sql::ObExecContext &ctx,
                                                     const uint64_t tenant_id,
                                                     const share::schema::ObTableSchema &table_schema,
                                                     const double stale_percent_threshold,
                                                     const ObIArray<ObPartitionStatInfo> &partition_stat_infos,
-                                                    StatTable &stat_table);
+                                                    StatTable &stat_table,
+                                                    bool &is_big_table);
 
   static bool is_table_gather_global_stats(const int64_t global_id,
                                            const ObIArray<ObPartitionStatInfo> &partition_stat_infos,
@@ -523,16 +539,26 @@ private:
                                    const int64_t table_id,
                                    ObIArray<ObAuxTableMetaInfo> &index_infos);
 
+  static int get_table_partition_infos(const ObTableSchema &table_schema,
+                                       ObIArray<PartInfo> &partition_infos);
+
   static int get_index_schema(sql::ObExecContext &ctx,
+                              common::ObIAllocator &allocator,
                               const int64_t data_table_id,
                               const bool is_sensitive_compare,
                               ObString &index_name,
                               const share::schema::ObTableSchema *&index_schema);
 
-  static int get_table_partition_infos(const ObTableSchema &table_schema,
-                                       ObIArray<PartInfo> &partition_infos);
-
   static bool is_func_index(const ObTableStatParam &index_param);
+
+
+  static bool need_gather_index_stats(const ObTableStatParam &table_param);
+
+  static int resovle_granularity(ObGranularityType granu_type,
+                                 const bool use_size_auto,
+                                 ObTableStatParam &param);
+
+  static void decide_modified_part(ObTableStatParam &param, const bool cascade_parts);
 
 };
 

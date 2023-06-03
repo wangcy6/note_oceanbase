@@ -12,6 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_PARSER
 #include "ob_fast_parser.h"
+#include "sql/udr/ob_udr_struct.h"
 #include "share/ob_define.h"
 #include "lib/ash/ob_active_session_guard.h"
 #include "lib/worker.h"
@@ -30,26 +31,54 @@ do { \
 } while (0)
 
 int ObFastParser::parse(const common::ObString &stmt,
-                        const bool enable_batched_multi_stmt,
+                        const FPContext &fp_ctx,
+                        common::ObIAllocator &allocator,
                         char *&no_param_sql,
                         int64_t &no_param_sql_len,
                         ParamList *&param_list,
-                        int64_t &param_num,
-                        ObCollationType connection_collation,
-                        common::ObIAllocator &allocator,
-                        ObSQLMode sql_mode /* default = 0*/)
+                        int64_t &param_num)
 {
   ObActiveSessionGuard::get_stat().in_parse_ = true;
   int ret = OB_SUCCESS;
   if (!lib::is_oracle_mode()) {
-    ObFastParserMysql fp(allocator, connection_collation, enable_batched_multi_stmt, sql_mode);
+    ObFastParserMysql fp(allocator, fp_ctx);
     if (OB_FAIL(fp.parse(stmt, no_param_sql, no_param_sql_len, param_list, param_num))) {
       LOG_WARN("failed to fast parser", K(stmt));
     }
   } else {
-    ObFastParserOracle fp(allocator, connection_collation, enable_batched_multi_stmt);
+    ObFastParserOracle fp(allocator, fp_ctx);
     if (OB_FAIL(fp.parse(stmt, no_param_sql, no_param_sql_len, param_list, param_num))) {
       LOG_WARN("failed to fast parser", K(stmt));
+    }
+  }
+  ObActiveSessionGuard::get_stat().in_parse_ = false;
+  return ret;
+}
+
+int ObFastParser::parse(const common::ObString &stmt,
+                        const FPContext &fp_ctx,
+                        common::ObIAllocator &allocator,
+                        char *&no_param_sql,
+                        int64_t &no_param_sql_len,
+                        ParamList *&param_list,
+                        int64_t &param_num,
+                        ObQuestionMarkCtx &ctx)
+{
+  ObActiveSessionGuard::get_stat().in_parse_ = true;
+  int ret = OB_SUCCESS;
+  if (!lib::is_oracle_mode()) {
+    ObFastParserMysql fp(allocator, fp_ctx);
+    if (OB_FAIL(fp.parse(stmt, no_param_sql, no_param_sql_len, param_list, param_num))) {
+      LOG_WARN("failed to fast parser", K(stmt));
+    } else {
+      ctx = fp.get_question_mark_ctx();
+    }
+  } else {
+    ObFastParserOracle fp(allocator, fp_ctx);
+    if (OB_FAIL(fp.parse(stmt, no_param_sql, no_param_sql_len, param_list, param_num))) {
+      LOG_WARN("failed to fast parser", K(stmt));
+    } else {
+      ctx = fp.get_question_mark_ctx();
     }
   }
   ObActiveSessionGuard::get_stat().in_parse_ = false;
@@ -75,12 +104,12 @@ inline int64_t ObFastParserBase::ObRawSql::strncasecmp(
 
 ObFastParserBase::ObFastParserBase(
   ObIAllocator &allocator,
-  const ObCollationType connection_collation,
-  const bool enable_batched_multi_stmt) :
+  const FPContext fp_ctx) :
   no_param_sql_(nullptr), no_param_sql_len_(0),
   param_num_(0), is_oracle_mode_(false),
-  is_batched_multi_stmt_split_on_(enable_batched_multi_stmt),
-  is_mysql_compatible_comment_(false),
+  is_batched_multi_stmt_split_on_(fp_ctx.enable_batched_multi_stmt_),
+  is_udr_mode_(fp_ctx.is_udr_mode_),
+  def_name_ctx_(fp_ctx.def_name_ctx_),
   cur_token_begin_pos_(0), copy_begin_pos_(0), copy_end_pos_(0),
   tmp_buf_(nullptr), tmp_buf_len_(0), last_escape_check_pos_(0),
   param_node_list_(nullptr), tail_param_node_(nullptr),
@@ -88,11 +117,12 @@ ObFastParserBase::ObFastParserBase(
   parse_next_token_func_(nullptr), process_idf_func_(nullptr)
 {
 	question_mark_ctx_.count_ = 0;
+  question_mark_ctx_.capacity_ = 0;
   question_mark_ctx_.by_ordinal_ = false;
   question_mark_ctx_.by_name_ = false;
   question_mark_ctx_.name_ = nullptr;
-  charset_type_ = ObCharset::charset_type_by_coll(connection_collation);
-  charset_info_ = ObCharset::get_charset(connection_collation);
+  charset_type_ = ObCharset::charset_type_by_coll(fp_ctx.conn_coll_);
+  charset_info_ = ObCharset::get_charset(fp_ctx.conn_coll_);
 }
 
 int ObFastParserBase::parse(const ObString &stmt,
@@ -158,8 +188,10 @@ inline int64_t ObFastParserBase::is_identifier_flags(const int64_t pos)
     // added here to avoid the next judgment whether it is utf8 char or gbk char
   } else if (CHARSET_UTF8MB4 == charset_type_ || CHARSET_UTF16 == charset_type_) {
     idf_pos = is_utf8_char(pos);
-  } else if (CHARSET_GBK == charset_type_ || CHARSET_GB18030 == charset_type_) {
+  } else if (ObCharset::is_gb_charset(charset_type_)) {
     idf_pos = is_gbk_char(pos);
+  } else if (CHARSET_LATIN1 == charset_type_) {
+    idf_pos = is_latin1_char(pos);
   }
   return idf_pos;
 }
@@ -468,6 +500,15 @@ int ObFastParserBase::process_interval()
     }
   }
   return ret;
+}
+
+inline int64_t ObFastParserBase::is_latin1_char(const int64_t pos)
+{
+  int64_t idf_pos = -1;
+  if (is_latin1(raw_sql_.char_at(pos))) {
+    idf_pos = pos + 1;
+  }
+  return idf_pos;
 }
 
 // ({U_2}{U}|{U_3}{U}{U}|{U_4}{U}{U}{U}
@@ -784,7 +825,7 @@ inline void ObFastParserBase::reset_parser_node(ParseNode *node)
   node->value_ = INT64_MAX;
   node->str_value_ = nullptr;
   node->str_len_ = 0;
-  node->str_off_ = 0;
+  node->pl_str_off_ = 0;
   node->raw_text_ = nullptr;
   node->text_len_ = 0;
   node->pos_ = 0;
@@ -850,6 +891,25 @@ int64_t ObFastParserBase::get_question_mark(ObQuestionMarkCtx *ctx,
   return idx;
 }
 
+int64_t ObFastParserBase::get_question_mark_by_defined_name(QuestionMarkDefNameCtx *ctx,
+                                                            const char *name,
+                                                            const int64_t name_len)
+{
+  int64_t idx = -1;
+  if (OB_UNLIKELY(NULL == ctx || NULL == name)) {
+    (void)fprintf(stderr, "ERROR question mark ctx or name is NULL\n");
+  } else if (ctx->name_ != NULL) {
+    for (int64_t i = 0; -1 == idx && i < ctx->count_; ++i) {
+      if (NULL == ctx->name_[i]) {
+        (void)fprintf(stderr, "ERROR name_ in question mark ctx is null\n");
+      } else if (0 == STRNCASECMP(ctx->name_[i], name, name_len)) {
+        idx = i;
+      }
+    }
+  }
+  return idx;
+}
+
 inline char* ObFastParserBase::parse_strndup(const char *str, size_t nbyte, char *buf)
 {
   MEMMOVE(buf, str, nbyte);
@@ -883,7 +943,7 @@ char *ObFastParserBase::parse_strdup_with_replace_multi_byte_char(
       } else {
         out_str[len++] = str[i];
       }
-    } else if (CHARSET_GBK == charset_type_ || CHARSET_GB18030 == charset_type_) {
+    } else if (ObCharset::is_gb_charset(charset_type_)) {
       if (i + 1 < dup_len) {
         if (str[i] == (char)0xa1 && str[i+1] == (char)0xa1) {//gbk multi byte space
           out_str[len++] = ' ';
@@ -958,9 +1018,17 @@ int ObFastParserBase::process_hex_number(bool is_quote)
     }
   } else {
     // 0X([0-9A-F])+
-    cur_token_type_ = PARAM_TOKEN;
     while (is_hex(next_ch)) {
       next_ch = raw_sql_.scan();
+    }
+    int64_t next_idf_pos = is_first_identifier_flags(raw_sql_.cur_pos_);
+    if (-1 != next_idf_pos) {
+      // it is possible that the next token is a string and needs to fall back to
+      // the position of quote
+      raw_sql_.cur_pos_ = pos;
+      cur_token_type_ = NORMAL_TOKEN;
+    } else {
+      cur_token_type_ = PARAM_TOKEN;
     }
   }
   if (OB_SUCC(ret) && PARAM_TOKEN == cur_token_type_) {
@@ -1102,8 +1170,10 @@ inline int64_t ObFastParserBase::is_first_identifier_flags(const int64_t pos)
     // added here to avoid the next judgment whether it is utf8 char or gbk char
   } else if (CHARSET_UTF8MB4 == charset_type_ || CHARSET_UTF16 == charset_type_) {
     idf_pos = is_utf8_char(pos);
-  } else if (CHARSET_GBK == charset_type_ || CHARSET_GB18030 == charset_type_) {
+  } else if (ObCharset::is_gb_charset(charset_type_)) {
     idf_pos = is_gbk_char(pos);
+  } else if (CHARSET_LATIN1 == charset_type_) {
+    idf_pos = is_latin1_char(pos);
   }
   return idf_pos;
 }
@@ -1293,8 +1363,11 @@ int ObFastParserBase::process_question_mark()
   cur_token_type_ = PARAM_TOKEN;
   int64_t need_mem_size = FIEXED_PARAM_NODE_SIZE;
   int64_t text_len = raw_sql_.cur_pos_ - cur_token_begin_pos_;
-  // allocate all the memory needed at once
-  if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(need_mem_size)))) {
+  if (question_mark_ctx_.by_name_) {
+    ret = OB_ERR_PARSER_SYNTAX;
+    LOG_WARN("parser syntax error", K(ret), K(raw_sql_.to_string()), K_(raw_sql_.cur_pos));
+  } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(need_mem_size)))) {
+    // allocate all the memory needed at once
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("fail to alloc memory", K(ret), K(need_mem_size));
   } else {
@@ -1305,6 +1378,72 @@ int ObFastParserBase::process_question_mark()
     node->raw_text_ = raw_sql_.ptr(cur_token_begin_pos_);
     node->raw_sql_offset_ = cur_token_begin_pos_;
     lex_store_param(node, buf);
+  }
+  return ret;
+}
+
+int ObFastParserBase::process_ps_statement()
+{
+  int ret = OB_SUCCESS;
+  char *buf = nullptr;
+  cur_token_type_ = PARAM_TOKEN;
+  char ch = raw_sql_.char_at(raw_sql_.cur_pos_);
+  bool is_num = is_digit(ch) ? true : false;
+  if (is_num) { // ":"{int_num}
+    ch = raw_sql_.scan();
+    while (is_digit(ch)) {
+      ch = raw_sql_.scan();
+    }
+  } else {
+    int64_t next_idf_pos = raw_sql_.cur_pos_;
+    while (-1 != (next_idf_pos = is_identifier_flags(next_idf_pos))) {
+      raw_sql_.cur_pos_ = next_idf_pos;
+    }
+  }
+  int64_t need_mem_size = FIEXED_PARAM_NODE_SIZE;
+  int64_t text_len = raw_sql_.cur_pos_ - cur_token_begin_pos_;
+  need_mem_size += (text_len + 1);
+  if (question_mark_ctx_.by_ordinal_) {
+    ret = OB_ERR_PARSER_SYNTAX;
+    LOG_WARN("parser syntax error", K(ret), K(raw_sql_.to_string()), K_(raw_sql_.cur_pos));
+  } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(need_mem_size)))) {
+    // allocate all the memory needed at once
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("fail to alloc memory", K(ret), K(need_mem_size));
+  } else {
+    ParseNode *node = new_node(buf, T_QUESTIONMARK);
+    node->text_len_ = text_len;
+    node->raw_text_ = raw_sql_.ptr(cur_token_begin_pos_);
+    if (is_num) {
+      if (is_udr_mode_) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "question mark by number");
+        LOG_WARN("question mark by number not supported", K(ret));
+      } else {
+        node->value_ = strtoll(&node->raw_text_[1], NULL, 10);
+      }
+    } else {
+      int64_t ind = -1;
+      if (is_udr_mode_ && nullptr != def_name_ctx_) {
+        ind = get_question_mark_by_defined_name(def_name_ctx_, node->raw_text_, text_len);
+      } else {
+        ind = get_question_mark(&question_mark_ctx_, &allocator_,
+                                node->raw_text_, text_len, buf);
+      }
+      node->value_ = ind;
+      // buf points to the beginning of the next available memory
+      buf += text_len + 1;
+      question_mark_ctx_.by_name_ = true;
+    }
+    if (OB_SUCC(ret)) {
+      if (node->value_ < 0) {
+        ret = OB_ERR_PARSER_SYNTAX;
+        LOG_WARN("parser syntax error", K(ret), K(raw_sql_.to_string()), K_(raw_sql_.cur_pos));
+      } else {
+        node->raw_sql_offset_ = cur_token_begin_pos_;
+        lex_store_param(node, buf);
+      }
+    }
   }
   return ret;
 }
@@ -1347,14 +1486,22 @@ int ObFastParserBase::process_double_quote()
 }
 
 // Until "*/" appears, all characters before it should be ignored
-int ObFastParserBase::process_comment_content()
+int ObFastParserBase::process_comment_content(bool is_mysql_comment)
 {
   int ret = OB_SUCCESS;
-  cur_token_type_ = IGNORE_TOKEN;
+  // if is in /*! xxx */ the token type should be normal
+  cur_token_type_ = is_mysql_comment ? NORMAL_TOKEN : IGNORE_TOKEN;
   bool is_match = false;
   char ch = raw_sql_.scan();
   while (!raw_sql_.is_search_end()) {
-    if ('*' == ch && '/' == raw_sql_.peek()) {
+    if (is_mysql_comment && '/' == ch && '*' == raw_sql_.peek()) {
+      raw_sql_.scan();
+      if (OB_FAIL(process_comment_content())) {
+        LOG_WARN("failed to process comment content", K(ret));
+      } else {
+        cur_token_type_ = NORMAL_TOKEN;
+      }
+    } else if ('*' == ch && '/' == raw_sql_.peek()) {
       // scan '\/'
       raw_sql_.scan();
       is_match = true;
@@ -1750,42 +1897,6 @@ inline void ObFastParserBase::append_no_param_sql()
   no_param_sql_[no_param_sql_len_] = '\0';
 }
 
-int ObFastParserMysql::process_ps_statement()
-{
-  int ret = OB_SUCCESS;
-  char *buf = nullptr;
-  cur_token_type_ = PARAM_TOKEN;
-  char ch = raw_sql_.char_at(raw_sql_.cur_pos_);
-  while (is_digit(ch)) {
-    ch = raw_sql_.scan();
-  }
-  int64_t need_mem_size = FIEXED_PARAM_NODE_SIZE;
-  int64_t text_len = raw_sql_.cur_pos_ - cur_token_begin_pos_;
-  need_mem_size += (text_len + 1);
-  // allocate all the memory needed at once
-  if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(need_mem_size)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to alloc memory", K(ret), K(need_mem_size));
-  } else {
-    ParseNode *node = new_node(buf, T_QUESTIONMARK);
-    node->text_len_ = text_len;
-    node->raw_text_ = raw_sql_.ptr(cur_token_begin_pos_);
-    int64_t ind = get_question_mark(&question_mark_ctx_, &allocator_,
-                                    node->raw_text_, text_len, buf);
-    if (-1 == ind) {
-      ret = OB_ERR_PARSER_SYNTAX;
-      LOG_WARN("parser syntax error", K(ret), K(raw_sql_.to_string()), K_(raw_sql_.cur_pos));
-    } else {
-      // buf points to the beginning of the next available memory
-      buf += text_len + 1;
-      node->value_ = ind;
-      node->raw_sql_offset_ = cur_token_begin_pos_;
-      lex_store_param(node, buf);
-    }
-  }
-  return ret;
-}
-
 int ObFastParserMysql::process_zero_identifier()
 {
   int ret = OB_SUCCESS;
@@ -1914,7 +2025,12 @@ int ObFastParserMysql::process_string(const char quote)
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("fail to alloc memory", K(ret), K(need_mem_size));
         } else {
-          ParseNode *node = new_node(buf, T_VARCHAR);
+          ObItemType param_type = T_VARCHAR;
+          if ('n' == raw_sql_.char_at(cur_token_begin_pos_) ||
+              'N' == raw_sql_.char_at(cur_token_begin_pos_)) {
+            param_type = T_NCHAR;
+          }
+          ParseNode *node = new_node(buf, param_type);
           if (NULL != child_node) {
             node->num_child_ = 1;
             node->children_ = child_node;
@@ -1945,20 +2061,9 @@ int ObFastParserMysql::process_identifier_begin_with_n()
       cur_token_type_ = PARAM_TOKEN;
       OZ (add_null_type_node());
     }
+  } else if ('\'' == raw_sql_.char_at(raw_sql_.cur_pos_)) {
+    OZ (process_string('\''));
   } else {
-    bool is_nowait = false;
-    if (CHECK_EQ_STRNCASECMP("o_wait", 6)) {
-      is_nowait = true;
-      cur_token_type_ = PARAM_TOKEN;
-      raw_sql_.scan(6);
-    } else if (CHECK_EQ_STRNCASECMP("owait", 5)) {
-      is_nowait = true;
-      cur_token_type_ = PARAM_TOKEN;
-      raw_sql_.scan(5);
-    }
-    if (is_nowait && OB_FAIL(add_nowait_type_node())) {
-      LOG_WARN("failed to add nowait node info", K(ret));
-    }
   }
   return ret;
 }
@@ -2129,18 +2234,7 @@ int ObFastParserMysql::parse_next_token()
       case '/': {
         if ('*' == raw_sql_.peek()) {
           raw_sql_.scan();
-          if ('!' == raw_sql_.peek()) {
-            is_mysql_compatible_comment_ = true;
-            cur_token_type_ = IGNORE_TOKEN;
-            raw_sql_.scan(1);
-            // if is mysql_compatble_comment with version. e.g., /*!50600 xxx*/ ignore the first five digits.
-            if (is_n_continuous_digits(raw_sql_.raw_sql_, raw_sql_.cur_pos_, raw_sql_.raw_sql_len_, 5)) {
-              raw_sql_.scan(5);
-            }
-            raw_sql_.scan(1);
-          } else {
-            OZ (process_comment_content());
-          }
+          OZ (process_comment_content(('!' == raw_sql_.peek())));
         } else {
           cur_token_type_ = NORMAL_TOKEN;
           raw_sql_.scan();
@@ -2148,14 +2242,8 @@ int ObFastParserMysql::parse_next_token()
         break;
       }
       case '*': {
-        if (is_mysql_compatible_comment_ && '/' == raw_sql_.peek()) {
-          is_mysql_compatible_comment_ = false;
-          cur_token_type_ = IGNORE_TOKEN;
-          raw_sql_.scan(2);
-        } else {
-          cur_token_type_ = NORMAL_TOKEN;
-          raw_sql_.scan();
-        }
+        cur_token_type_ = NORMAL_TOKEN;
+        raw_sql_.scan();
         break;
       }
       case ';': {
@@ -2174,7 +2262,7 @@ int ObFastParserMysql::parse_next_token()
       }
       case ':': {
         // [":"{int_num}]
-        if (is_digit(raw_sql_.peek())) {
+        if (-1 != is_first_identifier_flags(raw_sql_.cur_pos_ + 1) || is_digit(raw_sql_.peek())) {
           raw_sql_.scan();
           OZ (process_ps_statement());
         } else {
@@ -2233,58 +2321,6 @@ int ObFastParserMysql::parse_next_token()
   return ret;
 }
 
-int ObFastParserOracle::process_ps_statement()
-{
-  int ret = OB_SUCCESS;
-  char *buf = nullptr;
-  cur_token_type_ = PARAM_TOKEN;
-  char ch = raw_sql_.char_at(raw_sql_.cur_pos_);
-  bool is_num = is_digit(ch) ? true : false;
-  if (is_num) { // ":"{int_num}
-    ch = raw_sql_.scan();
-    while (is_digit(ch)) {
-      ch = raw_sql_.scan();
-    }
-  } else {
-    int64_t next_idf_pos = raw_sql_.cur_pos_;
-    while (-1 != (next_idf_pos = is_identifier_flags(next_idf_pos))) {
-      raw_sql_.cur_pos_ = next_idf_pos;
-    }
-  }
-  int64_t need_mem_size = FIEXED_PARAM_NODE_SIZE;
-  int64_t text_len = raw_sql_.cur_pos_ - cur_token_begin_pos_;
-  need_mem_size += (text_len + 1);
-  // allocate all the memory needed at once
-  if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(need_mem_size)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to alloc memory", K(ret), K(need_mem_size));
-  } else {
-    ParseNode *node = new_node(buf, T_QUESTIONMARK);
-    node->text_len_ = text_len;
-    node->raw_text_ = raw_sql_.ptr(cur_token_begin_pos_);
-    if (is_num) {
-      node->value_ = strtoll(&node->raw_text_[1], NULL, 10);
-    } else {
-      int64_t ind = get_question_mark(&question_mark_ctx_, &allocator_,
-                                      node->raw_text_, text_len, buf);
-      if (-1 == ind) {
-        ret = OB_ERR_PARSER_SYNTAX;
-        LOG_WARN("parser syntax error", K(ret), K(raw_sql_.to_string()), K_(raw_sql_.cur_pos));
-      } else {
-        question_mark_ctx_.by_name_ = true;
-        node->value_ = ind;
-        // buf points to the beginning of the next available memory
-        buf += text_len + 1;
-      }
-    }
-    if (OB_SUCC(ret)) {
-      node->raw_sql_offset_ = cur_token_begin_pos_;
-      lex_store_param(node, buf);
-    }
-  }
-  return ret;
-}
-
 /**
  * @param [in] : if in_q_quote is true, means that the current token
  * starts with ("N"|"n")?("Q"|"q"){sqbegin}
@@ -2337,6 +2373,7 @@ int ObFastParserOracle::process_string(const bool in_q_quote)
               tmp_buf_ += byte_len;
               tmp_buf_len_ -= (2 * byte_len);
               is_quote_end = true;
+              break;
             } else if (tmp_buf_len_ >= 2 &&
                 ((tmp_buf_[0] == tmp_buf_[tmp_buf_len_ - 1] && tmp_buf_[0] != '(' &&
                 tmp_buf_[0] != '[' && tmp_buf_[0] != '{' && tmp_buf_[0] != '<' &&
@@ -2426,15 +2463,6 @@ int ObFastParserOracle::process_identifier_begin_with_n()
       }
     }
   } else {
-    bool is_nowait = false;
-    if (CHECK_EQ_STRNCASECMP("owait", 5)) {
-      is_nowait = true;
-      cur_token_type_ = PARAM_TOKEN;
-      raw_sql_.scan(5);
-    }
-    if (is_nowait && OB_FAIL(add_nowait_type_node())) {
-      LOG_WARN("failed to add nowait node info", K(ret));
-    }
   }
   return ret;
 }
@@ -2543,6 +2571,8 @@ int ObFastParserOracle::process_identifier(bool is_number_begin)
 int ObFastParserOracle::parse_next_token()
 {
   int ret = OB_SUCCESS;
+  char last_ch;
+  last_ch = '0';
   while (OB_SUCC(ret) && !raw_sql_.is_search_end()) {
     process_leading_space();
     char ch = raw_sql_.char_at(raw_sql_.cur_pos_);
@@ -2615,7 +2645,7 @@ int ObFastParserOracle::parse_next_token()
         break;
       }
       case ':': {
-        if (-1 != is_first_identifier_flags(raw_sql_.cur_pos_ + 1) || is_digit(raw_sql_.peek())) {
+        if ((-1 != is_first_identifier_flags(raw_sql_.cur_pos_ + 1) || is_digit(raw_sql_.peek())) && last_ch != '\'') {
           raw_sql_.scan();
           OZ (process_ps_statement());
         } else {
@@ -2657,6 +2687,7 @@ int ObFastParserOracle::parse_next_token()
         break;
       }
     } // end switch
+    last_ch = ch;
     OX (process_token());
   } // end while
   if (OB_SUCC(ret)) {

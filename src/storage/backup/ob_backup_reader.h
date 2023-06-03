@@ -26,6 +26,10 @@
 #include "storage/blocksstable/ob_sstable_sec_meta_iterator.h"
 #include "storage/meta_mem/ob_tablet_handle.h"
 #include "storage/ob_i_table.h"
+<<<<<<< HEAD
+=======
+#include "storage/blocksstable/ob_shared_macro_block_manager.h"
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 #include "storage/blocksstable/ob_logic_macro_id.h"
 
 namespace oceanbase {
@@ -141,7 +145,11 @@ class ObIMacroBlockBackupReader {
 public:
   ObIMacroBlockBackupReader();
   virtual ~ObIMacroBlockBackupReader();
+<<<<<<< HEAD
   virtual int init(const blocksstable::ObLogicMacroBlockId &logic_id, const blocksstable::MacroBlockId &macro_id) = 0;
+=======
+  virtual int init(const ObBackupMacroBlockId &macro_id) = 0;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   virtual int get_macro_block_data(
       blocksstable::ObBufferReader &buffer_reader, blocksstable::ObLogicMacroBlockId &logic_id) = 0;
   virtual void reset() = 0;
@@ -151,7 +159,11 @@ public:
 protected:
   bool is_inited_;
   blocksstable::ObLogicMacroBlockId logic_id_;
+<<<<<<< HEAD
   blocksstable::MacroBlockId macro_block_id_;
+=======
+  blocksstable::ObBlockInfo block_info_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   DISALLOW_COPY_AND_ASSIGN(ObIMacroBlockBackupReader);
 };
 
@@ -159,7 +171,11 @@ class ObMacroBlockBackupReader : public ObIMacroBlockBackupReader {
 public:
   ObMacroBlockBackupReader();
   virtual ~ObMacroBlockBackupReader();
+<<<<<<< HEAD
   int init(const blocksstable::ObLogicMacroBlockId &logic_id, const blocksstable::MacroBlockId &macro_block_id);
+=======
+  int init(const ObBackupMacroBlockId &macro_id);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   virtual int get_macro_block_data(
       blocksstable::ObBufferReader &buffer_reader, blocksstable::ObLogicMacroBlockId &logic_id) override;
   virtual void reset() override;
@@ -167,7 +183,7 @@ public:
   {
     return LOCAL_MACRO_BLOCK_READER;
   }
-  TO_STRING_KV(K_(logic_id), K_(macro_block_id));
+  TO_STRING_KV(K_(logic_id), K_(block_info));
 
 private:
   int process_();

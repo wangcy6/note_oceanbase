@@ -29,7 +29,8 @@
 #include "sql/das/ob_das_rpc_processor.h"
 #include "storage/tx/ob_trans_rpc.h"
 #include "storage/tx/ob_gts_rpc.h"
-#include "storage/tx/ob_dup_table_rpc.h"
+// #include "storage/tx/ob_dup_table_rpc.h"
+#include "storage/tx/ob_dup_table_base.h"
 #include "storage/tx/ob_ts_response_handler.h"
 #include "storage/tx/wrs/ob_weak_read_service_rpc_define.h"  // weak_read_service
 #include "observer/ob_rpc_processor_simple.h"
@@ -48,6 +49,9 @@
 #include "observer/dbms_job/ob_dbms_job_rpc_processor.h"
 #include "storage/tx_storage/ob_tenant_freezer_rpc.h"
 #include "observer/dbms_scheduler/ob_dbms_sched_job_rpc_processor.h"
+#include "share/detect/ob_detect_rpc_processor.h"
+
+#include "share/external_table/ob_external_table_file_rpc_processor.h"
 
 using namespace oceanbase;
 using namespace oceanbase::observer;
@@ -69,7 +73,11 @@ void oceanbase::observer::init_srv_xlator_for_sys(ObSrvRpcXlator *xlator) {
   RPC_PROCESSOR(ObCheckFrozenVersionP, gctx_);
   RPC_PROCESSOR(ObGetDiagnoseArgsP);
   RPC_PROCESSOR(ObGetMinSSTableSchemaVersionP, gctx_);
+  RPC_PROCESSOR(ObInitTenantConfigP, gctx_);
+  RPC_PROCESSOR(ObGetLeaderLocationsP, gctx_);
   RPC_PROCESSOR(ObBatchBroadcastSchemaP, gctx_);
+  RPC_PROCESSOR(ObRpcSendHeartbeatP, gctx_);
+  RPC_PROCESSOR(ObRpcNotifySwitchLeaderP, gctx_);
 
   // interrupt
   RPC_PROCESSOR(obrpc::ObInterruptProcessor);
@@ -89,6 +97,8 @@ void oceanbase::observer::init_srv_xlator_for_sys(ObSrvRpcXlator *xlator) {
   RPC_PROCESSOR(ObBlacklistReqP);
   RPC_PROCESSOR(ObBlacklistRespP);
 
+  RPC_PROCESSOR(ObDetectRpcP);
+
   // election provided
 //  RPC_PROCESSOR(ObElectionP);
   RPC_PROCESSOR(ObRequestHeartbeatP, gctx_);
@@ -106,6 +116,8 @@ void oceanbase::observer::init_srv_xlator_for_sys(ObSrvRpcXlator *xlator) {
 
   //dbms_scheduler
   RPC_PROCESSOR(ObRpcRunDBMSSchedJobP, gctx_);
+
+  RPC_PROCESSOR(ObRpcGetServerResourceInfoP, gctx_);
 }
 
 void oceanbase::observer::init_srv_xlator_for_schema_test(ObSrvRpcXlator *xlator) {
@@ -123,12 +135,17 @@ void oceanbase::observer::init_srv_xlator_for_transaction(ObSrvRpcXlator *xlator
   RPC_PROCESSOR(ObTxRollbackSPP);
   RPC_PROCESSOR(ObTxKeepaliveP);
   RPC_PROCESSOR(ObTxKeepaliveRespP);
-  RPC_PROCESSOR(ObDupTableLeaseRequestMsgP, gctx_);
-  RPC_PROCESSOR(ObDupTableLeaseResponseMsgP, gctx_);
-  RPC_PROCESSOR(ObRedoLogSyncRequestP, gctx_);
-  RPC_PROCESSOR(ObRedoLogSyncResponseP, gctx_);
-  RPC_PROCESSOR(ObPreCommitRequestP, gctx_);
-  RPC_PROCESSOR(ObPreCommitResponseP, gctx_);
+  //for dup_table
+  // RPC_PROCESSOR(ObDupTableLeaseRequestMsgP, gctx_);
+  // RPC_PROCESSOR(ObDupTableLeaseResponseMsgP, gctx_);
+  // RPC_PROCESSOR(ObRedoLogSyncRequestP, gctx_);
+  // RPC_PROCESSOR(ObRedoLogSyncResponseP, gctx_);
+  RPC_PROCESSOR(ObDupTableLeaseRequestP);
+  RPC_PROCESSOR(ObDupTableTsSyncRequestP);
+  RPC_PROCESSOR(ObDupTableTsSyncResponseP);
+  RPC_PROCESSOR(ObDupTableBeforePrepareRequestP);
+  // RPC_PROCESSOR(ObPreCommitRequestP, gctx_);
+  // RPC_PROCESSOR(ObPreCommitResponseP, gctx_);
   // for xa
   RPC_PROCESSOR(ObTxSubPrepareP);
   RPC_PROCESSOR(ObTxSubPrepareRespP);
@@ -136,6 +153,15 @@ void oceanbase::observer::init_srv_xlator_for_transaction(ObSrvRpcXlator *xlator
   RPC_PROCESSOR(ObTxSubCommitRespP);
   RPC_PROCESSOR(ObTxSubRollbackP);
   RPC_PROCESSOR(ObTxSubRollbackRespP);
+  // for standby
+  RPC_PROCESSOR(ObTxAskStateP);
+  RPC_PROCESSOR(ObTxAskStateRespP);
+  RPC_PROCESSOR(ObTxCollectStateP);
+  RPC_PROCESSOR(ObTxCollectStateRespP);
+  // for tx free route
+  RPC_PROCESSOR(ObTxFreeRouteCheckAliveP);
+  RPC_PROCESSOR(ObTxFreeRouteCheckAliveRespP);
+  RPC_PROCESSOR(ObTxFreeRoutePushStateP);
 }
 
 void oceanbase::observer::init_srv_xlator_for_clog(ObSrvRpcXlator *xlator) {
@@ -161,6 +187,9 @@ void oceanbase::observer::init_srv_xlator_for_logservice(ObSrvRpcXlator *xlator)
 {
   RPC_PROCESSOR(logservice::LogMembershipChangeP);
   RPC_PROCESSOR(logservice::LogGetPalfStatReqP);
+  RPC_PROCESSOR(logservice::LogGetLeaderMaxScnP);
+  RPC_PROCESSOR(logservice::LogChangeAccessModeP);
+  RPC_PROCESSOR(logservice::LogFlashbackMsgP);
 }
 
 void oceanbase::observer::init_srv_xlator_for_palfenv(ObSrvRpcXlator *xlator)
@@ -185,6 +214,7 @@ void oceanbase::observer::init_srv_xlator_for_palfenv(ObSrvRpcXlator *xlator)
   RPC_PROCESSOR(palf::ElectionAcceptResponseMsgP);
   RPC_PROCESSOR(palf::ElectionChangeLeaderMsgP);
   RPC_PROCESSOR(palf::LogGetMCStP);
+  RPC_PROCESSOR(palf::LogGetStatP);
 }
 
 void oceanbase::observer::init_srv_xlator_for_cdc(ObSrvRpcXlator *xlator)
@@ -205,4 +235,7 @@ void oceanbase::observer::init_srv_xlator_for_executor(ObSrvRpcXlator *xlator) {
   RPC_PROCESSOR(ObDASSyncFetchP);
   RPC_PROCESSOR(ObDASAsyncEraseP);
   RPC_PROCESSOR(ObRpcEraseIntermResultP, gctx_);
+  RPC_PROCESSOR(ObDASAsyncAccessP, gctx_);
+  RPC_PROCESSOR(ObFlushExternalTableKVCacheP);
+  RPC_PROCESSOR(ObAsyncLoadExternalTableFileListP);
 }

@@ -70,7 +70,8 @@ public:
       is_destroyed_(false), tokens_(nullptr), has_running_task_(false), has_running_repeat_task_(false),
       thread_id_(-1), thread_name_(nullptr) {}
   ~ObTimer();
-  int init(const char* thread_name = nullptr);
+  int init(const char* thread_name = nullptr,
+           const ObMemAttr &attr = ObMemAttr(OB_SERVER_TENANT_ID, "timer"));
   bool inited() const;
   int create(); // create new timer thread and start
   int start();  // only start
@@ -106,6 +107,7 @@ private:
   int schedule_task(ObTimerTask &task, const int64_t delay, const bool repeate, const bool is_scheduled_immediately);
   DISALLOW_COPY_AND_ASSIGN(ObTimer);
 private:
+  const static int64_t ELAPSED_TIME_LOG_THREASHOLD = 10 * 60 * 1000 * 1000; // 10 mins
   int32_t tasks_num_;
   int64_t max_task_num_;
   int64_t wakeup_time_;

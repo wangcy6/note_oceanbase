@@ -28,12 +28,17 @@
 #include "sql/engine/user_defined_function/ob_pl_user_defined_agg_function.h"
 #include "sql/engine/expr/ob_expr_dll_udf.h"
 #include "sql/engine/expr/ob_rt_datum_arith.h"
-#include "share/stat/ob_hybrid_hist_estimator.h"
 
 namespace oceanbase
 {
+namespace common
+{
+  class ObHybridHistograms;
+}
 namespace sql
 {
+
+class ObMaterialOpImpl;
 
 struct RemovalInfo
 {
@@ -96,7 +101,12 @@ public:
     bucket_num_param_expr_(NULL),
     rollup_idx_(INT64_MAX),
     grouping_idxs_(),
-    group_idxs_()
+    group_idxs_(),
+    format_json_(false),
+    strict_json_(false),
+    absent_on_null_(false),
+    returning_type_(INT64_MAX),
+    with_unique_keys_(false)
   {}
   ObAggrInfo(common::ObIAllocator &alloc)
   : expr_(NULL),
@@ -119,7 +129,12 @@ public:
     pl_result_type_(),
     bucket_num_param_expr_(NULL),
     grouping_idxs_(),
-    group_idxs_()
+    group_idxs_(),
+    format_json_(false),
+    strict_json_(false),
+    absent_on_null_(false),
+    returning_type_(INT64_MAX),
+    with_unique_keys_(false)
   {}
   virtual ~ObAggrInfo();
 
@@ -191,6 +206,13 @@ public:
   // for group_id
   // for example: select group_id() from t1 groupby c1, rollup(c1,c2);  the idx of c1 is in group_idxs_;
   ObFixedArray<int64_t, common::ObIAllocator> group_idxs_;
+
+  //used for json aggregate function in oracle mode
+  bool format_json_;
+  bool strict_json_;
+  bool absent_on_null_;
+  int64_t returning_type_;
+  bool with_unique_keys_;
 };
 
 typedef common::ObFixedArray<ObAggrInfo, common::ObIAllocator> AggrInfoFixedArray;
@@ -271,6 +293,7 @@ public:
     DECLARE_VIRTUAL_TO_STRING;
   protected:
     common::ObIAllocator &alloc_;
+    ObMonitorNode op_monitor_info_;
   public:
     // for distinct calculate may be replace by hash based distinct in the future.
     ObUniqueSortImpl *unique_sort_op_;
@@ -338,10 +361,10 @@ public:
     int rewind();
     bool empty() const { return 0 == row_count_; }
     bool is_iterated() const { return iter_idx_ > 0; }
-    int get_row_count() const { return row_count_; }
+    int64_t get_row_count() const { return row_count_; }//TODO(jiangxiu.wt): fix it in previous versions
     ObDatum *&get_separator_datum() { return separator_datum_; }
     int reserve_bool_mark_count(int64_t count) { return bool_mark_.reserve(count); }
-    int get_bool_mark_size() { return bool_mark_.count(); }
+    int64_t get_bool_mark_size() { return bool_mark_.count(); }//TODO(jiangxiu.wt): fix it in previous versions
     int get_bool_mark(int64_t col_index, bool &is_bool);
     int set_bool_mark(int64_t col_index, bool is_bool);
     DECLARE_VIRTUAL_TO_STRING;
@@ -355,6 +378,49 @@ public:
     ObSortOpImpl *sort_op_;
     ObDatum *separator_datum_;
     common::ObFixedArray<bool, common::ObIAllocator> bool_mark_;
+  };
+
+  class HybridHistExtraResult : public ExtraResult
+  {
+  public:
+    explicit HybridHistExtraResult(common::ObIAllocator &alloc)
+      : ExtraResult(alloc),
+        sort_row_count_(0),
+        material_row_count_(0),
+        sort_op_(nullptr),
+        mat_op_(nullptr)
+    {}
+    virtual ~HybridHistExtraResult();
+    void reuse_self();
+    virtual void reuse() override;
+
+    int init(const uint64_t tenant_id, const ObAggrInfo &aggr_info,
+             ObEvalCtx &eval_ctx, const bool need_rewind,
+             ObIOEventObserver *io_event_observer, ObSqlWorkAreaProfile &profile,
+             ObMonitorNode &op_monitor_info);
+
+    int add_sort_row(const ObIArray<ObExpr *> &expr, ObEvalCtx &eval_ctx);
+    int add_sort_row(const ObChunkDatumStore::StoredRow &sr);
+    int get_next_row_from_sort(const ObChunkDatumStore::StoredRow *&sr);
+    int finish_add_sort_row();
+    int add_material_row(const ObDatum *src_datums,
+                         const int64_t datum_cnt,
+                         const int64_t extra_size,
+                         const ObChunkDatumStore::StoredRow *&store_row);
+    int get_next_row_from_material(const ObChunkDatumStore::StoredRow *&sr);
+    int finish_add_material_row();
+
+    // bool empty() const { return 0 == row_count_; }
+    int64_t get_sort_row_count() const { return sort_row_count_; }
+    int64_t get_material_row_count() const { return material_row_count_; }
+    DECLARE_VIRTUAL_TO_STRING;
+
+  public:
+    int64_t sort_row_count_;
+    int64_t material_row_count_;
+
+    ObSortOpImpl *sort_op_;
+    ObMaterialOpImpl *mat_op_;
   };
 
   struct DllUdfExtra : public ExtraResult
@@ -377,9 +443,13 @@ public:
     : tiny_num_int_(0),
       extra_(NULL),
       iter_result_(),
-      flags_(0)
+      flags_(0),
+      collect_buf_(NULL),
+      collect_buf_len_(0),
+      advance_collect_result_()
     {
       iter_result_.set_null();
+      advance_collect_result_.set_null();
     }
     ~AggrCell();
 
@@ -406,12 +476,25 @@ public:
                                           ? (iter_result_.ptr_ - 2 * sizeof(int64_t)) : nullptr; }
     inline void set_buf(char *buf) { iter_result_.ptr_ = buf + 2 * sizeof(int64_t); }
     int64_t to_string(char *buf, const int64_t buf_len) const;
+    int deep_copy_advance_collect_result(const ObDatum &datum, ObIAllocator &alloc);
+    ObDatum &get_advance_collect_result() { return advance_collect_result_; }
+    void set_need_advance_collect() { need_advance_collect_ = true; }
+    bool get_need_advance_collect() const { return need_advance_collect_; }
+    void set_is_advance_evaluated()  { is_advance_evaluated_ = true; }
+    bool get_is_advance_evaluated() const { return is_advance_evaluated_; }
     inline void reuse(const bool release_mem = true)
     {
       UNUSED(release_mem);
       tiny_num_int_ = 0;
       flags_ = 0;
       iter_result_.set_null();
+      if (NULL != extra_) {
+        extra_->reuse();
+      }
+      advance_collect_result_.set_null();
+    }
+    inline void reuse_extra()
+    {
       if (NULL != extra_) {
         extra_->reuse();
       }
@@ -432,9 +515,13 @@ public:
       struct {
         int32_t is_tiny_num_used_ : 1;
         int32_t is_evaluated_ : 1;
+        int32_t need_advance_collect_ : 1;
+        int32_t is_advance_evaluated_ : 1;
       };
     };
-
+    char *collect_buf_;
+    int64_t collect_buf_len_;
+    ObDatum advance_collect_result_;
   };
 
 
@@ -458,6 +545,9 @@ public:
     uint16_t get_batch_index(uint16_t i) const { return selector_array_[i]; }
     int add_batch(const ObIArray<ObExpr *> *param_exprs, ObSortOpImpl *unique_sort_op,
                   GroupConcatExtraResult *extra_info, ObEvalCtx &eval_ctx) const;
+    int add_batch(const ObIArray<ObExpr *> *param_exprs,
+                  HybridHistExtraResult *extra_info,
+                  ObEvalCtx &eval_ctx) const;
     TO_STRING_KV(K_(count));
     const ObBatchRows *brs_;
     const uint16_t *selector_array_;
@@ -491,6 +581,9 @@ public:
     uint16_t get_batch_index(uint16_t i) const { return i; }
     int add_batch(const ObIArray<ObExpr *> *param_exprs, ObSortOpImpl *unique_sort_op,
                   GroupConcatExtraResult *extra_info, ObEvalCtx &eval_ctx) const;
+    int add_batch(const ObIArray<ObExpr *> *param_exprs,
+                  HybridHistExtraResult *extra_info,
+                  ObEvalCtx &eval_ctx) const;
     TO_STRING_KV(K_(begin_pos), K_(end_pos));
     const ObBatchRows *brs_;
     uint16_t begin_pos_;
@@ -530,7 +623,9 @@ public:
 public:
   ObAggregateProcessor(ObEvalCtx &eval_ctx,
                        ObIArray<ObAggrInfo> &aggr_infos,
-                       const lib::ObLabel &label);
+                       const lib::ObLabel &label,
+                       ObMonitorNode &op_monitor_info,
+                       const int64_t tenant_id);
   ~ObAggregateProcessor() { destroy(); };
 
   int init();
@@ -559,6 +654,7 @@ public:
                            const int64_t output_batch_size,
                            ObBatchRows &output_brs,
                            int64_t &cur_group_id);
+  int advance_collect_result(int64_t cur_group_id);
   int process_distinct_batch(const int64_t group_id,
                             AggrCell &aggr_cell,
                             const ObAggrInfo &aggr_info,
@@ -603,7 +699,7 @@ public:
                             const bool release_mem = true);
   inline int get_group_row(const int64_t group_id, GroupRow *&group_row)
   { return group_rows_.at(group_id, group_row); }
-  inline int get_group_rows_count() const
+  inline int64_t get_group_rows_count() const//TODO(jiangxiu.wt): fix it in previous versions
   { return group_rows_.count(); }
   inline int swap_group_row(const int a, const int b) // dangerous
   {
@@ -654,12 +750,24 @@ public:
   {
     io_event_observer_ = observer;
   }
+  // used in optimizer statistic gathering.
+  static int llc_add_value(const uint64_t value, const common::ObString &llc_bitmap_buf);
+  inline void set_op_eval_infos(ObIArray<ObEvalInfo *> *eval_infos)
+  {
+    op_eval_infos_ = eval_infos;
+  }
   inline ObIArray<ObAggrInfo> &get_aggr_infos() { return aggr_infos_; }
   int single_row_agg(GroupRow &group_row, ObEvalCtx &eval_ctx);
   int single_row_agg_batch(GroupRow **group_rows, ObEvalCtx &eval_ctx, const int64_t batch_size, const ObBitVector *skip);
-  int fast_single_row_agg(ObEvalCtx &eval_ctx);
+  // deal with a single aggr info
+  int fast_single_row_agg(ObEvalCtx &eval_ctx, ObAggrInfo &aggr_info);
+  // deal with all aggr infos
+  int fast_single_row_agg(ObEvalCtx &eval_ctx, ObIArray<ObAggrInfo> &aggr_infos);
   int fast_single_row_agg_batch(ObEvalCtx &eval_ctx, const int64_t batch_size, const ObBitVector *skip);
   inline void set_support_fast_single_row_agg(const bool flag) { support_fast_single_row_agg_ = flag; }
+  void set_need_advance_collect() { need_advance_collect_ = true; }
+  bool get_need_advance_collect() const { return need_advance_collect_; }
+  static int llc_add_value(const uint64_t value, char *llc_bitmap_buf, int64_t size);
 private:
   template <typename T>
   int inner_process_batch(GroupRow &group_rows, T &selector, int64_t start_idx, int64_t end_idx);
@@ -734,6 +842,7 @@ private:
     const ObAggrInfo &aggr_info,
     const int64_t max_cnt);
   int extend_concat_str_buf(const ObString &pad_str,
+                            const ObCollationType cs_type,
                             const int64_t pos,
                             const int64_t group_concat_cur_row_num,
                             int64_t &append_len,
@@ -822,13 +931,15 @@ private:
   int init_topk_fre_histogram_item(const ObAggrInfo &aggr_info,
                                     ObTopKFrequencyHistograms *topk_fre_hist);
   int get_top_k_fre_hist_result(ObTopKFrequencyHistograms &top_k_fre_hist,
+                                bool has_lob_header,
                                 ObDatum &result_datum);
 
   int compute_hybrid_hist_result(const ObAggrInfo &aggr_info,
-                                 GroupConcatExtraResult *&extra,
+                                 HybridHistExtraResult *&extra,
                                  ObDatum &result);
 
-  int get_hybrid_hist_result(ObHybridHistograms &hybrid_hist,
+  int get_hybrid_hist_result(ObHybridHistograms *hybrid_hist,
+                             bool has_lob_header,
                              ObDatum &result_datum);
 
   int get_json_arrayagg_result(const ObAggrInfo &aggr_info,
@@ -837,6 +948,27 @@ private:
   int get_json_objectagg_result(const ObAggrInfo &aggr_info,
                                 GroupConcatExtraResult *&extra,
                                 ObDatum &concat_result);
+  int get_ora_json_arrayagg_result(const ObAggrInfo &aggr_info,
+                                   GroupConcatExtraResult *&extra,
+                                   ObDatum &concat_result);
+  int get_ora_json_objectagg_result(const ObAggrInfo &aggr_info,
+                                   GroupConcatExtraResult *&extra,
+                                   ObDatum &concat_result);
+
+  int get_ora_xmlagg_result(const ObAggrInfo &aggr_info,
+                            GroupConcatExtraResult *&extra,
+                            ObDatum &concat_result);
+
+  int check_key_valid(common::hash::ObHashSet<ObString> &view_key_names, const ObString& key);
+
+  OB_INLINE void clear_op_evaluated_flag()
+  {
+    if (OB_NOT_NULL(op_eval_infos_)) {
+      for (int i = 0; i < op_eval_infos_->count(); i++) {
+        op_eval_infos_->at(i)->clear_evaluated_flag();
+      }
+    }
+  }
 
   // HyperLogLogCount-related functions
   int llc_init(AggrCell &aggr_cell);
@@ -850,10 +982,10 @@ private:
    * @param[out] has_null_cell 为true如果该行某列为NULL值
    * @return 计算出的hash值，如果传出的has_null_cell为true那么这个值无效
    */
-  static uint64_t llc_calc_hash_value(const ObChunkDatumStore::StoredRow &stored_row,
-                                      const ObIArray<ObExpr *> &param_exprs,
-                                      bool &has_null_cell);
-  static int llc_add_value(const uint64_t value, const common::ObString &llc_bitmap_buf);
+  static int llc_calc_hash_value(const ObChunkDatumStore::StoredRow &stored_row,
+                                 const ObIArray<ObExpr *> &param_exprs,
+                                 bool &has_null_cell,
+                                 uint64_t &hash_value);
   static int llc_add(ObDatum &result, const ObDatum &new_value);
   void set_expr_datum_null(ObExpr *expr);
 
@@ -918,6 +1050,10 @@ private:
   ObIOEventObserver *io_event_observer_;
   RemovalInfo removal_info_;
   bool support_fast_single_row_agg_;
+  ObIArray<ObEvalInfo *> *op_eval_infos_;
+  ObSqlWorkAreaProfile profile_;
+  ObMonitorNode &op_monitor_info_;
+  bool need_advance_collect_;
 };
 
 struct ObAggregateCalcFunc
@@ -952,7 +1088,10 @@ OB_INLINE bool ObAggregateProcessor::need_extra_info(const ObExprOperatorType ex
     case T_FUN_HYBRID_HIST:
     case T_FUN_TOP_FRE_HIST:
     case T_FUN_JSON_ARRAYAGG:
+    case T_FUN_ORA_JSON_ARRAYAGG:
     case T_FUN_JSON_OBJECTAGG:
+    case T_FUN_ORA_JSON_OBJECTAGG:
+    case T_FUN_ORA_XMLAGG:
     {
       need_extra = true;
       break;

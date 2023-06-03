@@ -15,7 +15,7 @@
 #include "lib/ob_define.h"
 #include "lib/ob_errno.h"
 #include "lib/utility/ob_macro_utils.h"
-#include "logservice/restoreservice/ob_log_archive_piece_mgr.h"
+#include "ob_log_archive_piece_mgr.h"
 #include "ob_remote_log_source_allocator.h"    // ObResSrcAlloctor
 #include "share/ob_define.h"
 #include <cstdint>
@@ -27,7 +27,7 @@ using namespace share;
 namespace logservice
 {
 // =========================== ObRemoteLogParent ==============================//
-ObRemoteLogParent::ObRemoteLogParent(const ObLogArchiveSourceType &type, const share::ObLSID &ls_id) :
+ObRemoteLogParent::ObRemoteLogParent(const ObLogRestoreSourceType &type, const share::ObLSID &ls_id) :
   ls_id_(ls_id),
   type_(type),
   upper_limit_scn_(),
@@ -40,25 +40,34 @@ ObRemoteLogParent::ObRemoteLogParent(const ObLogArchiveSourceType &type, const s
 ObRemoteLogParent::~ObRemoteLogParent()
 {
   ls_id_.reset();
+<<<<<<< HEAD
   type_ = ObLogArchiveSourceType::INVALID;
+=======
+  type_ = ObLogRestoreSourceType::INVALID;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   upper_limit_scn_.reset();
   to_end_ = false;
   end_fetch_scn_.reset();
   end_lsn_.reset();
 }
 
-const char *ObRemoteLogParent::get_source_type_str(const ObLogArchiveSourceType &type) const
+const char *ObRemoteLogParent::get_source_type_str(const ObLogRestoreSourceType &type) const
 {
-  return share::ObLogArchiveSourceItem::get_source_type_str(type);
+  return share::ObLogRestoreSourceItem::get_source_type_str(type);
 }
 
+<<<<<<< HEAD
 void ObRemoteLogParent::set_to_end(const bool is_to_end, const SCN &scn)
+=======
+bool ObRemoteLogParent::set_to_end(const SCN &scn)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
-  if (is_to_end && ! to_end_) {
+  if (scn >= upper_limit_scn_) {
     to_end_ = true;
     end_fetch_scn_ = scn;
     CLOG_LOG(INFO, "set_to_end succ", KPC(this));
   }
+  return to_end_;
 }
 
 void ObRemoteLogParent::base_copy_to_(ObRemoteLogParent &other)
@@ -99,15 +108,15 @@ void ObRemoteLogParent::get_error_info(share::ObTaskId &trace_id, int &ret_code,
 
 // =========================== ObRemoteSerivceParent ==============================//
 ObRemoteSerivceParent::ObRemoteSerivceParent(const share::ObLSID &ls_id) :
-  ObRemoteLogParent(ObLogArchiveSourceType::SERVICE, ls_id),
-  server_()
+  ObRemoteLogParent(ObLogRestoreSourceType::SERVICE, ls_id),
+  attr_()
 {}
 
 ObRemoteSerivceParent::~ObRemoteSerivceParent()
 {
-  server_.reset();
 }
 
+<<<<<<< HEAD
 int ObRemoteSerivceParent::set(const ObAddr &addr, const SCN &end_scn)
 {
   int ret = OB_SUCCESS;
@@ -118,32 +127,52 @@ int ObRemoteSerivceParent::set(const ObAddr &addr, const SCN &end_scn)
   } else {
     server_ = addr;
     upper_limit_scn_ = end_scn;
+=======
+int ObRemoteSerivceParent::set(const RestoreServiceAttr &attr, const SCN &end_scn)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(! attr.is_valid() || !end_scn.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    CLOG_LOG(WARN, "invalid argument", K(end_scn), K(attr));
+  } else if (attr == attr_ && end_scn == upper_limit_scn_) {
+  } else if (!(attr == attr_) && OB_FAIL(attr_.assign(attr))) {
+    CLOG_LOG(WARN, "attr assign failed", K(attr));
+  } else {
+    upper_limit_scn_ = end_scn;
+    to_end_ = end_fetch_scn_ >= upper_limit_scn_;
+    CLOG_LOG(INFO, "set service parent succ", KPC(this));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
   return ret;
 }
 
+<<<<<<< HEAD
 void ObRemoteSerivceParent::get(ObAddr &addr, SCN &end_scn)
 {
   addr = server_;
+=======
+void ObRemoteSerivceParent::get(RestoreServiceAttr *&attr, SCN &end_scn)
+{
+  attr = &attr_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   end_scn = upper_limit_scn_;
 }
 
 int ObRemoteSerivceParent::deep_copy_to(ObRemoteLogParent &other)
 {
   ObRemoteSerivceParent &dst = static_cast<ObRemoteSerivceParent &>(other);
-  dst.server_ = server_;
   base_copy_to_(other);
-  return OB_SUCCESS;
+  return dst.attr_.assign(attr_);
 }
 
 bool ObRemoteSerivceParent::is_valid() const
 {
-  return is_valid_() && server_.is_valid();
+  return is_valid_() && attr_.is_valid();
 }
 
 // =========================== ObRemoteLocationParent ==============================//
 ObRemoteLocationParent::ObRemoteLocationParent(const share::ObLSID &ls_id) :
-  ObRemoteLogParent(ObLogArchiveSourceType::LOCATION, ls_id),
+  ObRemoteLogParent(ObLogRestoreSourceType::LOCATION, ls_id),
   root_path_(),
   piece_context_()
 {}
@@ -177,7 +206,12 @@ int ObRemoteLocationParent::set(const share::ObBackupDest &dest, const SCN &end_
     } else {
       const SCN pre_upper_scn = upper_limit_scn_;
       upper_limit_scn_ = end_scn;
+<<<<<<< HEAD
       CLOG_LOG(INFO, "upper limit scn increase", K(dest), K(pre_upper_scn), K(end_scn));
+=======
+      to_end_ = end_fetch_scn_ >= upper_limit_scn_;
+      CLOG_LOG(INFO, "upper limit ts increase", K(dest), K(pre_upper_scn), K(end_scn));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     }
   } else if (OB_FAIL(root_path_.deep_copy(dest))) {
     CLOG_LOG(WARN, "root path deep copy failed", K(ret), K(dest), KPC(this));
@@ -185,6 +219,10 @@ int ObRemoteLocationParent::set(const share::ObBackupDest &dest, const SCN &end_
     CLOG_LOG(WARN, "piece context init failed", K(ret), KPC(this));
   } else {
     upper_limit_scn_ = end_scn;
+<<<<<<< HEAD
+=======
+    to_end_ = end_fetch_scn_ >= upper_limit_scn_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     CLOG_LOG(INFO, "add location source succ", K(ret), KPC(this));
   }
   return ret;
@@ -219,18 +257,20 @@ int ObRemoteLocationParent::update_locate_info(ObRemoteLogParent &source)
   } else if (dst.root_path_ != root_path_) {
     // parent changed
     CLOG_LOG(WARN, "parent changed, just skip", K(dst), KPC(this));
+  } else if (OB_UNLIKELY(! dst.piece_context_.is_valid())) {
+    CLOG_LOG(TRACE, "piece_context not valid, just skip", K(dst));
   } else if (OB_FAIL(dst.piece_context_.deep_copy_to(piece_context_))) {
     CLOG_LOG(WARN, "deep copy to piece context failed", K(ret));
     piece_context_.reset_locate_info();
   } else {
-    CLOG_LOG(TRACE, "update logcate info succ", KPC(this));
+    CLOG_LOG(TRACE, "update locate info succ", KPC(this));
   }
   return ret;
 }
 
 // =========================== ObRemoteRawPathParent ============================== //
 ObRemoteRawPathParent::ObRemoteRawPathParent(const share::ObLSID &ls_id) :
-  ObRemoteLogParent(ObLogArchiveSourceType::RAWPATH, ls_id),
+  ObRemoteLogParent(ObLogRestoreSourceType::RAWPATH, ls_id),
   paths_(),
   piece_index_(0),
   min_file_id_(0),
@@ -262,6 +302,10 @@ int ObRemoteRawPathParent::set(DirArray &array, const SCN &end_scn)
   } else {
     paths_.assign(array);
     upper_limit_scn_ = end_scn;
+<<<<<<< HEAD
+=======
+    to_end_ = end_fetch_scn_ <= end_scn;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
   CLOG_LOG(INFO, "add_source dest", KPC(this));
   return ret;
@@ -304,10 +348,7 @@ ObRemoteSourceGuard::ObRemoteSourceGuard() :
 
 ObRemoteSourceGuard::~ObRemoteSourceGuard()
 {
-  if (NULL != source_) {
-    ObResSrcAlloctor::free(source_);
-    source_ = NULL;
-  }
+  reset();
 }
 
 int ObRemoteSourceGuard::set_source(ObRemoteLogParent *source)
@@ -320,6 +361,14 @@ int ObRemoteSourceGuard::set_source(ObRemoteLogParent *source)
     source_ = source;
   }
   return ret;
+}
+
+void ObRemoteSourceGuard::reset()
+{
+  if (NULL != source_) {
+    ObResSrcAlloctor::free(source_);
+    source_ = NULL;
+  }
 }
 
 } // namespace logservice

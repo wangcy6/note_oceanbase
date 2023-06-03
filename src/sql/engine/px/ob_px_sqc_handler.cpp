@@ -20,6 +20,7 @@
 #include "sql/optimizer/ob_storage_estimator.h"
 #include "sql/ob_sql_trans_control.h"
 #include "storage/tx/ob_trans_service.h"
+#include "share/detect/ob_detect_manager_utils.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
@@ -101,31 +102,17 @@ int ObPxSqcHandler::pre_acquire_px_worker(int64_t &reserved_thread_count)
   int ret = OB_SUCCESS;
   int64_t max_thread_count = sqc_init_args_->sqc_.get_max_task_count();
   int64_t min_thread_count = sqc_init_args_->sqc_.get_min_task_count();
-  const int64_t rpc_worker_count = 1;
-  const bool rpc_worker = sqc_init_args_->sqc_.is_rpc_worker();
-  if (rpc_worker) {
-    // 单线程单dfo的情况下
-    reserved_px_thread_count_ = 0;
-    if (OB_FAIL(notifier_->set_expect_worker_count(reserved_px_thread_count_))) {
-      LOG_WARN("failed to set expect worker count", K(ret), K(reserved_px_thread_count_));
-    } else {
-      reserved_thread_count = rpc_worker_count;
-      sqc_init_args_->sqc_.set_task_count(rpc_worker_count);
-    }
-  } else {
     // 提前在租户中预留线程数，用于 px worker 执行
-    ObPxSubAdmission::acquire(max_thread_count, min_thread_count, reserved_px_thread_count_);
-    reserved_px_thread_count_ = reserved_px_thread_count_ < min_thread_count ? 0 : reserved_px_thread_count_;
-    if (OB_FAIL(notifier_->set_expect_worker_count(reserved_px_thread_count_))) {
-      LOG_WARN("failed to set expect worker count", K(ret), K(reserved_px_thread_count_));
-    } else {
-      sqc_init_args_->sqc_.set_task_count(reserved_px_thread_count_);
-      reserved_thread_count = reserved_px_thread_count_;
-    }
+  ObPxSubAdmission::acquire(max_thread_count, min_thread_count, reserved_px_thread_count_);
+  reserved_px_thread_count_ = reserved_px_thread_count_ < min_thread_count ? 0 : reserved_px_thread_count_;
+  if (OB_FAIL(notifier_->set_expect_worker_count(reserved_px_thread_count_))) {
+    LOG_WARN("failed to set expect worker count", K(ret), K(reserved_px_thread_count_));
+  } else {
+    sqc_init_args_->sqc_.set_task_count(reserved_px_thread_count_);
+    reserved_thread_count = reserved_px_thread_count_;
   }
   if (OB_SUCC(ret)) {
-    if (!rpc_worker &&
-        reserved_px_thread_count_ < max_thread_count &&
+    if (reserved_px_thread_count_ < max_thread_count &&
         reserved_px_thread_count_ >= min_thread_count) {
       LOG_INFO("Downgrade px thread allocation",
               K_(reserved_px_thread_count),
@@ -138,7 +125,7 @@ int ObPxSqcHandler::pre_acquire_px_worker(int64_t &reserved_thread_count)
      * sqc handler的引用计数，1为rpc线程, 此时只有rpc线程引用.
      */
     reference_count_ = 1;
-    LOG_TRACE("SQC acquire px worker", K(max_thread_count), K(min_thread_count), K(rpc_worker),
+    LOG_TRACE("SQC acquire px worker", K(max_thread_count), K(min_thread_count),
         K(reserved_px_thread_count_), K(reserved_thread_count));
   }
   return ret;
@@ -153,7 +140,7 @@ void ObPxSqcHandler::release_handler(ObPxSqcHandler *sqc_handler)
 {
   bool all_released = false;
   if (OB_ISNULL(sqc_handler)) {
-    LOG_ERROR("Get null sqc handler", K(sqc_handler));
+    LOG_ERROR_RET(OB_INVALID_ARGUMENT, "Get null sqc handler", K(sqc_handler));
   } else if (FALSE_IT(sqc_handler->release(all_released))) {
   } else if (all_released) {
     IGNORE_RETURN sqc_handler->destroy_sqc();
@@ -239,11 +226,13 @@ int ObPxSqcHandler::copy_sqc_init_arg(int64_t &pos, const char *data_buf, int64_
     LOG_WARN("Sqc handler need to be inited", K(ret));
   } else {
     allocator = &mem_context_->get_arena_allocator();
-    sqc_init_args_->set_deserialize_param(*exec_ctx_, *des_phy_plan_, allocator);
-    if (OB_FAIL(sqc_init_args_->do_deserialize(pos, data_buf, data_len))) {
-      LOG_WARN("Failed to deserialize", K(ret));
+    WITH_CONTEXT(mem_context_) {
+      sqc_init_args_->set_deserialize_param(*exec_ctx_, *des_phy_plan_, allocator);
+      if (OB_FAIL(sqc_init_args_->do_deserialize(pos, data_buf, data_len))) {
+        LOG_WARN("Failed to deserialize", K(ret));
+      }
+      sqc_init_args_->sqc_handler_ = this;
     }
-    sqc_init_args_->sqc_handler_ = this;
   }
   return ret;
 }
@@ -328,7 +317,10 @@ int ObPxSqcHandler::destroy_sqc()
     LOG_WARN("end ddl failed", K(tmp_ret));
     end_ret = OB_SUCCESS == end_ret ? tmp_ret : end_ret;
   }
-
+  if (OB_NOT_NULL(des_phy_plan_) && des_phy_plan_->is_enable_px_fast_reclaim()) {
+    (void) ObDetectManagerUtils::sqc_unregister_check_item_from_dm(
+        sqc_init_args_->sqc_.get_px_detectable_ids().qc_detectable_id_, node_sequence_id_);
+  }
   if (has_flag(OB_SQC_HANDLER_QC_SQC_LINKED)) {
     /**
      * sqc-qc通道的连接是rpc中process的最后一步，如果link成功就会有这个flag。
@@ -339,6 +331,10 @@ int ObPxSqcHandler::destroy_sqc()
      */
     if (OB_FAIL(sub_coord_->report_sqc_finish(end_ret))) {
       LOG_WARN("fail report sqc to qc", K(ret));
+    }
+    if (OB_NOT_NULL(des_phy_plan_) && des_phy_plan_->is_enable_px_fast_reclaim()) {
+      (void) ObDetectManagerUtils::sqc_unregister_detectable_id_from_dm(
+          sqc_init_args_->sqc_.get_px_detectable_ids().sqc_detectable_id_);
     }
     ObPxSqcMeta &sqc = sqc_init_args_->sqc_;
     LOG_TRACE("sqc send report to qc", K(sqc));
@@ -354,9 +350,6 @@ int ObPxSqcHandler::destroy_sqc()
     if (OB_NOT_NULL(ch) && OB_FAIL(dtl::ObDtlChannelGroup::unlink_channel(ci))) {
       LOG_WARN("Failed to unlink channel", K(ret));
     }
-  }
-  if (has_flag(OB_SQC_HANDLER_BLOOM_FILTER_NEED_CLEAR)) {
-    sub_coord_->destroy_bloom_filter();
   }
   return ret;
 }
@@ -391,6 +384,43 @@ void ObPxSqcHandler::check_interrupt()
       ObInterruptUtil::interrupt_tasks(sqc, ret);
     }
   }
+}
+
+int ObPxSqcHandler::thread_count_auto_scaling(int64_t &reserved_px_thread_count)
+{
+  int ret = OB_SUCCESS;
+  /* strategy 1
+   * if single table cannot be divided into much ranges,
+   * the max thread cnt should be less than ranges cnt.
+   */
+  int64_t range_cnt = 0;
+  ObGranulePump &pump = sub_coord_->get_sqc_ctx().gi_pump_;
+  int64_t temp_cnt = reserved_px_thread_count;
+  if (reserved_px_thread_count <= 1 || !sqc_init_args_->sqc_.is_single_tsc_leaf_dfo()) {
+  } else if (OB_ISNULL(sub_coord_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("subcoord is null", K(ret));
+  } else {
+    ObGranulePump &pump = sub_coord_->get_sqc_ctx().gi_pump_;
+    if (OB_FAIL(pump.get_first_tsc_range_cnt(range_cnt))) {
+      LOG_WARN("fail to get first tsc range cnt", K(ret));
+    } else if (0 == range_cnt) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("range cnt equal 0", K(ret));
+    } else {
+      reserved_px_thread_count = min(reserved_px_thread_count, range_cnt);
+      reserved_px_thread_count_ = reserved_px_thread_count;
+      if (temp_cnt > reserved_px_thread_count) {
+        LOG_TRACE("sqc px worker auto-scaling worked", K(temp_cnt), K(range_cnt), K(reserved_px_thread_count));
+      }
+      if (OB_FAIL(notifier_->set_expect_worker_count(reserved_px_thread_count))) {
+        LOG_WARN("failed to set expect worker count", K(ret), K(reserved_px_thread_count_));
+      } else {
+        sqc_init_args_->sqc_.set_task_count(reserved_px_thread_count);
+      }
+    }
+  }
+  return ret;
 }
 
 } // sql

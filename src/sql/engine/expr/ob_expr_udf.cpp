@@ -20,6 +20,8 @@
 #include "sql/ob_spi.h"
 #include "pl/ob_pl.h"
 #include "pl/ob_pl_stmt.h"
+#include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "pl/ob_pl_user_type.h"
 
 namespace oceanbase
 {
@@ -33,7 +35,7 @@ OB_SERIALIZE_MEMBER((ObExprUDF, ObFuncExprOperator),
                      nocopy_params_, subprogram_path_, call_in_sql_, loc_, is_udt_cons_);
 
 ObExprUDF::ObExprUDF(common::ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, T_FUN_UDF, N_UDF, PARAM_NUM_UNKNOWN, NOT_ROW_DIMENSION,
+    : ObFuncExprOperator(alloc, T_FUN_UDF, N_UDF, PARAM_NUM_UNKNOWN, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION,
                          INTERNAL_IN_MYSQL_MODE, INTERNAL_IN_ORACLE_MODE),
       udf_id_(OB_INVALID_ID),
       udf_package_id_(OB_INVALID_ID),
@@ -99,34 +101,45 @@ int ObExprUDF::calc_result_typeN(ObExprResType &type,
   int ret = OB_SUCCESS;
   CK(param_num == params_type_.count());
   if (OB_SUCC(ret)) {
-    for (int64_t i = 0; i < param_num; i++) {
+    for (int64_t i = 0; i < param_num && OB_SUCC(ret); i++) {
       if (params_desc_.at(i).is_out()
           && params_desc_.at(i).is_obj_access_out()) {
         ObObjMeta meta;
         meta.set_ext();
         types[i].set_calc_meta(meta);
       } else {
-        types[i].set_calc_accuracy(params_type_.at(i).get_accuracy());
-        types[i].set_calc_meta(params_type_.at(i).get_obj_meta());
-        if (params_type_.at(i).get_collation_type() == CS_TYPE_ANY) {
-          if (types[i].is_string_or_lob_locator_type()) {
-            types[i].set_calc_collation_type(types[i].get_collation_type());
-          } else {
-            types[i].set_calc_collation_type(type_ctx.get_session()->get_nls_collation());
+        if (udf_package_id_ == T_OBJ_XML
+            && types[i].is_xml_sql_type() && params_type_.at(i).is_string_type()) {
+            ret = OB_ERR_WRONG_FUNC_ARGUMENTS_TYPE;
+            LOG_WARN("ORA-06553:PLS-306:wrong number or types of arguments in call procedure",
+                     K(i), K(udf_package_id_), K(udf_id_), K(types[i]), K(params_type_.at(i)));
+        } else {
+          types[i].set_calc_accuracy(params_type_.at(i).get_accuracy());
+          types[i].set_calc_meta(params_type_.at(i).get_obj_meta());
+          if (params_type_.at(i).get_collation_type() == CS_TYPE_ANY) {
+            if (types[i].is_string_or_lob_locator_type()) {
+              types[i].set_calc_collation_type(types[i].get_collation_type());
+            } else {
+              types[i].set_calc_collation_type(type_ctx.get_session()->get_nls_collation());
+            }
           }
         }
       }
     }
-    type.set_accuracy(result_type_.get_accuracy());
-    type.set_meta(result_type_.get_obj_meta());
-    if (type.get_type() == ObRawType) {
-      type.set_collation_level(CS_LEVEL_NUMERIC);
-    }
-    if (!type.is_ext()) {
-      if (lib::is_oracle_mode()) {
-        type.set_length(OB_MAX_ORACLE_VARCHAR_LENGTH);
-      } else {
-        type.set_length(OB_MAX_VARCHAR_LENGTH);
+    if (OB_SUCC(ret)) {
+      type.set_accuracy(result_type_.get_accuracy());
+      type.set_meta(result_type_.get_obj_meta());
+      if (type.get_type() == ObRawType) {
+        type.set_collation_level(CS_LEVEL_NUMERIC);
+      } else if (type.is_string_or_lob_locator_type() && udf_package_id_ == T_OBJ_XML) {
+        type.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+      }
+      if (!type.is_ext()) {
+        if (lib::is_oracle_mode()) {
+          type.set_length(OB_MAX_ORACLE_VARCHAR_LENGTH);
+        } else {
+          type.set_length(OB_MAX_VARCHAR_LENGTH);
+        }
       }
     }
   }
@@ -344,8 +357,22 @@ int ObExprUDF::process_out_params(const ObObj *objs_stack,
                                          result));
       OX (result.copy_value_or_obj(*obj, true));
       OX (result.set_param_meta());
-    } else {
-      // do nothing ...
+    } else if (params_desc.at(i).is_obj_access_out() &&
+               OB_INVALID_ID != params_desc.at(i).get_package_id() &&
+               OB_INVALID_ID != params_desc.at(i).get_index()) {
+      ObIAllocator *pkg_allocator = NULL;
+      pl::ObPLExecCtx plctx(nullptr, &exec_ctx, nullptr,nullptr,nullptr,nullptr);
+      ObObj &obj = iparams.at(i);
+      OZ (ObSPIService::spi_get_package_allocator(&plctx, params_desc.at(i).get_package_id(), pkg_allocator));
+      if (OB_SUCC(ret) && nullptr != pkg_allocator) {
+        if (obj.is_ext() && obj.get_meta().get_extend_type() != pl::PL_REF_CURSOR_TYPE) {
+          OZ (pl::ObUserDefinedType::deep_copy_obj(*pkg_allocator, obj, obj, true));
+        } else {
+          OZ (deep_copy_obj(*pkg_allocator, obj, obj));
+        }
+      }
+      OZ (ObSPIService::spi_update_package_change_info(&plctx, params_desc.at(i).get_package_id(),
+                                                       params_desc.at(i).get_index()));
     }
   }
   return ret;
@@ -413,66 +440,56 @@ int ObExprUDF::eval_udf(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
   ParamStore *udf_params = nullptr;
   uint64_t udf_ctx_id = static_cast<uint64_t>(expr.expr_ctx_id_);
   ObExprUDFCtx *udf_ctx = nullptr;
-  share::schema::ObSchemaGetterGuard schema_guard;
   ObSQLSessionInfo *session = nullptr;
   ObIAllocator &alloc = ctx.exec_ctx_.get_allocator();
   const ObExprUDFInfo *info = static_cast<ObExprUDFInfo *>(expr.extra_info_);
-  ObObj *objs = nullptr;
-  CK(0 == expr.arg_cnt_ || OB_NOT_NULL(objs = static_cast<ObObj *> (alloc.alloc(expr.arg_cnt_ * sizeof(ObObj)))));
-  CK(OB_NOT_NULL(info));
-  bool is_stack_overflow = false;
-  OZ(check_stack_overflow(is_stack_overflow));
-  if (OB_SUCC(ret) && is_stack_overflow) {
-    ret = OB_SIZE_OVERFLOW;
-    LOG_WARN("too deep recursive",
-             K(ret), K(is_stack_overflow), K(info->udf_package_id_), K(info->udf_id_));
-  }
+
   if (OB_SUCC(ret) && expr.arg_cnt_ != info->params_desc_.count()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("udf parameter number is not equel to params desc count",
              K(ret), K(expr.arg_cnt_), K(info->params_desc_.count()), K(info->params_desc_));
   }
-  CK(OB_NOT_NULL(session = ctx.exec_ctx_.get_my_session()));
-  CK(OB_NOT_NULL(pl_engine = session->get_pl_engine()));
-  if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(expr.eval_param_value(ctx))) {
-    LOG_WARN("failed o eval param value", K(ret));
-  } else if (OB_FAIL(build_udf_ctx(udf_ctx_id, expr.arg_cnt_, ctx.exec_ctx_, udf_ctx))) {
-    LOG_WARN("failed to build_udf_ctx", K(ret), K(udf_ctx_id));
-  } else if (OB_ISNULL(udf_params = udf_ctx->get_param_store())) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("failed to allocate memory", K(ret));
-  }
+
+  CK (OB_NOT_NULL(info));
   OZ (check_types(expr, *info));
-  OZ (fill_obj_stack(expr, ctx, objs));
-  OZ (process_in_params(
-    objs, expr.arg_cnt_, info->params_desc_, info->params_type_, *udf_params, alloc));
-  // replace first param when is udt constructor, 
-  /* for example:
-  * a := demo(3,4) will be rewirte to a :=demo(null, 3, 4) after resolve
-  * here will have to change to a := demo(self, 3, 4), which self is a object type
-  * who's type id is udf_package_id_
-  */
+
+
+  CK (OB_NOT_NULL(session = ctx.exec_ctx_.get_my_session()));
+  CK (OB_NOT_NULL(pl_engine = session->get_pl_engine()));
+  OZ (expr.eval_param_value(ctx));
+  OZ (build_udf_ctx(udf_ctx_id, expr.arg_cnt_, ctx.exec_ctx_, udf_ctx));
+  CK (OB_NOT_NULL(udf_params = udf_ctx->get_param_store()));
+
   if (OB_FAIL(ret)) {
     // do nothing ...
-  } else if (!lib::is_oracle_mode() && info->is_udt_cons_) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpected, udt constructor must be oracle mode", K(ret));
   } else {
     bool need_end_stmt = false;
-    //由于这是临时处理，用中文注释解释，便于理解
-    //根据和Oracle的兼容性，我们认为select pl_udf() from dual也是一种嵌套语句
-    //这里以前认为这种情况不属于嵌套语句，导致跟Oracle的行为存在不兼容
-    //由于begin_nested_session等相关的旧接口还没有去掉
-    //因此在这里特殊处理一下，对这种情况下,在UDF执行前调用session->set_start_stmt()
-    //目的是骗过nested session的一些接口的参数检查，等后续完全去掉nested session相关的接口
-    //这里的特殊处理也会去掉
     stmt::StmtType parent_stmt = ctx.exec_ctx_.get_sql_ctx()->stmt_type_;
     if (!session->has_start_stmt() && stmt::StmtType::T_SELECT == parent_stmt) {
       need_end_stmt = true;
       session->set_start_stmt();
     }
-    if (info->is_udt_cons_) {
+
+    ObEvalCtx::TempAllocGuard memory_guard(ctx);
+    ObArenaAllocator &allocator = memory_guard.get_allocator();
+    int64_t cur_obj_count = 0;
+    if (OB_NOT_NULL(ctx.exec_ctx_.get_pl_ctx())) {
+      cur_obj_count = ctx.exec_ctx_.get_pl_ctx()->get_objects().count();
+    }
+
+    ObObj *objs = nullptr;
+    if (expr.arg_cnt_ > 0) {
+      objs = static_cast<ObObj *> (allocator.alloc(expr.arg_cnt_ * sizeof(ObObj)));
+      if (OB_ISNULL(objs)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("allocate objs memory failed", K(ret));
+      }
+      OZ (fill_obj_stack(expr, ctx, objs));
+      OZ (process_in_params(
+        objs, expr.arg_cnt_, info->params_desc_, info->params_type_, *udf_params, alloc));
+    }
+
+    if (OB_SUCC(ret) && info->is_udt_cons_) {
       pl::ObPLUDTNS ns(*ctx.exec_ctx_.get_sql_ctx()->schema_guard_);
       pl::ObPLDataType pl_type;
       pl_type.set_user_type_id(pl::PL_RECORD_TYPE, info->udf_package_id_);
@@ -480,13 +497,13 @@ int ObExprUDF::eval_udf(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
       CK (0 < udf_params->count());
       OZ (ns.init_complex_obj(alloc, pl_type, udf_params->at(0), false, false));
     }
-    ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
+
     try {
       int64_t package_id = info->is_udt_udf_ ?
            share::schema::ObUDTObjectType::mask_object_id(info->udf_package_id_)
            : info->udf_package_id_;
       OZ(pl_engine->execute(ctx.exec_ctx_,
-                            info->is_called_in_sql_ ? tmp_alloc_g.get_allocator()
+                            info->is_called_in_sql_ ? allocator
                                                     : alloc,
                             package_id,
                             info->udf_id_,
@@ -506,17 +523,22 @@ int ObExprUDF::eval_udf(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
                             tmp_result,
                             package_id);
     } catch(...) {
-//      OZ(after_calc_result(schema_guard, sql_ctx, ctx.exec_ctx_));
       throw;
     }
     if (OB_FAIL(ret)) {
     } else if (info->is_called_in_sql_) {
-      if (tmp_result.is_pl_extend()) {
+      // memory of ref cursor on session, do not copy it.
+      if (tmp_result.is_pl_extend()
+          && tmp_result.get_meta().get_extend_type() != pl::PL_REF_CURSOR_TYPE) {
         OZ (pl::ObUserDefinedType::deep_copy_obj(alloc, tmp_result, result, true));
+        OZ (pl::ObUserDefinedType::destruct_obj(tmp_result, ctx.exec_ctx_.get_my_session()));
+        CK (OB_NOT_NULL(ctx.exec_ctx_.get_pl_ctx()));
+        OX (ctx.exec_ctx_.get_pl_ctx()->reset_obj_range_to_end(cur_obj_count));
+        OZ (ctx.exec_ctx_.get_pl_ctx()->add(result));
       } else {
-        OZ (deep_copy_obj(alloc, tmp_result, result));
+        result = tmp_result;
+        OX (ctx.exec_ctx_.get_pl_ctx()->reset_obj_range_to_end(cur_obj_count));
       }
-      OX (ctx.exec_ctx_.get_pl_ctx()->reset_obj());
     } else {
       result = tmp_result;
     }
@@ -527,40 +549,46 @@ int ObExprUDF::eval_udf(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
         OX (obj_self->set_is_null(false));
       }
     }
-    //兼容oracle udf调用，如果udf是在sql(或pl的sql)中调用，则将错误码OB_READ_NOTHING覆盖为OB_SUCCESS
-    //函数返回结果为null，否则不对错误码进行覆盖
+
     if (OB_READ_NOTHING == ret && info->is_called_in_sql_ && lib::is_oracle_mode()) {
       ret = OB_SUCCESS;
     }
-    if (OB_SUCC(ret) && info->is_called_in_sql_ && lib::is_oracle_mode()) {
-      // UDF 和系统包函数里支持出现最大长度为 32767 byte 的 raw 类型变量。
-      // 但如果 UDF 和系统包函数被 SQL 调用且返回值类型是 raw，则长度不允许超过 2000 byte。
-      if (result.is_raw() && result.get_raw().length() > OB_MAX_ORACLE_RAW_SQL_COL_LENGTH) {
-        ret = OB_ERR_NUMERIC_OR_VALUE_ERROR;
-        ObString err_msg("raw variable length too long");
-        LOG_WARN("raw variable length too long", K(ret), K(result.get_raw().length()));
-        LOG_USER_ERROR(OB_ERR_NUMERIC_OR_VALUE_ERROR, err_msg.length(), err_msg.ptr());
-      }
+    if (OB_SUCC(ret)
+        && info->is_called_in_sql_
+        && result.is_raw() && result.get_raw().length() > OB_MAX_ORACLE_RAW_SQL_COL_LENGTH
+        && lib::is_oracle_mode()) {
+      ret = OB_ERR_NUMERIC_OR_VALUE_ERROR;
+      ObString err_msg("raw variable length too long");
+      LOG_WARN("raw variable length too long", K(ret), K(result.get_raw().length()));
+      LOG_USER_ERROR(OB_ERR_NUMERIC_OR_VALUE_ERROR, err_msg.length(), err_msg.ptr());
     }
-    OZ (process_out_params(objs, expr.arg_cnt_,
-                           *udf_params, alloc,
-                           ctx.exec_ctx_, info->nocopy_params_,
-                           info->params_desc_, info->params_type_));
+    OZ (process_out_params(objs,
+                           expr.arg_cnt_,
+                           *udf_params,
+                           alloc,
+                           ctx.exec_ctx_,
+                           info->nocopy_params_,
+                           info->params_desc_,
+                           info->params_type_));
     if (OB_SUCC(ret)) {
-      //TODO:@peihan.dph
-      //for lob locator type, pl engine return longtext type which is mismatch with datum type
-      //we will solve this mismatch later
       if (!result.is_null()
           && result.get_type() != expr.datum_meta_.type_
           && ObLobType == expr.datum_meta_.type_) {
         ObLobLocator *value = nullptr;
         char *total_buf = NULL;
-        const int64_t total_buf_len = sizeof(ObLobLocator) + result.get_string_len();
-        if (OB_ISNULL(total_buf = expr.get_str_res_mem(ctx, total_buf_len))) {
+        ObString result_data = result.get_string();
+        if (is_lob_storage(result.get_type())) {
+          if (OB_FAIL(sql::ObTextStringHelper::read_real_string_data(&allocator, result, result_data))) {
+            LOG_WARN("failed to get real data for lob", K(ret), K(result));
+          }
+        }
+        const int64_t total_buf_len = sizeof(ObLobLocator) + result_data.length();
+        if (OB_FAIL(ret)) {
+        } else if (OB_ISNULL(total_buf = expr.get_str_res_mem(ctx, total_buf_len))) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("Failed to allocate memory for lob locator", K(ret), K(total_buf_len));
         } else if (FALSE_IT(value = reinterpret_cast<ObLobLocator *> (total_buf))) {
-        } else if (OB_FAIL(value->init(result.get_string()))) {
+        } else if (OB_FAIL(value->init(result_data))) {
           LOG_WARN("Failed to init lob locator", K(ret), K(value));
         } else {
           result.set_lob_locator(*value);
@@ -571,7 +599,15 @@ int ObExprUDF::eval_udf(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
                          K(result.get_type()), K(expr.datum_meta_.type_));
       }
       OZ(res.from_obj(result, expr.obj_datum_map_));
+      if (is_lob_storage(result.get_type())) {
+        OZ(ob_adjust_lob_datum(result, expr.obj_meta_, expr.obj_datum_map_,
+                              ctx.exec_ctx_.get_allocator(), res));
+      }
       OZ(expr.deep_copy_datum(ctx, res));
+
+      if (OB_SUCC(ret) && info->is_udt_cons_) {
+        OZ (pl::ObUserDefinedType::destruct_obj(udf_params->at(0), ctx.exec_ctx_.get_my_session()));
+      }
     }
     if (need_end_stmt) {
       session->set_end_stmt();
@@ -592,8 +628,6 @@ int ObExprUDF::fill_obj_stack(const ObExpr &expr, ObEvalCtx &ctx, ObObj *objs)
     }
   }
   return ret;
-
-
 }
 
 OB_DEF_SERIALIZE(ObExprUDFInfo)

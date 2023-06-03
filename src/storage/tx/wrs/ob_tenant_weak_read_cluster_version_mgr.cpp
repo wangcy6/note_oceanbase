@@ -121,7 +121,11 @@ int ObTenantWeakReadClusterVersionMgr::update_server_version(const common::ObAdd
   return ret;
 }
 
+<<<<<<< HEAD
 SCN ObTenantWeakReadClusterVersionMgr::get_version(const SCN base_version,
+=======
+SCN ObTenantWeakReadClusterVersionMgr::get_cluster_version(const SCN base_version,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     int64_t &skip_server_count,
     const bool force_print) const
 {
@@ -150,7 +154,7 @@ SCN ObTenantWeakReadClusterVersionMgr::get_version(const SCN base_version,
         min_version = version;
       }
     }
-    LOG_DEBUG("[WEAK_READ_SERVER_VERSION_MGR] get version from server", K_(tenant_id), K(i),
+    LOG_DEBUG("[WEAK_READ_SERVER_VERSION_MGR] get cluster version from server", K_(tenant_id), K(i),
         K(need_skip), K(base_version), K(min_version), "server_verion", svr_array_.at(i));
   }
 

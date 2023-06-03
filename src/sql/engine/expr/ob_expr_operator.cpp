@@ -31,6 +31,7 @@
 #include "sql/engine/expr/ob_expr_util.h"
 #include "sql/engine/subquery/ob_subplan_filter_op.h"
 #include "lib/timezone/ob_oracle_format_models.h"
+#include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
 
 namespace oceanbase
@@ -152,7 +153,7 @@ int ObExprOperator::cg_expr(ObExprCGCtx &,
 bool ObExprOperator::is_default_expr_cg() const
 {
   static ObArenaAllocator alloc;
-  static ObExprOperator base(alloc, T_NULL, "fake_null_operator", 0);
+  static ObExprOperator base(alloc, T_NULL, "fake_null_operator", 0, VALID_FOR_GENERATED_COL);
   typedef int (ObExprOperator::*CGFunc)(
       ObExprCGCtx &op_cg_ctx, const ObRawExpr &raw_expr, ObExpr &rt_expr) const;
   union {
@@ -296,8 +297,12 @@ int OB_INLINE ObExprOperator::cast_operand_type(common::ObObj &res_obj,
           cast_ctx,
           res_obj,
           tmp_obj))) {
+<<<<<<< HEAD
         LOG_WARN("fail to convert type", K(ret),
             K(res_type.get_calc_type()), K(res_obj));
+=======
+        LOG_WARN("fail to convert type", K(ret), K(res_type.get_calc_type()));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       } else {
         res_obj = tmp_obj;
       }
@@ -891,8 +896,8 @@ int ObExprOperator::aggregate_string_type_and_charset_oracle(
 
   if (OB_SUCC(ret)) {
     result.set_type_simple(result_type);
-    if (ob_is_large_text(result_type) || ob_is_json(result_type)) {
-      result.set_inrow();
+    if (is_lob_storage(result_type)) {
+      result.set_has_lob_header();
     }
     result.set_collation_type(result_charset);
     result.set_collation_level(CS_LEVEL_IMPLICIT);
@@ -1017,6 +1022,8 @@ int ObExprOperator::is_same_kind_type_for_case(const ObExprResType &type1, const
       match = (type1.get_accuracy() == type2.get_accuracy());
     } else if (ob_is_json(type1.get_type())) {
       match = ob_is_json(type2.get_type());
+    } else if (type1.is_xml_sql_type() || (type1.is_ext() && type1.get_udt_id() == T_OBJ_XML)) {
+      match = type2.is_xml_sql_type() || (type2.is_ext() && type2.get_udt_id() == T_OBJ_XML);
     }
   }
   return ret;
@@ -1135,6 +1142,13 @@ int ObExprOperator::aggregate_result_type_for_merge(
       } else if (ob_is_json(res_type)) {
         type.set_collation_type(CS_TYPE_UTF8MB4_BIN);
         type.set_collation_level(CS_LEVEL_IMPLICIT);
+      } else if (ob_is_geometry(res_type)) {
+        type.set_geometry();
+        type.set_length((ObAccuracy::DDL_DEFAULT_ACCURACY[ObGeometryType]).get_length());
+      } else if (ob_is_user_defined_sql_type(res_type)) {
+        if (OB_FAIL(aggregate_user_defined_sql_type(type, types, param_num))) {
+          LOG_WARN("aggregate_user_defined_sql_type fail", K(ret));
+        }
       }
     }
     LOG_DEBUG("merged type is", K(type), K(is_oracle_mode));
@@ -1348,7 +1362,9 @@ int ObExprOperator::aggregate_numeric_accuracy_for_merge(ObExprResType &type,
     ObScale scale = 0;
     int16_t max_integer_digits = -1;
     int16_t max_decimal_digits = -1;
+    int16_t max_scale_for_real = -1;
     bool has_real_type = false;
+    bool has_unknow_scale = false;
     for (int64_t i = 0; i < param_num && OB_SUCC(ret); ++i) {
       precision = PRECISION_UNKNOWN_YET;
       scale = SCALE_UNKNOWN_YET;
@@ -1357,7 +1373,7 @@ int ObExprOperator::aggregate_numeric_accuracy_for_merge(ObExprResType &type,
         ret = OB_ERR_UNEXPECTED;
         LOG_ERROR("unexpected error. wrong type", K(ret), K(types[i]));
       } else if (ob_is_real_type(types[i].get_type())) {
-        /*https://k3.alibaba-inc.com/issue/8306249
+        /*
           create table sb(a float);
           create table sc(c year);
           insert sb values (1.5);
@@ -1365,6 +1381,8 @@ int ObExprOperator::aggregate_numeric_accuracy_for_merge(ObExprResType &type,
           a union c will result to 1.5 and 1923
         */
         has_real_type = true;
+        precision = types[i].get_precision();
+        scale = types[i].get_scale();
       } else {
         /*
           create table sb(a int(3));//3 ? display width ? precision? length?
@@ -1394,12 +1412,25 @@ int ObExprOperator::aggregate_numeric_accuracy_for_merge(ObExprResType &type,
           max_decimal_digits = scale;
         }
       }
+      if (OB_SUCC(ret)) {
+        if (SCALE_UNKNOWN_YET == scale) {
+          has_unknow_scale = true;
+        } else {
+          max_scale_for_real = MAX(max_scale_for_real, scale);
+        }
+      }
     }
 
     if (OB_FAIL(ret)) {
     } else if (ob_is_real_type(type.get_type()) && has_real_type) {
-      type.set_precision(PRECISION_UNKNOWN_YET);
-      type.set_scale(SCALE_UNKNOWN_YET);
+      if (is_oracle_mode || has_unknow_scale || max_scale_for_real > OB_MAX_DOUBLE_FLOAT_SCALE) {
+        type.set_precision(PRECISION_UNKNOWN_YET);
+        type.set_scale(SCALE_UNKNOWN_YET);
+      } else {
+        precision = static_cast<ObPrecision>(ObMySQLUtil::float_length(scale));
+        type.set_precision(precision);
+        type.set_scale(max_scale_for_real);
+      }
     } else {
       if (max_integer_digits + max_decimal_digits >= 0) {
         precision = static_cast<ObPrecision>(max_integer_digits + max_decimal_digits);
@@ -1427,7 +1458,29 @@ int ObExprOperator::aggregate_extend_accuracy_for_merge(ObExprResType &type,
     for (int64_t i = 0; !find_extend && i < param_num && OB_SUCC(ret); ++i) {
       if (ob_is_extend(types[i].get_type())) {
         find_extend = true;
+        type.set_extend_type(types[i].get_extend_type());
         type.set_accuracy(types[i].get_accuracy().get_accuracy());
+      }
+    }
+  }
+  return ret;
+}
+
+int ObExprOperator::aggregate_user_defined_sql_type(
+    ObExprResType &type,
+    const ObExprResType *types,
+    int64_t param_num)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(types) || OB_UNLIKELY(param_num < 1)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("types is null or param_num is wrong", K(types), K(param_num), K(ret));
+  } else {
+    bool found = false;
+    for (int64_t i = 0; ! found && i < param_num && OB_SUCC(ret); ++i) {
+      if (ob_is_user_defined_sql_type(types[i].get_type())) {
+        found = true;
+        type.set_subschema_id(types[i].get_subschema_id());
       }
     }
   }
@@ -1798,6 +1851,7 @@ bool ObRelationalExprOperator::can_cmp_without_cast(ObExprResType type1,
                                                     const ObSQLSessionInfo &session)
 {
   bool need_no_cast = false;
+  bool has_lob_header = type1.has_lob_header() || type2.has_lob_header();
   UNUSED(session);
   //特殊处理显示调用compare(例如：c1 > c2)，此时enum/set均应该转换成string处理
   //内部比较（order by）,enum/set不需要转换。
@@ -1826,9 +1880,12 @@ bool ObRelationalExprOperator::can_cmp_without_cast(ObExprResType type1,
     } else {
       auto func_ptr = ObExprCmpFuncsHelper::get_eval_expr_cmp_func(type1.get_type(),
                                                                    type2.get_type(),
+                                                                   type1.get_scale(),
+                                                                   type2.get_scale(),
                                                                    cmp_op,
                                                                    lib::is_oracle_mode(),
-                                                                   CS_TYPE_BINARY);
+                                                                   CS_TYPE_BINARY,
+                                                                   has_lob_header);
       need_no_cast = (func_ptr != nullptr);
     }
   }
@@ -1916,6 +1973,32 @@ int ObExprOperator::calc_cmp_type2(ObExprResType &type,
       && type_ != T_OP_IS && type_ != T_OP_IS_NOT) {
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
     LOG_USER_ERROR(OB_ERR_INVALID_TYPE_FOR_OP, ob_obj_type_str(type1.get_type()), ob_obj_type_str(type2.get_type()));
+  } else if ((type1.is_geometry() || type2.is_geometry())
+             && !(type_ == T_OP_EQ
+                  || type_ == T_OP_NE
+                  || type_ == T_OP_NSEQ
+                  || type_ == T_OP_SQ_EQ
+                  || type_ == T_OP_SQ_NE
+                  || type_ == T_OP_SQ_NSEQ
+                  || type_ == T_OP_IS
+                  || type_ == T_OP_IS_NOT)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Incorrect cmp type with geometry arguments", K(type1), K(type2), K(type_), K(ret));
+  } else if (is_oracle_mode()
+             && (type1.is_json() || type2.is_json())
+             && (type_ >= T_OP_EQ && type_ <= T_OP_NE)) {
+    ret = OB_ERR_INVALID_CMP_OP;
+    LOG_WARN("incorrect cmp type with json arguments", K(type1), K(type2), K(type_), K(ret));
+  } else if (is_oracle_mode()
+             && (ob_is_user_defined_type(type1.get_type()) || ob_is_user_defined_type(type2.get_type()))) {
+    // udt tyes not implemented in ORACLE_RELATIONAL_CMP_TYPE curretly
+    if ((ob_is_user_defined_type(type1.get_type()) && ob_is_user_defined_type(type2.get_type()))
+        || (type1.is_null() || type2.is_null())) {
+      ret = OB_ERR_NO_ORDER_MAP_SQL; // oracle error code compability
+    } else {
+      ret = OB_ERR_INVALID_XML_DATATYPE;
+    }
+    LOG_WARN("incorrect cmp type with xml arguments", K(type1), K(type2), K(type_), K(ret));
   } else if (OB_FAIL(ObExprResultTypeUtil::get_relational_cmp_type(cmp_type,
                                                             type1.get_type(),
                                                             type2.get_type()))) {
@@ -2007,6 +2090,9 @@ int ObExprOperator::calc_trig_function_result_type1(ObExprResType &type,
   int ret = OB_SUCCESS;
   if (NOT_ROW_DIMENSION != row_dimension_ || ObMaxType == type1.get_type()) {
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
+  } else if (type1.is_geometry()){
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Incorrect geometry arguments", K(type1), K(ret));
   } else if (!lib::is_oracle_mode()){
     type.set_double();
   } else {
@@ -2035,6 +2121,9 @@ int ObExprOperator::calc_trig_function_result_type2(ObExprResType &type,
     ret = OB_ERR_INVALID_TYPE_FOR_OP; // arithmetic not support row
   } else if (ObMaxType == type1.get_type() || ObMaxType == type2.get_type()) {
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
+  } else if (type1.is_geometry() || type2.is_geometry()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Incorrect geometry arguments", K(type1), K(type2), K(ret));
   } else if (!lib::is_oracle_mode()) {
     type.set_double();
   } else {
@@ -2056,6 +2145,28 @@ int ObExprOperator::calc_trig_function_result_type2(ObExprResType &type,
 ObCastMode ObExprOperator::get_cast_mode() const
 {
   return CM_NONE;
+}
+
+int ObExprOperator::is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const
+{
+  is_valid = is_valid_for_generated_col_;
+  return OB_SUCCESS;
+}
+
+int ObExprOperator::check_first_param_not_time(const common::ObIArray<ObRawExpr *> &exprs, bool &not_time) {
+  int ret = OB_SUCCESS;
+  if (exprs.count() < 1) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected param num", K(ret), K(exprs.count()));
+  } else if (OB_ISNULL(exprs.at(0))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid param", K(ret), K(exprs.at(0)), K(exprs.at(1)));
+  } else if (ObTimeType == exprs.at(0)->get_result_type().get_type()) {
+    not_time = false;
+  } else {
+    not_time = true;
+  }
+  return ret;
 }
 
 ObExpr *ObExprOperator::get_rt_expr(const ObRawExpr &raw_expr) const
@@ -2081,10 +2192,12 @@ int ObRelationalExprOperator::calc_result_type2(ObExprResType &type,
       support = false;
     }
     if (support && type1.is_ext()) {
-      support = type1.get_obj_meta().get_extend_type() == pl::PL_NESTED_TABLE_TYPE;
+      support = (type1.get_obj_meta().get_extend_type() == pl::PL_NESTED_TABLE_TYPE ||
+                 ob_is_xml_pl_type(type1.get_type(), type1.get_udt_id()));
     }
     if (support && type2.is_ext()) {
-      support = type2.get_obj_meta().get_extend_type() == pl::PL_NESTED_TABLE_TYPE;
+      support = (type2.get_obj_meta().get_extend_type() == pl::PL_NESTED_TABLE_TYPE ||
+                 ob_is_xml_pl_type(type2.get_type(), type2.get_udt_id()));
     }
     if (!support) {
       ret = OB_ERR_CALL_WRONG_ARG;
@@ -2096,6 +2209,11 @@ int ObRelationalExprOperator::calc_result_type2(ObExprResType &type,
       type.set_scale(DEFAULT_SCALE_FOR_INTEGER);
       type.set_calc_type(type1.get_calc_type());
     }
+  } else if (lib::is_oracle_mode()
+            && (type1.is_user_defined_sql_type() && type2.is_user_defined_sql_type())) {
+    // other udt types not supported, xmltype does not have order or map member function
+    ret = OB_ERR_NO_ORDER_MAP_SQL;
+    LOG_WARN("cannot ORDER objects without MAP or ORDER method", K(ret));
   } else {
     OZ(deduce_cmp_type(*this, type, type1, type2, type_ctx));
   }
@@ -2121,6 +2239,7 @@ int ObRelationalExprOperator::deduce_cmp_type(const ObExprOperator &expr,
     ObExprOperator::calc_result_flag2(type, type1, type2);
     bool need_no_cast = can_cmp_without_cast(
         type1, type2, get_cmp_op(expr.get_type()), *type_ctx.get_session());
+<<<<<<< HEAD
     if (!need_no_cast && is_mysql_mode()) {
       // to be compatiable with mysql:
       // if c1 is date or datetime, convert 'c1 = c2+1'to cast (c1 as double) = cast (c2+1 as double)
@@ -2132,66 +2251,28 @@ int ObRelationalExprOperator::deduce_cmp_type(const ObExprOperator &expr,
       if (OB_ISNULL(cmp_expr) || OB_ISNULL(date_expr) || OB_ISNULL(other_expr) ) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected null", K(ret), K(cmp_expr), K(date_expr), K(other_expr));
+=======
+    type1.set_calc_type(need_no_cast ? type1.get_type() : cmp_type.get_calc_type());
+    type2.set_calc_type(need_no_cast ? type2.get_type() : cmp_type.get_calc_type());
+    if (ob_is_string_or_lob_type(cmp_type.get_calc_type())) {
+      type1.set_calc_collation_type(cmp_type.get_calc_collation_type());
+      type2.set_calc_collation_type(cmp_type.get_calc_collation_type());
+    } else if (ObRawType == cmp_type.get_calc_type()) {
+      type1.set_calc_collation_type(CS_TYPE_BINARY);
+      type2.set_calc_collation_type(CS_TYPE_BINARY);
+    } else if (is_mysql_mode() && ob_is_double_type(cmp_type.get_calc_type())) {
+      if (ob_is_numeric_tc(type1.get_type_class()) && ob_is_numeric_tc(type2.get_type_class()) &&
+            SCALE_UNKNOWN_YET != type1.get_scale() && SCALE_UNKNOWN_YET != type2.get_scale()) {
+        const ObScale scale = MAX(type1.get_scale(), type2.get_scale());
+        const ObPrecision precision = MAX(type1.get_precision(), type2.get_precision());
+        ObAccuracy calc_acc(precision, scale);
+        type1.set_calc_accuracy(calc_acc);
+        type2.set_calc_accuracy(calc_acc);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       } else {
-        if (T_REF_QUERY == other_expr->get_expr_type()) {
-          const ObQueryRefRawExpr *ref_expr = static_cast<const ObQueryRefRawExpr*>(other_expr);
-          if (OB_ISNULL(ref_expr->get_ref_stmt())) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("unexpected null", K(ret));
-          } else {
-            other_expr = ref_expr->get_ref_stmt()->get_select_item(type_ctx.get_cur_row_idx()).expr_;
-          }
-        } else if (T_OP_ROW == other_expr->get_expr_type()) {
-          other_expr = other_expr->get_param_expr(type_ctx.get_cur_row_idx());
-        }
-        if (OB_FAIL(ret)) {
-        } else if (T_REF_QUERY == date_expr->get_expr_type()) {
-          const ObQueryRefRawExpr *ref_expr = static_cast<const ObQueryRefRawExpr*>(date_expr);
-          if (OB_ISNULL(ref_expr->get_ref_stmt())) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("unexpected null", K(ret));
-          } else {
-            date_expr = ref_expr->get_ref_stmt()->get_select_item(type_ctx.get_cur_row_idx()).expr_;
-          }
-        } else if (T_OP_ROW == date_expr->get_expr_type()) {
-          date_expr = date_expr->get_param_expr(type_ctx.get_cur_row_idx());
-        }
-        if (OB_FAIL(ret)) {
-        } else if (OB_ISNULL(date_expr) || OB_ISNULL(other_expr)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("unexpected null", K(ret), K(date_expr), K(other_expr));
-        } else if (date_expr->get_result_type().get_type() == ObDateType ||
-          date_expr->get_result_type().get_type() == ObDateTimeType) {
-          other_expr_type = other_expr->get_result_type().get_type();
-          is_date_op_other = true;
-        } else if (other_expr->get_result_type().get_type() == ObDateType ||
-          other_expr->get_result_type().get_type() == ObDateTimeType) {
-          const ObRawExpr *tmp_expr = date_expr;
-          date_expr = other_expr;
-          other_expr = tmp_expr;
-          other_expr_type = other_expr->get_result_type().get_type();
-          is_date_op_other = true;
-        } else {
-          //do nothing
-        }
-      }
-      if (OB_SUCC(ret) && is_mysql_mode() && is_date_op_other &&
-          (ob_is_accurate_numeric_type(other_expr_type) || ob_is_real_type(other_expr_type)) &&
-          !(other_expr->is_const_expr() && !date_expr->is_const_expr()) && !other_expr->has_flag(IS_USER_VARIABLE)) {
-        cmp_type.set_calc_type(ObDoubleType);
-        type.set_calc_collation(cmp_type);
-        type.set_calc_type(cmp_type.get_calc_type());
-      }
-    }
-    if (OB_SUCC(ret)) {
-      type1.set_calc_type(need_no_cast ? type1.get_type() : cmp_type.get_calc_type());
-      type2.set_calc_type(need_no_cast ? type2.get_type() : cmp_type.get_calc_type());
-      if (ob_is_string_or_lob_type(cmp_type.get_calc_type())) {
-        type1.set_calc_collation_type(cmp_type.get_calc_collation_type());
-        type2.set_calc_collation_type(cmp_type.get_calc_collation_type());
-      } else if (ObRawType == cmp_type.get_calc_type()) {
-        type1.set_calc_collation_type(CS_TYPE_BINARY);
-        type2.set_calc_collation_type(CS_TYPE_BINARY);
+        ObAccuracy calc_acc(PRECISION_UNKNOWN_YET, SCALE_UNKNOWN_YET);
+        type1.set_calc_accuracy(calc_acc);
+        type2.set_calc_accuracy(calc_acc);
       }
     }
   }
@@ -2253,7 +2334,6 @@ int ObRelationalExprOperator::calc_result_typeN(ObExprResType &type,
     // 1和'1.00x'会转为int然后比较，'1.00000'和'1.000000'会直接做字符串比较
     ObExprResType tmp_res_type;
     for (int64_t i = 0; OB_SUCC(ret) && i < row_dimension_; ++i) {
-      type_ctx.set_cur_row_idx(i);
       if (OB_FAIL(ObRelationalExprOperator::calc_result_type2(tmp_res_type,
                                                               types[i],
                                                               types[i + row_dimension_],
@@ -2780,7 +2860,6 @@ int ObSubQueryRelationalExpr::calc_result_typeN(ObExprResType &type,
   if (OB_SUCC(ret)) {
     for (int64_t i = 0; OB_SUCC(ret) && i < row_dimension_; i++) {
       ObExprResType tmp_res_type;
-      type_ctx.set_cur_row_idx(i);
       OZ(ObRelationalExprOperator::deduce_cmp_type(
               *this, tmp_res_type, types[i], types[i + row_dimension_], type_ctx));
       OZ(type.get_row_calc_cmp_types().push_back(tmp_res_type.get_calc_meta()));
@@ -3320,13 +3399,15 @@ int ObSubQueryRelationalExpr::cg_expr(ObExprCGCtx &op_cg_ctx,
     for (int64_t i = 0; OB_SUCC(ret) && i < rt_expr.inner_func_cnt_; i++) {
       auto &l = left_types.at(i);
       auto &r = right_types.at(i);
+      bool has_lob_header = l.has_lob_header() || r.has_lob_header();
       if (ObDatumFuncs::is_string_type(l.get_type())
           && ObDatumFuncs::is_string_type(r.get_type())) {
         CK(l.get_collation_type() == r.get_collation_type());
       }
       if (OB_SUCC(ret)) {
         funcs[i] = (void *)ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
-            l.get_type(), r.get_type(), lib::is_oracle_mode(), l.get_collation_type());
+            l.get_type(), r.get_type(), l.get_scale(), r.get_scale(),
+            lib::is_oracle_mode(), l.get_collation_type(), has_lob_header);
         CK(NULL != funcs[i]);
       }
     }
@@ -3474,13 +3555,44 @@ int ObSubQueryRelationalExpr::setup_row(
 
 int ObSubQueryRelationalExpr::cmp_one_row(
     const ObExpr &expr, ObDatum &res,
-    ObExpr **l_row, ObEvalCtx &l_ctx, ObExpr **r_row, ObEvalCtx &r_ctx)
+    ObExpr **l_row, ObEvalCtx &l_ctx, ObExpr **r_row, ObEvalCtx &r_ctx,
+    bool left_all_null, bool right_all_null)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(T_OP_SQ_NSEQ == expr.type_)) {
-    ret = ObExprNullSafeEqual::ns_equal(expr, res, l_row, l_ctx, r_row, r_ctx);
+    if (left_all_null && right_all_null) {
+      res.set_true();
+    } else if (left_all_null || right_all_null) {
+      bool both_are_null = true;
+      ObDatum *l = NULL;
+      ObDatum *r = NULL;
+      for (int64_t i = 0; OB_SUCC(ret) && both_are_null && i < expr.inner_func_cnt_; i++) {
+        if (NULL == expr.inner_functions_[i]) {
+          ret = OB_INVALID_ARGUMENT;
+          LOG_WARN("NULL inner function", K(ret), K(i), K(expr));
+        } else if ((!left_all_null && OB_FAIL(l_row[i]->eval(l_ctx, l)))
+            || (!right_all_null && OB_FAIL(r_row[i]->eval(r_ctx, r)))) {
+          LOG_WARN("expr evaluate failed", K(ret));
+        } else {
+          if ((left_all_null || l->is_null()) && (right_all_null || r->is_null())) {
+            both_are_null = true;
+          } else {
+            both_are_null = false;
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        res.set_int(both_are_null);
+      }
+    } else {
+      ret = ObExprNullSafeEqual::ns_equal(expr, res, l_row, l_ctx, r_row, r_ctx);
+    }
   } else {
-    ret = ObRelationalExprOperator::row_cmp(expr, res, l_row, l_ctx, r_row, r_ctx);
+    if (left_all_null || right_all_null) {
+      res.set_null();
+    } else {
+      ret = ObRelationalExprOperator::row_cmp(expr, res, l_row, l_ctx, r_row, r_ctx);
+    }
   }
   return ret;
 }
@@ -3496,6 +3608,7 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval(
   ObExpr **r_row = NULL;
   ObEvalCtx *l_ctx = NULL;
   ObEvalCtx *r_ctx = NULL;
+  bool left_all_null = false;
   if (2 != expr.arg_cnt_) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected argument count", K(ret));
@@ -3516,11 +3629,7 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval(
         if (OB_ITER_END == ret) {
           ret = OB_SUCCESS;
           l_end = true;
-          // set row to NULL
-          for (int64_t i = 0; i < expr.inner_func_cnt_; i++) {
-            l_row[i]->locate_expr_datum(*l_ctx).set_null();
-            l_row[i]->set_evaluated_projected(*l_ctx);
-          }
+          left_all_null = true;
         } else {
           LOG_WARN("get next row failed", K(ret));
         }
@@ -3529,15 +3638,15 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval(
     if (OB_SUCC(ret)) {
       switch (info.subquery_key_) {
         case T_WITH_NONE: {
-          ret = subquery_cmp_eval_with_none(expr, *l_ctx, expr_datum, l_row, *r_ctx, r_row, r_iter);
+          ret = subquery_cmp_eval_with_none(expr, *l_ctx, expr_datum, l_row, *r_ctx, r_row, r_iter, left_all_null);
           break;
         }
         case T_WITH_ANY: {
-          ret = subquery_cmp_eval_with_any(expr, *l_ctx, expr_datum, l_row, *r_ctx, r_row, r_iter);
+          ret = subquery_cmp_eval_with_any(expr, *l_ctx, expr_datum, l_row, *r_ctx, r_row, r_iter, left_all_null);
           break;
         }
         case T_WITH_ALL: {
-          ret = subquery_cmp_eval_with_all(expr, *l_ctx, expr_datum, l_row, *r_ctx, r_row, r_iter);
+          ret = subquery_cmp_eval_with_all(expr, *l_ctx, expr_datum, l_row, *r_ctx, r_row, r_iter, left_all_null);
           break;
         }
       }
@@ -3560,29 +3669,27 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval(
 
 int ObSubQueryRelationalExpr::subquery_cmp_eval_with_none(
       const ObExpr &expr, ObEvalCtx &l_ctx, ObDatum &res,
-      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter)
+      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter,
+      bool left_all_null)
 {
   int ret = OB_SUCCESS;
   // %l_row, %r_row is checked no need to check.
   // %iter may be NULL for with none.
   bool iter_end = false;
+  bool right_all_null = false;
   if (NULL != r_iter) {
     if (OB_FAIL(r_iter->get_next_row())) {
       if (OB_ITER_END == ret) {
         ret = OB_SUCCESS;
         iter_end = true;
-        // set row to NULL
-        for (int64_t i = 0; i < expr.inner_func_cnt_; i++) {
-          r_row[i]->locate_expr_datum(r_ctx).set_null();
-          r_row[i]->set_evaluated_projected(r_ctx);
-        }
+        right_all_null = true;
       } else {
         LOG_WARN("get next row failed", K(ret));
       }
     }
   }
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(cmp_one_row(expr, res, l_row, l_ctx, r_row, r_ctx))) {
+    if (OB_FAIL(cmp_one_row(expr, res, l_row, l_ctx, r_row, r_ctx, left_all_null, right_all_null))) {
       LOG_WARN("compare one row failed", K(ret));
     }
   }
@@ -3604,10 +3711,12 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval_with_none(
 // copy from ObSubQueryRelationalExpr::calc_result_with_any
 int ObSubQueryRelationalExpr::subquery_cmp_eval_with_any(
       const ObExpr &expr, ObEvalCtx &l_ctx, ObDatum &res,
-      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter)
+      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter,
+      bool left_all_null)
 {
   // %l_row, %r_row is checked no need to check.
   int ret = OB_SUCCESS;
+  bool right_all_null = false;
   if (OB_ISNULL(r_iter)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("iter should not be null", K(ret));
@@ -3617,7 +3726,7 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval_with_any(
     res.set_false();
     while (OB_SUCC(ret) && OB_SUCC(r_iter->get_next_row())) {
       // use subquery's eval ctx for right row to avoid ObEvalCtx::alloc_ expanding.
-      if (OB_FAIL(cmp_one_row(expr, res, l_row, l_ctx, r_row, r_ctx))) {
+      if (OB_FAIL(cmp_one_row(expr, res, l_row, l_ctx, r_row, r_ctx, left_all_null, right_all_null))) {
         LOG_WARN("compare single row failed", K(ret));
       } else if (res.is_true()) {
         break;
@@ -3641,10 +3750,12 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval_with_any(
 // copy from ObSubQueryRelationalExpr::calc_result_with_all
 int ObSubQueryRelationalExpr::subquery_cmp_eval_with_all(
       const ObExpr &expr, ObEvalCtx &l_ctx, ObDatum &res,
-      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter)
+      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter,
+      bool left_all_null)
 {
   // %l_row, %r_row is checked no need to check.
   int ret = OB_SUCCESS;
+  bool right_all_null = false;
   if (OB_ISNULL(r_iter)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("iter should not be null", K(ret));
@@ -3654,7 +3765,7 @@ int ObSubQueryRelationalExpr::subquery_cmp_eval_with_all(
     res.set_true();
     while (OB_SUCC(ret) && OB_SUCC(r_iter->get_next_row())) {
       // use subquery's eval ctx for right row to avoid ObEvalCtx::alloc_ expanding.
-      if (OB_FAIL(cmp_one_row(expr, res, l_row, l_ctx, r_row, r_ctx))) {
+      if (OB_FAIL(cmp_one_row(expr, res, l_row, l_ctx, r_row, r_ctx, left_all_null, right_all_null))) {
         LOG_WARN("compare single row failed", K(ret));
       } else if (res.is_false()) {
         break;
@@ -3898,6 +4009,9 @@ int ObVectorExprOperator::calc_result_type2_(ObExprResType &type,
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
     LOG_USER_ERROR(OB_ERR_INVALID_TYPE_FOR_OP, ob_obj_type_str(type1.get_type()),
                                      ob_obj_type_str(type2.get_type()));
+  } else if (lib::is_oracle_mode() && (type1.is_json() || type2.is_json())) {
+    ret = OB_ERR_INVALID_CMP_OP;
+    LOG_USER_ERROR(OB_ERR_INVALID_CMP_OP);
   } else if (OB_SUCC(calc_cmp_type2(cmp_type, type1, type2, type_ctx.get_coll_type()))) {
     type.set_int(); // not tinyint, compatiable with MySQL
     type.set_calc_collation(cmp_type);
@@ -3934,6 +4048,19 @@ int ObVectorExprOperator::calc_result_type2_(ObExprResType &type,
     } else if (ObRawType == cmp_type.get_calc_type()) {
       type1.set_calc_collation_type(CS_TYPE_BINARY);
       type2.set_calc_collation_type(CS_TYPE_BINARY);
+    } else if (is_mysql_mode() && ob_is_double_tc(cmp_type.get_calc_type())) {
+      if (ob_is_numeric_tc(type1.get_type_class()) && ob_is_numeric_tc(type2.get_type_class()) &&
+            SCALE_UNKNOWN_YET != type1.get_scale() && SCALE_UNKNOWN_YET != type2.get_scale()) {
+        const ObScale scale = MAX(type1.get_scale(), type2.get_scale());
+        const ObPrecision precision = MAX(type1.get_precision(), type2.get_precision());
+        ObAccuracy calc_acc(precision, scale);
+        type1.set_calc_accuracy(calc_acc);
+        type2.set_calc_accuracy(calc_acc);
+      } else {
+        ObAccuracy calc_acc(PRECISION_UNKNOWN_YET, SCALE_UNKNOWN_YET);
+        type1.set_calc_accuracy(calc_acc);
+        type2.set_calc_accuracy(calc_acc);
+      }
     }
   }
   return ret;
@@ -4183,7 +4310,10 @@ int ObBitwiseExprOperator::calc_result_type1(ObExprResType &type,
       type.set_scale(ObAccuracy::DDL_DEFAULT_ACCURACY[ObUInt64Type].scale_);
     }
     ObExprOperator::calc_result_flag1(type, type1);
-    if (OB_FAIL(set_calc_type(type1))) {
+    if (type1.is_geometry()) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("Incorrect geometry arguments", K(type1), K(ret));
+    } else if (OB_FAIL(set_calc_type(type1))) {
       LOG_WARN("set_calc_type for type1 failed", K(ret), K(type1));
     } else {
       ObCastMode cm = lib::is_oracle_mode() ? CM_NONE : CM_STRING_INTEGER_TRUNC;
@@ -4212,7 +4342,10 @@ int ObBitwiseExprOperator::calc_result_type2(ObExprResType &type,
       type.set_scale(ObAccuracy::DDL_DEFAULT_ACCURACY[ObUInt64Type].scale_);
     }
     ObExprOperator::calc_result_flag2(type, type1, type2);
-    if (OB_FAIL(set_calc_type(type1))) {
+    if (type1.is_geometry() || type2.is_geometry()) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("Incorrect geometry arguments", K(type1), K(type2), K(ret));
+    } else if (OB_FAIL(set_calc_type(type1))) {
       LOG_WARN("set_calc_type for type1 failed", K(ret), K(type1));
     } else if (OB_FAIL(set_calc_type(type2))) {
       LOG_WARN("set_calc_type for type2 failed", K(ret), K(type2));
@@ -4245,7 +4378,12 @@ int ObBitwiseExprOperator::calc_result_type3(ObExprResType &type,
       type.set_precision(ObAccuracy::DDL_DEFAULT_ACCURACY[ObUInt64Type].precision_);
       type.set_scale(ObAccuracy::DDL_DEFAULT_ACCURACY[ObUInt64Type].scale_);
     }
-    ObExprOperator::calc_result_flag3(type, type1, type2, type3);
+    if (type1.is_geometry() || type2.is_geometry() || type3.is_geometry()) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("Incorrect geometry arguments", K(type1), K(type2), K(type3), K(ret));
+    } else {
+      ObExprOperator::calc_result_flag3(type, type1, type2, type3);
+    }
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("row_dimension_ is not NOT_ROW_DIMENSION", K(ret));
@@ -4271,7 +4409,15 @@ int ObBitwiseExprOperator::calc_result_typeN(ObExprResType &type,
       type.set_uint64();
       type.set_scale(DEFAULT_SCALE_FOR_INTEGER);
     }
-    ObExprOperator::calc_result_flagN(type, types, param_num);
+    for (int64_t i = 0; OB_SUCC(ret) && i < param_num;  i++) {
+      if (types[i].is_geometry()) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("Incorrect geometry arguments", K(types[i]), K(ret));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ObExprOperator::calc_result_flagN(type, types, param_num);
+    }
   } else {
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
   }
@@ -4648,7 +4794,7 @@ int ObBitwiseExprOperator::get_uint64(const ObObj &obj,
     }
   } else {
     // need add CM_NO_RANGE_CHECK, otherwise 1 & -3.5(float) return 0.
-    EXPR_DEFINE_CAST_CTX(expr_ctx, CM_NO_RANGE_CHECK);
+    EXPR_DEFINE_CAST_CTX(expr_ctx, CM_NO_RANGE_CHECK | CM_STRING_INTEGER_TRUNC);
     EXPR_GET_UINT64_V2(obj, out);
   }
   return ret;
@@ -4793,8 +4939,18 @@ int ObMinMaxExprOperator::calc_result_meta_for_comparison(
       //兼容mysql行为对类型进行提升。
         type.set_type(ObIntType);
       }
-      type.set_scale(result_scale);
-      type.set_precision(static_cast<ObPrecision>(max_precision + max_scale)); // esti, not accurate
+      if (lib::is_mysql_mode() && ob_is_real_type(type.get_type())) {
+        if (SCALE_UNKNOWN_YET != result_scale && OB_MAX_DOUBLE_FLOAT_SCALE >= result_scale) {
+          type.set_scale(result_scale);
+          type.set_precision(static_cast<ObPrecision>(ObMySQLUtil::float_length(result_scale)));
+        } else {
+          type.set_scale(SCALE_UNKNOWN_YET);
+          type.set_precision(PRECISION_UNKNOWN_YET);
+        }
+      } else {
+        type.set_scale(result_scale);
+        type.set_precision(static_cast<ObPrecision>(max_precision + max_scale)); // esti, not accurate
+      }
     }
   }
 
@@ -4908,7 +5064,7 @@ int ObMinMaxExprOperator::calc_with_cast(ObObj &result,
       cast_ctx.dest_collation_ = expr_ctx.my_session_->get_nls_collation_nation();
     } else if (lib::is_mysql_mode() && ob_is_json(result_type.get_calc_type())) {
       cast_ctx.dest_collation_ = CS_TYPE_UTF8MB4_BIN;
-    } //for https://work.aone.alibaba-inc.com/issue/30742303 类型不一致导致挂住
+    } //for
       else if (lib::is_mysql_mode() && CS_TYPE_INVALID != result_type.get_collation_type()) {
       cast_ctx.dest_collation_ = result_type.get_collation_type();
     }
@@ -5269,7 +5425,7 @@ int ObLocationExprOperator::calc_(const ObExpr &expr, const ObExpr &sub_arg,
       has_result = true;
     } else {
       // TODO: 验证MySQL下uint64超过int64值域范围，隐式cast的结果
-      // https://aone.alibaba-inc.com/req/25068696
+      //
       pos_int = pos->get_int();
     }
   }
@@ -5280,10 +5436,56 @@ int ObLocationExprOperator::calc_(const ObExpr &expr, const ObExpr &sub_arg,
     ObCollationType calc_cs_type = CS_TYPE_INVALID;
     if (OB_FAIL(get_calc_cs_type(expr, calc_cs_type))) {
       LOG_WARN("get_calc_cs_type failed", K(ret));
-    } else {
+    } else if (!ob_is_text_tc(sub_arg.datum_meta_.type_) && !ob_is_text_tc(ori_arg.datum_meta_.type_)) {
       uint32_t idx = ObCharset::locate(calc_cs_type, ori_str.ptr(), ori_str.length(),
                                        sub_str.ptr(), sub_str.length(), pos_int);
       res_datum.set_int(static_cast<int64_t>(idx));
+    } else { // at least one of the inputs are text tc
+      ObEvalCtx::TempAllocGuard alloc_guard(ctx);
+      ObIAllocator &calc_alloc = alloc_guard.get_allocator();
+      ObString sub_str_data;
+      ObString ori_str_data;
+      bool sub_has_lob_header = sub_arg.obj_meta_.has_lob_header();
+      bool ori_has_lob_header = ori_arg.obj_meta_.has_lob_header();
+      ObTextStringIter sub_str_iter(sub_arg.datum_meta_.type_, sub_arg.datum_meta_.cs_type_, sub_str, sub_has_lob_header);
+      ObTextStringIter ori_str_iter(ori_arg.datum_meta_.type_, ori_arg.datum_meta_.cs_type_, ori_str, ori_has_lob_header);
+      if (OB_FAIL(ori_str_iter.init(0, NULL, &calc_alloc))) {
+        LOG_WARN("Lob: init ori_str_iter failed ", K(ret), K(ori_str_iter));
+      } else if (OB_FAIL(sub_str_iter.init(0, NULL, &calc_alloc))) {
+        LOG_WARN("Lob: init sub_str_iter failed ", K(ret), K(sub_str_iter));
+      } else if (OB_FAIL(sub_str_iter.get_full_data(sub_str_data))) {
+        LOG_WARN("Lob: init lob str iter failed ", K(ret), K(sub_str_iter));
+      } else {
+        uint32_t idx = 0;
+        ObTextStringIterState state;
+        if (ori_str_iter.is_outrow_lob()) { // set reserved len, to avoid sub_str split between get_next_block
+          size_t sub_str_char_len = ObCharset::strlen_char(sub_arg.datum_meta_.cs_type_,
+                                                          sub_str_data.ptr(),
+                                                          static_cast<int64_t>(sub_str_data.length()));
+          ori_str_iter.set_reserved_len(sub_str_char_len - 1);
+          ori_str_iter.set_start_offset(pos_int); // start char len
+          pos_int = 1; // start pos is handled by lob mngr for out row lobs
+        }
+        while (idx == 0 && (state = ori_str_iter.get_next_block(ori_str_data)) == TEXTSTRING_ITER_NEXT) {
+          idx = ObCharset::locate(calc_cs_type, ori_str_data.ptr(), ori_str_data.length(),
+                                  sub_str_data.ptr(), sub_str_data.length(), pos_int);
+        }
+        if (state != TEXTSTRING_ITER_NEXT && state != TEXTSTRING_ITER_END) {
+          ret = (ori_str_iter.get_inner_ret() != OB_SUCCESS) ?
+                ori_str_iter.get_inner_ret() : OB_INVALID_DATA;
+          LOG_WARN("iter state invalid", K(ret), K(state), K(ori_str_iter));
+        } else {
+          if (idx != 0) {
+            // need to add length accessed by get_next_block
+            idx += ori_str_iter.get_last_accessed_len() + ori_str_iter.get_start_offset();
+            if (ori_str_iter.get_iter_count() > 1) { // minus reserved length
+              OB_ASSERT(idx > ori_str_iter.get_reserved_char_len());
+              idx -= ori_str_iter.get_reserved_char_len();
+            }
+          }
+          res_datum.set_int(static_cast<int64_t>(idx));
+        }
+      }
     }
   }
   return ret;
@@ -5766,6 +5968,10 @@ int ObRelationalExprOperator::cg_datum_cmp_expr(const ObRawExpr &raw_expr,
     const ObCmpOp cmp_op = get_cmp_op(raw_expr.get_expr_type());
     const ObObjType input_type1 = rt_expr.args_[0]->datum_meta_.type_;
     const ObObjType input_type2 = rt_expr.args_[1]->datum_meta_.type_;
+    const bool has_lob_header = rt_expr.args_[0]->obj_meta_.has_lob_header() ||
+                                rt_expr.args_[1]->obj_meta_.has_lob_header();
+    const ObScale input_scale1 = rt_expr.args_[0]->datum_meta_.scale_;
+    const ObScale input_scale2 = rt_expr.args_[1]->datum_meta_.scale_;
     LOG_DEBUG("CG Datum CMP Expr", K(input_type1), K(input_type2), K(cmp_op));
     const ObCollationType cs_type = rt_expr.args_[0]->datum_meta_.cs_type_;
     if (ObDatumFuncs::is_string_type(input_type1) && ObDatumFuncs::is_string_type(input_type2)) {
@@ -5773,9 +5979,11 @@ int ObRelationalExprOperator::cg_datum_cmp_expr(const ObRawExpr &raw_expr,
     }
     if (OB_SUCC(ret)) {
       rt_expr.eval_func_ = ObExprCmpFuncsHelper::get_eval_expr_cmp_func(
-          input_type1, input_type2, cmp_op, lib::is_oracle_mode(), cs_type);
+          input_type1, input_type2, input_scale1, input_scale2, cmp_op, lib::is_oracle_mode(),
+          cs_type, has_lob_header);
       rt_expr.eval_batch_func_ = ObExprCmpFuncsHelper::get_eval_batch_expr_cmp_func(
-          input_type1, input_type2, cmp_op, lib::is_oracle_mode(), cs_type);
+          input_type1, input_type2, input_scale1, input_scale2, cmp_op, lib::is_oracle_mode(),
+          cs_type, has_lob_header);
     }
     CK(NULL != rt_expr.eval_func_);
     CK(NULL != rt_expr.eval_batch_func_);
@@ -5835,17 +6043,23 @@ int ObRelationalExprOperator::cg_row_cmp_expr(const int row_dimension,
       {
         const ObObjType type1 = left_row->args_[i]->datum_meta_.type_;
         const ObObjType type2 = right_row->args_[i]->datum_meta_.type_;
+        const ObScale scale1 = left_row->args_[i]->datum_meta_.scale_;
+        const ObScale scale2 = right_row->args_[i]->datum_meta_.scale_;
         const ObCollationType cs_type = left_row->args_[i]->datum_meta_.cs_type_;
+        const bool has_lob_header = left_row->args_[i]->obj_meta_.has_lob_header() ||
+                                    right_row->args_[i]->obj_meta_.has_lob_header();
         if (ObDatumFuncs::is_string_type(type1) && ObDatumFuncs::is_string_type(type2)) {
           CK(left_row->args_[i]->datum_meta_.cs_type_
                     == right_row->args_[i]->datum_meta_.cs_type_);
           rt_expr.inner_functions_[i] = (void*)ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
                                                                   type1, type2,
+                                                                  scale1, scale2,
                                                                   lib::is_oracle_mode(),
-                                                                  cs_type);
+                                                                  cs_type,
+                                                                  has_lob_header);
         } else {
           rt_expr.inner_functions_[i] = (void *)ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
-              type1, type2, lib::is_oracle_mode(), cs_type);
+              type1, type2, scale1, scale2, lib::is_oracle_mode(), cs_type, has_lob_header);
           if (OB_ISNULL(rt_expr.inner_functions_[i])) {
             ret = OB_ERR_UNEXPECTED;
             LOG_WARN("unexpected null function", K(ret), K(i), K(type1), K(type2));
@@ -5917,7 +6131,9 @@ int ObRelationalExprOperator::row_cmp(
       LOG_WARN("failed to eval right in row cmp", K(ret));
     } else if (right->is_null()) {
       cnt_row_null = true;
-    } else if (0 != (first_nonequal_cmp_ret = ((DatumCmpFunc)expr.inner_functions_[i])(*left, *right))) {
+    } else if (OB_FAIL(((DatumCmpFunc)expr.inner_functions_[i])(*left, *right, first_nonequal_cmp_ret))) {
+      LOG_WARN("failed to cmp", K(ret));
+    } else if (0 != first_nonequal_cmp_ret) {
       break;
     }
   }  // for end

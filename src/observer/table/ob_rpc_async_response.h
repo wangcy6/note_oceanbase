@@ -52,7 +52,7 @@ char *ObRpcAsyncResponse<T>::easy_alloc(int64_t size) const
 {
   void *buf = NULL;
   if (OB_ISNULL(req_)) {
-    RPC_OBRPC_LOG(ERROR, "request is invalid", KP(req_));
+    RPC_OBRPC_LOG_RET(ERROR, OB_INVALID_ARGUMENT, "request is invalid", KP(req_));
   } else {
     buf = RPC_REQ_OP.alloc_response_buffer(req_, static_cast<uint32_t>(size));
   }
@@ -102,7 +102,7 @@ int ObRpcAsyncResponse<T>::do_response(ObRpcPacket *response_pkt, bool bad_routi
       packet->set_pcode(pcode);
       packet->set_chid(rpc_pkt->get_chid());
       packet->set_session_id(0);  // not stream
-      packet->set_trace_id(common::ObCurTraceId::get());
+      packet->set_trace_id(rpc_pkt->get_trace_id());
       packet->set_resp();
 
       packet->set_request_arrival_time(req_->get_request_arrival_time());

@@ -29,10 +29,13 @@ namespace storage
 int ObIMemtableMgr::get_active_memtable(ObTableHandleV2 &handle) const
 {
   int ret = OB_SUCCESS;
-  SpinRLockGuard lock_guard(lock_);
-  if (OB_UNLIKELY(memtable_tail_ <= 0)) {
+  MemMgrRLockGuard lock_guard(lock_);
+  if (OB_UNLIKELY(memtable_tail_ < memtable_head_)) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "unexpected error, tail < head", K(ret), K(memtable_tail_), K(memtable_head_));
+  } else if (OB_UNLIKELY(memtable_tail_ == memtable_head_)) {
     ret = OB_ENTRY_NOT_EXIST;
-    STORAGE_LOG(WARN, "There is no memtable in MemtableMgr", K(ret), K(memtable_tail_));
+    STORAGE_LOG(WARN, "There is no memtable in MemtableMgr", K(ret), K(memtable_head_), K(memtable_tail_));
   } else if (OB_FAIL(get_ith_memtable(memtable_tail_ - 1, handle))) {
     STORAGE_LOG(WARN, "fail to get ith memtable", K(ret), K(memtable_tail_));
   } else if (OB_UNLIKELY(!handle.is_valid())) {
@@ -42,19 +45,43 @@ int ObIMemtableMgr::get_active_memtable(ObTableHandleV2 &handle) const
   return ret;
 }
 
-int ObIMemtableMgr::get_first_memtable(ObTableHandleV2 &handle) const
+int ObIMemtableMgr::get_first_nonempty_memtable(ObTableHandleV2 &handle) const
 {
   int ret = OB_SUCCESS;
-  SpinRLockGuard lock_guard(lock_);
-  if (memtable_head_ == memtable_tail_) {
-    ret = OB_ENTRY_NOT_EXIST;
-    STORAGE_LOG(WARN, "There is no memtable in ObLockMemtableMgr.");
-  } else if (OB_FAIL(get_ith_memtable(memtable_head_, handle))) {
-    STORAGE_LOG(WARN, "fail to get ith memtable", K(ret), K(memtable_head_));
-  } else if (OB_UNLIKELY(!handle.is_valid())) {
-    ret = OB_ERR_UNEXPECTED;
-    STORAGE_LOG(WARN, "get invalid table handle", K(ret), K(handle));
+  bool is_exist = false;
+  MemMgrRLockGuard lock_guard(lock_);
+
+  for (int64_t i = memtable_head_; OB_SUCC(ret) && i < memtable_tail_; ++i) {
+    ObTableHandleV2 tmp_handle;
+    memtable::ObMemtable *mt = NULL;
+    if (OB_FAIL(get_ith_memtable(i, tmp_handle))) {
+      STORAGE_LOG(WARN, "fail to get ith memtable", KR(ret), K(i));
+    } else if (OB_UNLIKELY(!tmp_handle.is_valid())) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "get invalid tmp table handle", KR(ret), K(i), K(tmp_handle));
+    } else if (OB_FAIL(tmp_handle.get_data_memtable(mt))) {
+      STORAGE_LOG(WARN, "failed to get_data_memtable", KR(ret), K(i), K(tmp_handle));
+    } else if (OB_ISNULL(mt)) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "mt is NULL", KR(ret), K(i), K(tmp_handle));
+    } else if (mt->get_rec_scn().is_max()) {
+    } else if (OB_FAIL(get_ith_memtable(i, handle))) {
+      STORAGE_LOG(WARN, "fail to get ith memtable", KR(ret), K(i));
+    } else if (OB_UNLIKELY(!handle.is_valid())) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "get invalid table handle", KR(ret), K(i), K(handle));
+    } else {
+      is_exist = true;
+      break;
+    }
   }
+
+  if (OB_FAIL(ret)) {
+  } else if (!is_exist) {
+    ret = OB_ENTRY_NOT_EXIST;
+  }
+
+
   return ret;
 }
 
@@ -62,7 +89,7 @@ int ObIMemtableMgr::get_all_memtables(ObTableHdlArray &handles)
 {
   int ret = OB_SUCCESS;
   // TODO(handora.qc): oblatchid
-  SpinRLockGuard lock_guard(lock_);
+  MemMgrRLockGuard lock_guard(lock_);
   for (int64_t i = memtable_head_; OB_SUCC(ret) && i < memtable_tail_; ++i) {
     ObTableHandleV2 handle;
     if (OB_FAIL(get_ith_memtable(i, handle))) {
@@ -111,7 +138,7 @@ int ObIMemtableMgr::get_newest_snapshot_version(SCN &snapshot_version)
 
 int ObIMemtableMgr::release_memtables(const SCN &scn)
 {
-  SpinWLockGuard lock_guard(lock_);
+  MemMgrWLockGuard lock_guard(lock_);
   int ret = OB_SUCCESS;
 
   if (IS_NOT_INIT) {
@@ -150,7 +177,7 @@ int ObIMemtableMgr::release_memtables()
 {
   int ret = OB_SUCCESS;
   const bool force_release = true;
-  SpinWLockGuard lock_guard(lock_);
+  MemMgrWLockGuard lock_guard(lock_);
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     STORAGE_LOG(WARN, "not inited", K(ret));
@@ -187,10 +214,10 @@ int ObIMemtableMgr::get_multi_source_data_unit(
 }
 
 int ObIMemtableMgr::get_memtable_for_multi_source_data_unit(
-    memtable::ObMemtable *&memtable,
+    ObTableHandleV2 &handle,
     const memtable::MultiSourceDataUnitType type) const
 {
-  UNUSED(memtable);
+  UNUSED(handle);
   UNUSED(type);
   int ret = OB_NOT_SUPPORTED;
   return ret;
@@ -200,14 +227,16 @@ int ObIMemtableMgr::init(
     const ObTabletID &tablet_id,
     const share::ObLSID &ls_id,
     const int64_t max_saved_schema_version,
+    const int64_t max_saved_medium_scn,
+    const lib::Worker::CompatMode compat_mode,
     logservice::ObLogHandler *log_handler,
     ObFreezer *freezer,
     ObTenantMetaMemMgr *t3m)
 {
   int ret = OB_SUCCESS;
   if (!tablet_id.is_special_merge_tablet()
-      && OB_FAIL(init_storage_schema_recorder(tablet_id, ls_id, max_saved_schema_version, log_handler))) {
-    TRANS_LOG(WARN, "failed to init schema recorder", K(ret), K(max_saved_schema_version), KP(log_handler));
+      && OB_FAIL(init_storage_recorder(tablet_id, ls_id, max_saved_schema_version, max_saved_medium_scn, compat_mode, log_handler))) {
+    TRANS_LOG(WARN, "failed to init schema recorder", K(ret), K(max_saved_schema_version), K(max_saved_medium_scn), K(compat_mode), KP(log_handler));
   } else {
     ret = init(tablet_id, ls_id, freezer, t3m);
   }
@@ -235,7 +264,7 @@ void ObIMemtableMgr::reset_tables()
 void ObIMemtableMgr::release_head_memtable()
 {
   if (OB_ISNULL(t3m_)) {
-    STORAGE_LOG(ERROR, "t3m is nullptr", KP_(t3m));
+    STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "t3m is nullptr", KP_(t3m));
   } else {
     memtable::ObIMemtable *memtable = tables_[get_memtable_idx(memtable_head_)];
     tables_[get_memtable_idx(memtable_head_)] = nullptr;
@@ -251,7 +280,7 @@ void ObIMemtableMgr::release_tail_memtable()
 {
   if (memtable_tail_ > memtable_head_) {
     if (OB_ISNULL(t3m_)) {
-      STORAGE_LOG(ERROR, "t3m is nullptr", KP_(t3m));
+      STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "t3m is nullptr", KP_(t3m));
     } else {
       memtable::ObIMemtable *memtable = tables_[get_memtable_idx(memtable_tail_ - 1)];
       tables_[get_memtable_idx(memtable_tail_ - 1)] = nullptr;
@@ -320,8 +349,8 @@ int ObIMemtableMgr::add_memtable_(ObTableHandleV2 &memtable_handle)
       memtable_tail_++;
       ObTaskController::get().allow_next_syslog();
       // FIXME : delete lbt()
-      STORAGE_LOG(INFO, "succeed to add memtable", K(get_memtable_count_()),
-          K(memtable_handle), K(lbt()));
+      STORAGE_LOG(INFO, "succeed to add memtable", KP(this), K(get_memtable_count_()),
+          K(memtable_handle));
     }
   }
   return ret;

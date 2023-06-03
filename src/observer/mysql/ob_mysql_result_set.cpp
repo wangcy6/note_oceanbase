@@ -17,6 +17,7 @@
 #include "lib/container/ob_array.h"
 #include "rpc/obmysql/ob_mysql_field.h"
 #include "observer/ob_server.h"
+#include "share/ob_lob_access_utils.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::observer;
@@ -42,15 +43,8 @@ int ObMySQLResultSet::to_mysql_field(const ObField &field, ObMySQLField &mfield)
     mfield.flags_ = field.flags_;
     mfield.length_ = field.length_;
 
-    // 对于Varchar类，检查charset：
-    mfield.flags_ &= (~BINARY_FLAG);
-    if (ob_is_string_type(field.type_.get_type())
-        && ObCharset::is_valid_collation(static_cast<ObCollationType>(field.charsetnr_))
-        && ObCharset::is_bin_sort(static_cast<ObCollationType>(field.charsetnr_))) {
-      mfield.flags_ |= BINARY_FLAG;
-    }
-
     ObScale decimals = mfield.accuracy_.get_scale();
+    ObPrecision pre = mfield.accuracy_.get_precision();
     // TIMESTAMP、UNSIGNED通过map直接映射
     if (0 == field.type_name_.case_compare("SYS_REFCURSOR")) {
       mfield.type_ = MYSQL_TYPE_CURSOR;
@@ -60,6 +54,17 @@ int ObMySQLResultSet::to_mysql_field(const ObField &field, ObMySQLField &mfield)
 
     mfield.type_owner_ = field.type_owner_;
     mfield.type_name_ = field.type_name_;
+   //  In this scenario, the precsion and scale of number are undefined,
+   //  and the internal implementation of ob is represented by an illegal value (-1, -85).
+   //  However, oracle is represented by 0. In order to be compatible with
+   //  the behavior of oracle, it is corrected to 0 here.
+    if ((ObNumberType == field.type_.get_type()
+          || ObUNumberType == field.type_.get_type())
+        && lib::is_oracle_mode()) { // was decimal
+      decimals = (decimals==NUMBER_SCALE_UNKNOWN_YET ? 0:decimals);
+      pre = (pre==PRECISION_UNKNOWN_YET ? 0:pre);
+    }
+    mfield.accuracy_.set_precision(pre);
     mfield.accuracy_.set_scale(decimals);
     mfield.inout_mode_ = field.inout_mode_;
     if (OB_SUCC(ret)
@@ -69,14 +74,6 @@ int ObMySQLResultSet::to_mysql_field(const ObField &field, ObMySQLField &mfield)
       ObScale num_decimals;
       ret = ObSMUtils::get_mysql_type(
         field.default_value_.get_type(), mfield.default_value_, flags, num_decimals);
-    }
-    if (OB_SUCC(ret)
-        && EMySQLFieldType::MYSQL_TYPE_BIT == mfield.type_
-        && 1 != mfield.accuracy_.get_precision()) {
-      // bit(1) flags -> UNSIGNED
-      // bit(2) flags -> BINARY_FLAG | BLOB_FLAG | UNSIGNED
-      mfield.flags_ |= BINARY_FLAG;
-      mfield.flags_ |= BLOB_FLAG;
     }
     if (field.is_hidden_rowid_) {
       mfield.inout_mode_ |= 0x04;

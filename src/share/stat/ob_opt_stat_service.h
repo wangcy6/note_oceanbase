@@ -17,6 +17,8 @@
 #include "share/stat/ob_opt_table_stat_cache.h"
 #include "share/stat/ob_opt_column_stat_cache.h"
 #include "share/stat/ob_opt_stat_sql_service.h"
+#include "share/stat/ob_opt_ds_stat.h"
+#include "share/stat/ob_opt_ds_stat_cache.h"
 
 namespace oceanbase {
 namespace common {
@@ -40,11 +42,24 @@ public:
   int get_table_stat(const uint64_t tenant_id,
                      const ObOptTableStat::Key &key,
                      ObOptTableStatHandle &handle);
+  int get_ds_stat(const ObOptDSStat::Key &key,
+                  ObOptDSStatHandle &handle);
 
   int erase_table_stat(const ObOptTableStat::Key &key);
   int erase_column_stat(const ObOptColumnStat::Key &key);
+  int erase_ds_stat(const ObOptDSStat::Key &key);
+  int add_ds_stat_cache(const ObOptDSStat::Key &key,
+                        const ObOptDSStat &value,
+                        ObOptDSStatHandle &ds_stat_handle);
 
   ObOptStatSqlService &get_sql_service() { return sql_service_; }
+
+  int get_table_rowcnt(const uint64_t tenant_id,
+                       const uint64_t table_id,
+                       const ObIArray<ObTabletID> &all_tablet_ids,
+                       const ObIArray<share::ObLSID> &all_ls_ids,
+                       int64_t &table_rowcnt);
+
 private:
   /**
     * 接口load_and_put_cache(key, handle)的实现，外部不应该直接调用这个函数
@@ -57,14 +72,22 @@ private:
   int init_key_column_stats(ObIAllocator &allocator,
                             ObIArray<const ObOptColumnStat::Key*> &keys,
                             ObIArray<ObOptKeyColumnStat> &key_column_stats);
+
+  int load_table_rowcnt_and_put_cache(const uint64_t tenant_id,
+                                      const uint64_t table_id,
+                                      const ObIArray<ObTabletID> &all_tablet_ids,
+                                      const ObIArray<share::ObLSID> &all_ls_ids,
+                                      int64_t &table_rowcnt);
 protected:
   bool inited_;
   static const int64_t DEFAULT_TAB_STAT_CACHE_PRIORITY = 1;
   static const int64_t DEFAULT_COL_STAT_CACHE_PRIORITY = 1;
+  static const int64_t DEFAULT_DS_STAT_CACHE_PRIORITY = 1;
   ObOptStatSqlService sql_service_;
 
   ObOptTableStatCache table_stat_cache_;
   ObOptColumnStatCache column_stat_cache_;
+  ObOptDSStatCache ds_stat_cache_;
 };
 
 }

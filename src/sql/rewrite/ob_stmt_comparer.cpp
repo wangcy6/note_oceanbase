@@ -189,6 +189,8 @@ bool ObStmtCompareContext::compare_const(const ObConstRawExpr &left, const ObCon
         }
       } else if (is_left_calc_item || is_right_calc_item) {
         bret = false;
+      } else if (ignore_param_) {
+        bret = ObExprEqualCheckContext::compare_const(left, right);
       } else if (left.get_result_type().get_param().is_equal(
                    right.get_result_type().get_param(), CS_TYPE_BINARY)) {
         ObPCParamEqualInfo info;
@@ -243,6 +245,8 @@ bool ObStmtCompareContext::compare_query(const ObQueryRefRawExpr &first,
   QueryRelation relation = QueryRelation::QUERY_UNCOMPARABLE;
   if (&first == &second) {
     bret = true;
+  } else if (first.is_set() != second.is_set() || first.is_multiset() != second.is_multiset()) {
+    bret = false;
   } else if (OB_FAIL(ObStmtComparer::check_stmt_containment(first.get_ref_stmt(),
                                                             second.get_ref_stmt(),
                                                             stmt_map_info,

@@ -149,7 +149,6 @@ void TestRootBlockInfo::prepare_block_root()
   char *io_buf = static_cast<char *>(allocator_.alloc(buf_size));
   ASSERT_TRUE(nullptr != io_buf);
   MEMCPY(io_buf + block_addr_.offset_, buf, block_addr_.size_);
-  write_info.io_desc_.set_category(ObIOCategory::SYS_IO);
   write_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_COMPACT_WRITE);
   write_info.buffer_ = io_buf;
   write_info.size_ = buf_size;
@@ -247,6 +246,7 @@ void TestSSTableMeta::prepare_create_sstable_param()
   param_.root_block_addr_.set_none_addr();
   param_.data_block_macro_meta_addr_.set_none_addr();
   param_.root_row_store_type_ = ObRowStoreType::FLAT_ROW_STORE;
+  param_.latest_row_store_type_ = ObRowStoreType::FLAT_ROW_STORE;
   param_.data_index_tree_height_ = 0;
   param_.index_blocks_cnt_ = 0;
   param_.data_blocks_cnt_ = 0;
@@ -451,7 +451,6 @@ TEST_F(TestSSTableMacroInfo, test_huge_block_ids)
   ObSSTableMacroInfo tmp_info;
   pos = 0;
   ASSERT_EQ(OB_SUCCESS, tmp_info.deserialize(&allocator_, des_meta_, buf, buf_len, pos));
-  ASSERT_EQ(OB_SUCCESS, tmp_info.deserialize_post_work());
   for (int i = 0; i < blocksstable::ObSSTableMacroInfo::BLOCK_CNT_THRESHOLD; i++) {
     ASSERT_EQ(sstable_macro_info.data_block_ids_.at(i), tmp_info.data_block_ids_.at(i));
   }
@@ -549,6 +548,7 @@ TEST_F(TestMigrationSSTableParam, test_migrate_sstable)
   src_sstable_param.root_block_addr_.set_none_addr();
   src_sstable_param.data_block_macro_meta_addr_.set_none_addr();
   src_sstable_param.root_row_store_type_ = ObRowStoreType::FLAT_ROW_STORE;
+  src_sstable_param.latest_row_store_type_ = ObRowStoreType::FLAT_ROW_STORE;
   src_sstable_param.data_index_tree_height_ = 0;
   src_sstable_param.index_blocks_cnt_ = 0;
   src_sstable_param.data_blocks_cnt_ = 0;

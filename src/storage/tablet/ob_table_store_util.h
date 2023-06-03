@@ -9,7 +9,6 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
-
 #ifndef OCEANBASE_STORAGE_OB_TABLE_STORE_UTIL_H_
 #define OCEANBASE_STORAGE_OB_TABLE_STORE_UTIL_H_
 
@@ -43,6 +42,7 @@ public:
     const common::ObIArray<ObITable *> &tables,
     const int64_t start_pos = 0);
   bool empty() const { return count_ <= 0; }
+  bool is_valid() const { return is_inited_ && count_ > 0; }
   int64_t count() const { return count_; }
   virtual void destroy();
 
@@ -147,6 +147,7 @@ public:
   int copy(const ObTableStoreIterator &other);
   int add_tables(ObMemtableArray &array, const int64_t start_pos = 0);
   int add_tables(ObITable **start, const int64_t count = 1);
+  int add_table(ObITable *input_table);
   int get_next(ObITable *&table);
 
   ObITable *get_boundary_table(const bool is_last);
@@ -223,7 +224,7 @@ struct ObTableStoreUtil
   static int compare_table_by_snapshot_version(const ObITable *ltable, const ObITable *rtable, bool &bret);
 
   static int sort_minor_tables(ObArray<ObITable *> &tables);
-  static int sort_major_tables(ObArray<ObITable *> &tables);
+  static int sort_major_tables(ObSEArray<ObITable *, MAX_SSTABLE_CNT_IN_STORAGE> &tables);
 
   static bool check_include_by_scn_range(const ObITable &ltable, const ObITable &rtable);
   static bool check_intersect_by_scn_range(const ObITable &ltable, const ObITable &rtable);

@@ -27,6 +27,8 @@
 #include "sql/engine/px/datahub/components/ob_dh_rollup_key.h"
 #include "sql/engine/px/datahub/components/ob_dh_barrier.h"
 #include "sql/engine/px/datahub/components/ob_dh_range_dist_wf.h"
+#include "sql/engine/px/datahub/components/ob_dh_second_stage_reporting_wf.h"
+#include "sql/engine/px/datahub/components/ob_dh_opt_stats_gather.h"
 
 namespace oceanbase
 {
@@ -34,6 +36,7 @@ namespace sql
 {
 
 class ObPxCoordOp;
+class ObPxObDfoMgr;
 class ObPxRootDfoAction
 {
 public:
@@ -46,6 +49,40 @@ public:
 
 };
 
+enum class TableAccessType {
+  NO_TABLE,
+  PURE_VIRTUAL_TABLE,
+  HAS_USER_TABLE
+};
+
+struct ObP2PDfoMapNode
+{
+  ObP2PDfoMapNode() : target_dfo_id_(OB_INVALID_ID),  addrs_() {}
+  ~ObP2PDfoMapNode() { addrs_.reset(); }
+  int assign(const ObP2PDfoMapNode &other) {
+    target_dfo_id_ = other.target_dfo_id_;
+    return addrs_.assign(other.addrs_);
+  }
+  void reset() {
+    target_dfo_id_ = OB_INVALID_ID;
+    addrs_.reset();
+  }
+  int64_t target_dfo_id_;
+  common::ObSArray<ObAddr>addrs_;
+  TO_STRING_KV(K(target_dfo_id_), K(addrs_));
+};
+struct ObTempTableP2PInfo
+{
+  ObTempTableP2PInfo() : temp_access_ops_(),  dfos_() {}
+  ~ObTempTableP2PInfo() { reset(); }
+  void reset() {
+    temp_access_ops_.reset();
+    dfos_.reset();
+  }
+  ObSEArray<const ObOpSpec *, 4> temp_access_ops_;
+  ObSEArray<ObDfo *, 4> dfos_;
+  TO_STRING_KV(K(temp_access_ops_), K(dfos_));
+};
 // 这些信息是调度时候需要用的变量，暂时统一叫做CoordInfo
 class ObPxCoordInfo
 {
@@ -62,13 +99,19 @@ public:
     interrupt_id_(interrupt_id),
     coord_(coord),
     batch_rescan_ctl_(NULL),
-    pruning_table_location_(NULL)
+    pruning_table_location_(NULL),
+    table_access_type_(TableAccessType::NO_TABLE),
+    qc_detectable_id_(),
+    p2p_dfo_map_(),
+    p2p_temp_table_info_()
   {}
   virtual ~ObPxCoordInfo() {}
   virtual void destroy()
   {
     dfo_mgr_.destroy();
     piece_msg_ctx_mgr_.reset();
+    p2p_dfo_map_.destroy();
+    p2p_temp_table_info_.reset();
   }
   void reset_for_rescan()
   {
@@ -76,7 +119,10 @@ public:
     dfo_mgr_.destroy();
     piece_msg_ctx_mgr_.reset();
     batch_rescan_ctl_ = NULL;
+    p2p_dfo_map_.reuse();
+    p2p_temp_table_info_.reset();
   }
+  int init();
   bool enable_px_batch_rescan() { return get_rescan_param_count() > 0; }
   int64_t get_rescan_param_count()
   {
@@ -85,6 +131,11 @@ public:
   int64_t get_batch_id() const
   {
     return NULL == batch_rescan_ctl_ ? 0 : batch_rescan_ctl_->cur_idx_;
+  }
+  // if there is no physical op visits user table and at least one physical op visits virtual table, ignore error
+  OB_INLINE bool should_ignore_vtable_error()
+  {
+    return TableAccessType::PURE_VIRTUAL_TABLE == table_access_type_;
   }
 public:
   ObDfoMgr dfo_mgr_;
@@ -97,6 +148,11 @@ public:
   ObPxCoordOp &coord_;
   ObBatchRescanCtl *batch_rescan_ctl_;
   const common::ObIArray<ObTableLocation> *pruning_table_location_;
+  TableAccessType table_access_type_;
+  ObDetectableId qc_detectable_id_;
+  // key = p2p_dh_id value = dfo_id + target_addrs
+  hash::ObHashMap<int64_t, ObP2PDfoMapNode, hash::NoPthreadDefendMode> p2p_dfo_map_;
+  ObTempTableP2PInfo p2p_temp_table_info_;
 };
 
 class ObDfoSchedulerBasic;
@@ -121,6 +177,9 @@ public:
   int on_piece_msg(ObExecContext &ctx, const ObDynamicSamplePieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRollupKeyPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRDWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObInitChannelPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObReportingWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObOptStatsGatherPieceMsg &pkt);
   // end DATAHUB msg processing
 
   ObPxCoordInfo &coord_info_;
@@ -148,13 +207,19 @@ public:
 
   // root dfo 的调度特殊路径
   int on_dfo_pair_thread_inited(ObExecContext &ctx, ObDfo &child, ObDfo &parent);
-  static int mark_rpc_filter(ObExecContext &ctx);
+  static int mark_rpc_filter(ObExecContext &ctx,
+                             ObJoinFilterDataCtx &bf_ctx,
+                             int64_t &each_group_size);
   // begin DATAHUB msg processing
   int on_piece_msg(ObExecContext &ctx, const ObBarrierPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObWinbufPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObDynamicSamplePieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRollupKeyPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRDWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObInitChannelPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObReportingWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObOptStatsGatherPieceMsg &pkt);
+  void clean_dtl_interm_result(ObExecContext &ctx);
   // end DATAHUB msg processing
 private:
   int do_cleanup_dfo(ObDfo &dfo);
@@ -169,7 +234,6 @@ private:
   ObPxRootDfoAction &root_dfo_action_;
   ObDfoSchedulerBasic *scheduler_;
 };
-
 
 } // end namespace sql
 } // end namespace oceanbase

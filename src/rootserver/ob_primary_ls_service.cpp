@@ -26,6 +26,7 @@
 #include "share/ob_share_util.h"//ObShareUtil
 #include "observer/ob_server_struct.h"//GCTX
 #include "rootserver/ob_tenant_recovery_reportor.h"//update_ls_recovery
+#include "rootserver/ob_tenant_info_loader.h"
 #include "rootserver/ob_tenant_role_transition_service.h"
 #include "storage/tx_storage/ob_ls_map.h"
 #include "storage/tx_storage/ob_ls_service.h"
@@ -236,7 +237,9 @@ bool ObTenantLSInfo::is_valid() const
 
 //Regardless of the tenant being dropped,
 //handle the asynchronous operation of status and history table
-int ObTenantLSInfo::process_ls_status_missmatch()
+int ObTenantLSInfo::process_ls_status_missmatch(
+    const bool lock_sys_ls,
+    const share::ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   share::ObLSStatusInfoArray status_info_array;
@@ -245,8 +248,7 @@ int ObTenantLSInfo::process_ls_status_missmatch()
   if (OB_ISNULL(sql_proxy_) || OB_ISNULL(tenant_schema_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("sql proxy or tenant schema is null", KR(ret), KP(tenant_schema_), KP(sql_proxy_));
-  } else if (OB_FAIL(ls_operator_.get_all_ls_by_order(
-                     ls_array))) {
+  } else if (OB_FAIL(ls_operator_.get_all_ls_by_order(lock_sys_ls, ls_array))) {
     LOG_WARN("failed to insert ls operation", KR(ret));
   } else {
     const uint64_t tenant_id = tenant_schema_->get_tenant_id();
@@ -265,7 +267,7 @@ int ObTenantLSInfo::process_ls_status_missmatch()
       const ObLSStatusMachineParameter &machine = status_machine_array.at(idx);
       //ignore error of each ls
       //may ls can not create success
-      if (OB_SUCCESS != (tmp_ret = fix_ls_status_(machine))) {
+      if (OB_SUCCESS != (tmp_ret = fix_ls_status_(machine, working_sw_status))) {
         LOG_WARN("failed to fix ls status", KR(ret), KR(tmp_ret), K(machine));
         ret = OB_SUCC(ret) ? tmp_ret : ret;
       }
@@ -357,7 +359,8 @@ int ObTenantLSInfo::construct_ls_status_machine_(
 //for drop tenant
 //ls_info:tenant_dropping, status_info:tenant_dropping, ls_info:empty, status_info:wait_offline
 //the sys ls can be tenant_dropping in status_info after all_users ls were deleted in ls_info
-int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine)
+int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine,
+                                   const ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   const share::ObLSStatusInfo &status_info = machine.status_info_;
@@ -379,14 +382,19 @@ int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine)
       if (OB_FAIL(ObLSAttrOperator::get_tenant_gts(tenant_id, drop_scn))) {
         LOG_WARN("failed to get gts", KR(ret), K(tenant_id));
       } else if (OB_FAIL(ls_life_agent.set_ls_offline(tenant_id,
+<<<<<<< HEAD
                      status_info.ls_id_, status_info.status_, drop_scn))) {
+=======
+                     status_info.ls_id_, status_info.status_,
+                     drop_scn, working_sw_status))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         LOG_WARN("failed to update ls status", KR(ret), K(status_info), K(tenant_id), K(drop_scn));
       }
     } else if (status_info.ls_is_creating()
                || status_info.ls_is_created()
                || status_info.ls_is_create_abort()) {
       //ls may create_abort
-      if (OB_FAIL(ls_life_agent.drop_ls(tenant_id, machine.ls_id_))) {
+      if (OB_FAIL(ls_life_agent.drop_ls(tenant_id, machine.ls_id_, working_sw_status))) {
         LOG_WARN("failed to delete ls", KR(ret), K(machine));
       }
     } else {
@@ -396,11 +404,12 @@ int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine)
   } else if (ls_is_creating_status(machine.ls_info_)) {
     //the ls may is in creating
     if (!status_info.is_valid()) {
+      // TODO fix later
       //in primary cluster, can create continue, but no need
-      if (OB_FAIL(ls_operator_.delete_ls(machine.ls_id_, machine.ls_info_))) {
+      if (OB_FAIL(ls_operator_.delete_ls(machine.ls_id_, machine.ls_info_, working_sw_status))) {
         LOG_WARN("failed to delete ls", KR(ret), K(machine));
       }
-    } else if (status_info.ls_is_creating()) {
+    } else if (status_info.ls_is_creating() && working_sw_status.is_normal_status()) {
       //TODO check the primary zone or unit group id is valid
       ObLSRecoveryStat recovery_stat;
       ObLSRecoveryStatOperator ls_recovery_operator;
@@ -412,12 +421,12 @@ int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine)
             K(recovery_stat));
       }
     } else if (status_info.ls_is_created()) {
-      if (OB_FAIL(process_ls_status_after_created_(status_info))) {
+      if (OB_FAIL(process_ls_status_after_created_(status_info, working_sw_status))) {
         LOG_WARN("failed to create ls", KR(ret), K(status_info));
       }
     } else if (status_info.ls_is_create_abort()) {
       //drop ls
-      if (OB_FAIL(ls_operator_.delete_ls(status_info.ls_id_, machine.ls_info_))) {
+      if (OB_FAIL(ls_operator_.delete_ls(status_info.ls_id_, machine.ls_info_, working_sw_status))) {
         LOG_WARN("failed to remove ls not normal", KR(ret), K(machine));
       }
     } else {
@@ -431,7 +440,7 @@ int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine)
     } else if (status_info.ls_is_created()) {
       if (OB_FAIL(status_operator_.update_ls_status(
               tenant_id, status_info.ls_id_, status_info.status_,
-              share::OB_LS_NORMAL, share::NORMAL_SWITCHOVER_STATUS, *sql_proxy_))) {
+              share::OB_LS_NORMAL, working_sw_status, *sql_proxy_))) {
         LOG_WARN("failed to update ls status", KR(ret), K(status_info), K(tenant_id));
       }
     } else {
@@ -439,20 +448,20 @@ int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine)
       LOG_WARN("status machine not expected", KR(ret), K(machine));
     }
   } else if (ls_is_dropping_status(machine.ls_info_)) {
-    if (FAILEDx(do_drop_ls_(status_info))) {
+    if (FAILEDx(do_drop_ls_(status_info, working_sw_status))) {
       LOG_WARN("failed to drop ls", KR(ret), K(status_info));
     }
   } else if (ls_is_pre_tenant_dropping_status(machine.ls_info_)) {
     if (!machine.ls_id_.is_sys_ls()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("normal ls can not in pre tenant dropping status", KR(ret), K(machine));
-    } else if (OB_FAIL(sys_ls_tenant_drop_(status_info))) {
+    } else if (OB_FAIL(sys_ls_tenant_drop_(status_info, working_sw_status))) {
       LOG_WARN("failed to process sys ls", KR(ret), K(status_info));
     }
   } else if (ls_is_tenant_dropping_status(machine.ls_info_)) {
     if (status_info.ls_is_wait_offline()) {
       //sys ls will tenant_dropping and wait offline
-    } else if (OB_FAIL(do_tenant_drop_ls_(status_info))) {
+    } else if (OB_FAIL(do_tenant_drop_ls_(status_info, working_sw_status))) {
       LOG_WARN("failed to drop ls", KR(ret), K(machine));
     }
   } else {
@@ -464,7 +473,7 @@ int ObTenantLSInfo::fix_ls_status_(const ObLSStatusMachineParameter &machine)
   return ret;
 }
 
-int ObTenantLSInfo::drop_tenant()
+int ObTenantLSInfo::drop_tenant(const ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   share::ObLSAttrArray ls_array;
@@ -478,13 +487,13 @@ int ObTenantLSInfo::drop_tenant()
       if (attr.get_ls_id().is_sys_ls()) {
         if (attr.ls_is_normal()) {
           if (OB_FAIL(ls_operator_.update_ls_status(attr.get_ls_id(),
-          attr.get_ls_status(), share::OB_LS_PRE_TENANT_DROPPING))) {
+          attr.get_ls_status(), share::OB_LS_PRE_TENANT_DROPPING, working_sw_status))) {
             LOG_WARN("failed to update ls status", KR(ret), K(attr));
           }
         }
       } else if (attr.ls_is_creating()) {
         //drop the status
-        if (OB_FAIL(ls_operator_.delete_ls(attr.get_ls_id(), attr.get_ls_status()))) {
+        if (OB_FAIL(ls_operator_.delete_ls(attr.get_ls_id(), attr.get_ls_status(), working_sw_status))) {
           LOG_WARN("failed to remove ls not normal", KR(ret), K(attr));
         }
       } else {
@@ -493,7 +502,7 @@ int ObTenantLSInfo::drop_tenant()
         if (!attr.ls_is_tenant_dropping()) {
           if (OB_FAIL(ls_operator_.update_ls_status(
                   attr.get_ls_id(), attr.get_ls_status(),
-                  share::OB_LS_TENANT_DROPPING))) {
+                  share::OB_LS_TENANT_DROPPING, working_sw_status))) {
             LOG_WARN("failed to update ls status", KR(ret), K(attr));
           } else {
             LOG_INFO("[LS_MGR] set ls to tenant dropping", KR(ret), K(attr));
@@ -539,7 +548,7 @@ int ObTenantLSInfo::gather_stat(bool for_recovery)
       } else {
         //get max ls id and max ls group id
         share::ObMaxIdFetcher id_fetcher(*sql_proxy_);
-        if (OB_FAIL(id_fetcher.fetch_max_id(*sql_proxy_, tenant_id, 
+        if (OB_FAIL(id_fetcher.fetch_max_id(*sql_proxy_, tenant_id,
                 share::OB_MAX_USED_LS_GROUP_ID_TYPE, max_ls_group_id_))) {
           LOG_WARN("failed to fetch max ls group id", KR(ret), K(tenant_id));
         } else if (OB_FAIL(id_fetcher.fetch_max_id(*sql_proxy_, tenant_id,
@@ -706,16 +715,28 @@ int ObTenantLSInfo::create_new_ls_for_recovery(
     const share::ObLSID &ls_id,
     const uint64_t ls_group_id,
     const SCN &create_scn,
+<<<<<<< HEAD
     ObMySQLTransaction &trans)
+=======
+    ObMySQLTransaction &trans,
+    const share::ObLSFlag &ls_flag)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   int ret = OB_SUCCESS;
   const bool is_recovery = true;
   int64_t info_index = OB_INVALID_INDEX_INT64;
   if (OB_UNLIKELY(!ls_id.is_valid()
                   || OB_INVALID_ID == ls_group_id
+<<<<<<< HEAD
                   || !create_scn.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("ls id is invalid", KR(ret), K(ls_id), K(ls_group_id), K(create_scn));
+=======
+                  || !create_scn.is_valid()
+                  || !ls_flag.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("ls id is invalid", KR(ret), K(ls_id), K(ls_group_id), K(create_scn), K(ls_flag));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else if (OB_UNLIKELY(!is_valid())
              || OB_ISNULL(tenant_schema_)
              || OB_ISNULL(sql_proxy_)) {
@@ -756,13 +777,18 @@ int ObTenantLSInfo::create_new_ls_for_recovery(
     } else if (OB_FAIL(new_info.init(tenant_id, ls_id,
                               ls_group_id,
                               share::OB_LS_CREATING,
-                              group_info.unit_group_id_, primary_zone))) {
+                              ls_flag.is_duplicate_ls() ? 0 : group_info.unit_group_id_,
+                              primary_zone, ls_flag))) {
       LOG_WARN("failed to init new info", KR(ret), K(tenant_id),
                K(ls_id), K(ls_group_id), K(group_info), K(primary_zone));
     } else if (OB_FAIL(get_zone_priority(primary_zone, *tenant_schema_, zone_priority))) {
       LOG_WARN("failed to get normalize primary zone", KR(ret), K(primary_zone), K(zone_priority));
     } else if (OB_FAIL(ls_life_agent.create_new_ls_in_trans(new_info, create_scn,
+<<<<<<< HEAD
             zone_priority.string(), trans))) {
+=======
+            zone_priority.string(), share::NORMAL_SWITCHOVER_STATUS, trans))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("failed to insert ls info", KR(ret), K(new_info), K(create_scn), K(zone_priority));
     } else if (OB_FAIL(add_ls_status_info_(new_info))) {
       LOG_WARN("failed to add new ls info to memory", KR(ret), K(new_info));
@@ -822,8 +848,8 @@ int ObTenantLSInfo::add_ls_status_info_(
     LOG_WARN("failed to remove status", KR(ret), K(ls_info));
   } else if (OB_FAIL(status_map_.set_refactored(ls_info.ls_id_, index))) {
     LOG_WARN("failed to remove ls from map", KR(ret), K(ls_info), K(index));
-  } else if (ls_info.ls_id_.is_sys_ls()) {
-    //sys ls no ls group
+  } else if (ls_info.ls_id_.is_sys_ls() || ls_info.is_duplicate_ls()) {
+    //sys ls and duplicate ls have no ls group
   } else if (OB_FAIL(add_ls_to_ls_group_(ls_info))) {
     LOG_WARN("failed to add ls info", KR(ret), K(ls_info));
   }
@@ -1030,6 +1056,7 @@ int ObTenantLSInfo::create_new_ls_for_empty_unit_group_(const uint64_t unit_grou
     share::ObLSID new_id;
     share::ObLSStatusInfo new_info;
     uint64_t new_ls_group_id = OB_INVALID_INDEX_INT64;
+    share::ObLSFlag flag(share::ObLSFlag::NORMAL_FLAG);
     if (OB_FAIL(fetch_new_ls_group_id(tenant_id, new_ls_group_id))) {
       LOG_WARN("failed to fetch new id", KR(ret), K(tenant_id));
     }
@@ -1040,10 +1067,10 @@ int ObTenantLSInfo::create_new_ls_for_empty_unit_group_(const uint64_t unit_grou
         LOG_WARN("failed to get new id", KR(ret), K(tenant_id));
       } else if (OB_FAIL(new_info.init(tenant_id, new_id, new_ls_group_id,
                                        share::OB_LS_CREATING, unit_group_id,
-                                       zone))) {
+                                       zone, flag))) {
         LOG_WARN("failed to init new info", KR(ret), K(new_id),
-                 K(new_ls_group_id), K(unit_group_id), K(zone), K(tenant_id));
-      } else if (OB_FAIL(create_new_ls_(new_info))) {
+                 K(new_ls_group_id), K(unit_group_id), K(zone), K(tenant_id), K(flag));
+      } else if (OB_FAIL(create_new_ls_(new_info, share::NORMAL_SWITCHOVER_STATUS))) {
         LOG_WARN("failed to add ls info", KR(ret), K(new_info));
       }
       LOG_INFO("[LS_MGR] create new ls for empty unit group", KR(ret), K(new_info));
@@ -1075,7 +1102,7 @@ int ObTenantLSInfo::try_drop_ls_of_deleting_unit_group_(const ObUnitGroupInfo &i
           int64_t info_index = 0;
           if (OB_FAIL(get_ls_status_info(ls_id, info, info_index))) {
             LOG_WARN("failed to get ls status info", KR(ret), K(ls_id));
-          } else if (OB_FAIL(drop_ls_(info))) {
+          } else if (OB_FAIL(drop_ls_(info, share::NORMAL_SWITCHOVER_STATUS))) {
             LOG_WARN("failed to drop ls", KR(ret), K(info));
           }
           LOG_INFO("[LS_MGR] drop ls for deleting unit group", KR(ret),
@@ -1087,7 +1114,8 @@ int ObTenantLSInfo::try_drop_ls_of_deleting_unit_group_(const ObUnitGroupInfo &i
   return ret;
 }
 
-int ObTenantLSInfo::drop_ls_(const share::ObLSStatusInfo &info)
+int ObTenantLSInfo::drop_ls_(const share::ObLSStatusInfo &info,
+                             const ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!is_valid())) {
@@ -1099,7 +1127,7 @@ int ObTenantLSInfo::drop_ls_(const share::ObLSStatusInfo &info)
   } else if (info.ls_is_normal()) {
     //try to set ls to dropping
     if (OB_FAIL(ls_operator_.update_ls_status(info.ls_id_,
-            share::OB_LS_NORMAL, share::OB_LS_DROPPING))) {
+            share::OB_LS_NORMAL, share::OB_LS_DROPPING, working_sw_status))) {
       LOG_WARN("failed to update ls status", KR(ret), K(info));
     }
   } else if (info.ls_is_created()) {
@@ -1112,7 +1140,7 @@ int ObTenantLSInfo::drop_ls_(const share::ObLSStatusInfo &info)
     //nothing
   } else if (info.ls_is_creating()) {
     //if status is in creating, the ls must in creating too
-    if (OB_FAIL(ls_operator_.delete_ls(info.ls_id_, share::OB_LS_CREATING))) {
+    if (OB_FAIL(ls_operator_.delete_ls(info.ls_id_, share::OB_LS_CREATING, working_sw_status))) {
       LOG_WARN("failed to process creating info", KR(ret), K(info));
     }
   } else {
@@ -1137,6 +1165,7 @@ int ObTenantLSInfo::check_ls_match_primary_zone()
     ObZone zone;
     share::ObLSID new_id;
     share::ObLSStatusInfo new_info;
+    share::ObLSFlag flag(share::ObLSFlag::NORMAL_FLAG);
     for (int64_t i = 0; OB_SUCC(ret) && i < ls_group_array_.count(); ++i) {
       ObLSGroupInfo &group_info = ls_group_array_.at(i);
       //check the unit group is active
@@ -1155,10 +1184,10 @@ int ObTenantLSInfo::check_ls_match_primary_zone()
           LOG_WARN("failed to get new id", KR(ret), K(tenant_id));
         } else if (OB_FAIL(new_info.init(tenant_id, new_id, group_info.ls_group_id_,
                                          share::OB_LS_CREATING,
-                                         group_info.unit_group_id_, zone))) {
+                                         group_info.unit_group_id_, zone, flag))) {
           LOG_WARN("failed to init new info", KR(ret), K(new_id),
-                   K(group_info), K(zone), K(tenant_id));
-        } else if (OB_FAIL(create_new_ls_(new_info))) {
+                   K(group_info), K(zone), K(tenant_id), K(flag));
+        } else if (OB_FAIL(create_new_ls_(new_info, share::NORMAL_SWITCHOVER_STATUS))) {
           LOG_WARN("failed to create new ls", KR(ret), K(new_info));
         }
         LOG_INFO("[LS_MGR] create new ls of primary zone", KR(ret), K(new_info),
@@ -1187,7 +1216,8 @@ int ObTenantLSInfo::get_zone_priority(const ObZone &primary_zone,
 }
 
 
-int ObTenantLSInfo::create_new_ls_(const share::ObLSStatusInfo &status_info)
+int ObTenantLSInfo::create_new_ls_(const share::ObLSStatusInfo &status_info,
+                                   const share::ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!is_valid())) {
@@ -1202,7 +1232,11 @@ int ObTenantLSInfo::create_new_ls_(const share::ObLSStatusInfo &status_info)
   } else {
     share::ObLSLifeAgentManager ls_life_agent(*sql_proxy_);
     share::ObLSAttr ls_info;
+<<<<<<< HEAD
     share::ObLSFlag flag = share::OB_LS_FLAG_NORMAL;//TODO
+=======
+    share::ObLSFlag flag = status_info.get_flag();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     SCN create_scn;
     ObSqlString zone_priority;
     if (OB_FAIL(ObLSAttrOperator::get_tenant_gts(status_info.tenant_id_, create_scn))) {
@@ -1210,19 +1244,31 @@ int ObTenantLSInfo::create_new_ls_(const share::ObLSStatusInfo &status_info)
     } else if (OB_FAIL(ls_info.init(status_info.ls_id_, status_info.ls_group_id_, flag,
                              share::OB_LS_CREATING, share::OB_LS_OP_CREATE_PRE, create_scn))) {
       LOG_WARN("failed to init new operation", KR(ret), K(status_info), K(create_scn));
+<<<<<<< HEAD
     } else if (OB_FAIL(ls_operator_.insert_ls(ls_info, max_ls_group_id_))) {
+=======
+    } else if (OB_FAIL(ls_operator_.insert_ls(ls_info, max_ls_group_id_, working_sw_status))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("failed to insert new operation", KR(ret), K(ls_info), K(max_ls_group_id_));
     } else if (OB_FAIL(get_zone_priority(status_info.primary_zone_,
             *tenant_schema_, zone_priority))) {
       LOG_WARN("failed to get normalize primary zone", KR(ret), K(status_info),
           K(zone_priority), K(tenant_schema_));
     } else if (OB_FAIL(ls_life_agent.create_new_ls(status_info, create_scn,
+<<<<<<< HEAD
             zone_priority.string()))) {
+=======
+            zone_priority.string(), working_sw_status))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("failed to create new ls", KR(ret), K(status_info), K(create_scn),
           K(zone_priority));
     } else if (OB_FAIL(do_create_ls_(status_info, create_scn))) {
       LOG_WARN("failed to create ls", KR(ret), K(status_info), K(create_scn));
+<<<<<<< HEAD
     } else if (OB_FAIL(process_ls_status_after_created_(status_info))) {
+=======
+    } else if (OB_FAIL(process_ls_status_after_created_(status_info, working_sw_status))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("failed to update ls status", KR(ret), K(status_info));
     }
     LOG_INFO("[LS_MGR] create new ls", KR(ret), K(status_info));
@@ -1358,7 +1404,8 @@ int ObTenantLSInfo::do_create_ls_(const share::ObLSStatusInfo &info,
   return ret;
 }
 
-int ObTenantLSInfo::process_ls_status_after_created_(const share::ObLSStatusInfo &status_info)
+int ObTenantLSInfo::process_ls_status_after_created_(const share::ObLSStatusInfo &status_info,
+                                                     const ObTenantSwitchoverStatus &working_sw_status)
 {
   //do not check ls status
   int ret = OB_SUCCESS;
@@ -1369,17 +1416,18 @@ int ObTenantLSInfo::process_ls_status_after_created_(const share::ObLSStatusInfo
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("sql proxy is null", KR(ret));
   } else if (OB_FAIL(ls_operator_.update_ls_status(
-                 status_info.ls_id_, share::OB_LS_CREATING, share::OB_LS_NORMAL))) {
+                 status_info.ls_id_, share::OB_LS_CREATING, share::OB_LS_NORMAL, working_sw_status))) {
     LOG_WARN("failed to update ls status", KR(ret), K(status_info));
   } else if (OB_FAIL(status_operator_.update_ls_status(
                  status_info.tenant_id_, status_info.ls_id_, share::OB_LS_CREATED,
-                 share::OB_LS_NORMAL, share::NORMAL_SWITCHOVER_STATUS, *sql_proxy_))) {
+                 share::OB_LS_NORMAL, working_sw_status, *sql_proxy_))) {
     LOG_WARN("failed to update ls status", KR(ret), K(status_info));
   }
   return ret;
 }
 
-int ObTenantLSInfo::do_tenant_drop_ls_(const share::ObLSStatusInfo &status_info)
+int ObTenantLSInfo::do_tenant_drop_ls_(const share::ObLSStatusInfo &status_info,
+                                       const ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   LOG_INFO("[LS_EXEC] start to tenant drop ls", K(status_info));
@@ -1398,12 +1446,12 @@ int ObTenantLSInfo::do_tenant_drop_ls_(const share::ObLSStatusInfo &status_info)
     //status_info may in created, normal, dropping, tenant_dropping
     if (OB_FAIL(status_operator_.update_ls_status(
               status_info.tenant_id_, status_info.ls_id_,
-              status_info.status_, share::OB_LS_TENANT_DROPPING,
-              share::NORMAL_SWITCHOVER_STATUS, *sql_proxy_))) {
+              status_info.status_, share::OB_LS_TENANT_DROPPING, working_sw_status,
+              *sql_proxy_))) {
       LOG_WARN("failed to update ls status", KR(ret), K(status_info));
     }
   }
-  if (FAILEDx(check_ls_can_offline_by_rpc_(status_info, can_offline))) {
+  if (FAILEDx(check_ls_can_offline_by_rpc_(status_info, share::OB_LS_TENANT_DROPPING, can_offline))) {
     // send rpc to observer
     LOG_WARN("failed to check ls can offline", KR(ret), K(status_info));
   } else if (can_offline) {
@@ -1411,7 +1459,8 @@ int ObTenantLSInfo::do_tenant_drop_ls_(const share::ObLSStatusInfo &status_info)
     SCN drop_scn;
     if (!status_info.ls_id_.is_sys_ls()) {
       //sys ls cannot delete ls, after ls is in tenant dropping
-      if (OB_FAIL(ls_operator_.delete_ls(status_info.ls_id_, share::OB_LS_TENANT_DROPPING))) {
+      if (OB_FAIL(ls_operator_.delete_ls(status_info.ls_id_, share::OB_LS_TENANT_DROPPING,
+                                         working_sw_status))) {
         LOG_WARN("failed to delete ls", KR(ret), K(status_info));
       } else if (OB_FAIL(ObLSAttrOperator::get_tenant_gts(status_info.tenant_id_, drop_scn))) {
         LOG_WARN("failed to get gts", KR(ret), K(status_info));
@@ -1421,7 +1470,11 @@ int ObTenantLSInfo::do_tenant_drop_ls_(const share::ObLSStatusInfo &status_info)
       drop_scn.set_base();
     }
     if (FAILEDx(ls_life_agent.set_ls_offline(status_info.tenant_id_,
+<<<<<<< HEAD
             status_info.ls_id_, status_info.status_, drop_scn))) {
+=======
+            status_info.ls_id_, status_info.status_, drop_scn, working_sw_status))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("failed to update ls info", KR(ret), K(status_info), K(drop_scn));
     }
   }
@@ -1430,7 +1483,8 @@ int ObTenantLSInfo::do_tenant_drop_ls_(const share::ObLSStatusInfo &status_info)
   return ret;
 }
 
-int ObTenantLSInfo::do_drop_ls_(const share::ObLSStatusInfo &status_info)
+int ObTenantLSInfo::do_drop_ls_(const share::ObLSStatusInfo &status_info,
+                                const ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   LOG_INFO("[LS_EXEC] start to drop ls", K(status_info));
@@ -1446,7 +1500,8 @@ int ObTenantLSInfo::do_drop_ls_(const share::ObLSStatusInfo &status_info)
     if (OB_FAIL(status_operator_.update_ls_status(
             status_info.tenant_id_, status_info.ls_id_,
             status_info.status_, share::OB_LS_DROPPING,
-            share::NORMAL_SWITCHOVER_STATUS, *sql_proxy_))) {
+            working_sw_status,
+            *sql_proxy_))) {
       LOG_WARN("failed to update ls status", KR(ret), K(status_info));
     }
   } else if (status_info.ls_is_dropping()) {
@@ -1460,17 +1515,26 @@ int ObTenantLSInfo::do_drop_ls_(const share::ObLSStatusInfo &status_info)
   if (OB_SUCC(ret) && tablet_empty) {
     // send rpc to observer
     bool can_offline = false;
-    if (OB_FAIL(check_ls_can_offline_by_rpc_(status_info, can_offline))) {
+    if (OB_FAIL(check_ls_can_offline_by_rpc_(status_info, share::OB_LS_DROPPING, can_offline))) {
       LOG_WARN("failed to check ls can offline", KR(ret), K(status_info));
     } else if (can_offline) {
       ObLSLifeAgentManager ls_life_agent(*sql_proxy_);
       SCN drop_scn;
+<<<<<<< HEAD
       if (OB_FAIL(ls_operator_.delete_ls(status_info.ls_id_, share::OB_LS_DROPPING))) {
+=======
+      if (OB_FAIL(ls_operator_.delete_ls(status_info.ls_id_, share::OB_LS_DROPPING,
+                                         working_sw_status))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         LOG_WARN("failed to delete ls", KR(ret), K(status_info));
       } else if (OB_FAIL(ObLSAttrOperator::get_tenant_gts(status_info.tenant_id_, drop_scn))) {
         LOG_WARN("failed to get gts", KR(ret), K(status_info));
       } else if (OB_FAIL(ls_life_agent.set_ls_offline(status_info.tenant_id_,
+<<<<<<< HEAD
               status_info.ls_id_, status_info.status_, drop_scn))) {
+=======
+              status_info.ls_id_, status_info.status_, drop_scn, working_sw_status))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         LOG_WARN("failed to update ls info", KR(ret), K(status_info), K(drop_scn));
       }
     }
@@ -1481,7 +1545,8 @@ int ObTenantLSInfo::do_drop_ls_(const share::ObLSStatusInfo &status_info)
 }
 
 
-int ObTenantLSInfo::sys_ls_tenant_drop_(const share::ObLSStatusInfo &info)
+int ObTenantLSInfo::sys_ls_tenant_drop_(const share::ObLSStatusInfo &info,
+                                        const share::ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   const ObLSStatus target_status = share::OB_LS_TENANT_DROPPING;
@@ -1495,8 +1560,8 @@ int ObTenantLSInfo::sys_ls_tenant_drop_(const share::ObLSStatusInfo &info)
     LOG_WARN("sql proxy is null", KR(ret), KP(sql_proxy_));
   } else if (info.ls_is_normal()) {
     if (OB_FAIL(status_operator_.update_ls_status(info.tenant_id_,
-            info.ls_id_, info.status_, pre_status,
-            share::NORMAL_SWITCHOVER_STATUS, *sql_proxy_))) {
+            info.ls_id_, info.status_, pre_status, working_sw_status,
+            *sql_proxy_))) {
       LOG_WARN("failed to update ls status", KR(ret), K(info), K(pre_status));
     }
   } else if (pre_status == info.status_) {
@@ -1509,10 +1574,11 @@ int ObTenantLSInfo::sys_ls_tenant_drop_(const share::ObLSStatusInfo &info)
   if (FAILEDx(check_sys_ls_can_offline_(can_offline))) {
     LOG_WARN("failed to check sys ls can offline", KR(ret));
   } else if (can_offline) {
-    if (OB_FAIL(ls_operator_.update_ls_status(info.ls_id_, pre_status, target_status))) {
+    if (OB_FAIL(ls_operator_.update_ls_status(info.ls_id_, pre_status, target_status,
+                                              working_sw_status))) {
       LOG_WARN("failed to update ls status", KR(ret), K(info), K(pre_status), K(target_status));
     } else if (OB_FAIL(status_operator_.update_ls_status(info.tenant_id_,
-            info.ls_id_, pre_status, target_status, share::NORMAL_SWITCHOVER_STATUS, *sql_proxy_))) {
+            info.ls_id_, pre_status, target_status, working_sw_status, *sql_proxy_))) {
       LOG_WARN("failed to update ls status", KR(ret), K(info), K(pre_status), K(target_status));
     }
   }
@@ -1591,19 +1657,22 @@ int ObTenantLSInfo::check_ls_empty_(const share::ObLSStatusInfo &info, bool &emp
   return ret;
 }
 
-int ObTenantLSInfo::check_ls_can_offline_by_rpc_(const share::ObLSStatusInfo &info, bool &can_offline)
+int ObTenantLSInfo::check_ls_can_offline_by_rpc_(const share::ObLSStatusInfo &info,
+    const share::ObLSStatus &current_ls_status, bool &can_offline)
 {
   int ret = OB_SUCCESS;
   share::ObLSInfo ls_info;
   const share::ObLSReplica *replica = NULL;
-  if (OB_UNLIKELY(!info.is_valid())) {
+  if (OB_UNLIKELY(!info.is_valid()
+        || !ls_is_tenant_dropping_status(current_ls_status) && ! ls_is_dropping_status(current_ls_status))) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("info not valid", KR(ret), K(info));
+    LOG_WARN("info not valid", KR(ret), K(info), K(current_ls_status));
   } else if (OB_ISNULL(lst_operator_) || OB_ISNULL(rpc_proxy_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("lst operator or proxy is null", KR(ret), KP(lst_operator_),
              KP(rpc_proxy_));
-  } else if (OB_FAIL(lst_operator_->get(GCONF.cluster_id, info.tenant_id_, info.ls_id_, ls_info))) {
+  } else if (OB_FAIL(lst_operator_->get(GCONF.cluster_id, info.tenant_id_,
+             info.ls_id_, share::ObLSTable::DEFAULT_MODE, ls_info))) {
     LOG_WARN("failed to get ls info", KR(ret), K(info));
   } else if (OB_FAIL(ls_info.find_leader(replica))) {
     LOG_WARN("failed to find leader", KR(ret), K(ls_info));
@@ -1613,8 +1682,8 @@ int ObTenantLSInfo::check_ls_can_offline_by_rpc_(const share::ObLSStatusInfo &in
   } else {
     const int64_t timeout = GCONF.rpc_timeout;
     obrpc::ObCheckLSCanOfflineArg arg;
-    if (OB_FAIL(arg.init(info.tenant_id_, info.ls_id_))) {
-      LOG_WARN("failed to init arg", KR(ret), K(arg));
+    if (OB_FAIL(arg.init(info.tenant_id_, info.ls_id_, current_ls_status))) {
+      LOG_WARN("failed to init arg", KR(ret), K(info), K(current_ls_status));
     } else if (OB_FAIL(rpc_proxy_->to(replica->get_server())
                            .by(info.tenant_id_)
                            .timeout(timeout)
@@ -1647,7 +1716,7 @@ int ObTenantLSInfo::adjust_user_tenant_primary_zone()
       LOG_WARN("failed to get tenant primary zone info array", KR(ret), K(tenant_id));
     }
   }
-  
+
   if (OB_SUCC(ret)) {
     uint64_t last_ls_group_id = OB_INVALID_ID;
     share::ObLSPrimaryZoneInfoArray tmp_info_array;
@@ -1677,7 +1746,7 @@ int ObTenantLSInfo::adjust_user_tenant_primary_zone()
       }
     }
   }
-  
+
   return ret;
 }
 
@@ -1688,6 +1757,7 @@ int ObTenantLSInfo::try_update_ls_primary_zone_(
     const common::ObSqlString &zone_priority)
 {
   int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
   if (OB_UNLIKELY(!primary_zone_info.is_valid()
         || new_primary_zone.is_empty() || zone_priority.empty())) {
     ret = OB_INVALID_ARGUMENT;
@@ -1699,11 +1769,22 @@ int ObTenantLSInfo::try_update_ls_primary_zone_(
   } else if (new_primary_zone != primary_zone_info.get_primary_zone()
       || zone_priority.string() != primary_zone_info.get_zone_priority_str()) {
     ObLSLifeAgentManager ls_life_agent(*GCTX.sql_proxy_);
-    if (OB_FAIL(ls_life_agent.update_ls_primary_zone(primary_zone_info.get_tenant_id(),
-            primary_zone_info.get_ls_id(),
+    ObLSInfo ls_info;
+    const uint64_t tenant_id = primary_zone_info.get_tenant_id();
+    const ObLSID ls_id = primary_zone_info.get_ls_id();
+    if (OB_FAIL(ls_life_agent.update_ls_primary_zone(tenant_id, ls_id,
             new_primary_zone, zone_priority.string()))) {
       LOG_WARN("failed to update ls primary zone", KR(ret), K(primary_zone_info),
           K(new_primary_zone), K(zone_priority));
+    } else if (OB_ISNULL(GCTX.lst_operator_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("GCTX.lst_operator_ is NULL", KR(ret));
+    } else if (OB_FAIL(GCTX.lst_operator_->get(GCONF.cluster_id,
+            tenant_id, ls_id, share::ObLSTable::DEFAULT_MODE, ls_info))) {
+      LOG_WARN("get ls info from GCTX.lst_operator_ failed", KR(ret), K(tenant_id), K(ls_id));
+    } else if (OB_TMP_FAIL(ObRootUtils::try_notify_switch_ls_leader(GCTX.srv_rpc_proxy_, ls_info,
+            obrpc::ObNotifySwitchLeaderArg::MODIFY_PRIMARY_ZONE))) {
+      LOG_WARN("failed to switch ls leader", KR(ret), KR(tmp_ret), K(ls_id), K(ls_info));
     }
     LOG_INFO("[LS_MGR] update ls primary zone", KR(ret), K(new_primary_zone),
         K(zone_priority), K(primary_zone_info));
@@ -1729,7 +1810,7 @@ int ObTenantLSInfo::adjust_primary_zone_by_ls_group_(
   const uint64_t tenant_id = tenant_schema.get_tenant_id();
   const int64_t ls_count = primary_zone_infos.count();
   const int64_t primary_zone_count = primary_zone_array.count();
-  if (OB_UNLIKELY(0 == primary_zone_count 
+  if (OB_UNLIKELY(0 == primary_zone_count
         || 0 == ls_count || !tenant_schema.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", KR(ret), K(primary_zone_infos),
@@ -1737,7 +1818,7 @@ int ObTenantLSInfo::adjust_primary_zone_by_ls_group_(
   } else if (OB_ISNULL(GCTX.sql_proxy_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("sql proxy is null", KR(ret));
-  } else if (1 == ls_count 
+  } else if (1 == ls_count
       && primary_zone_infos.at(0).get_ls_id().is_sys_ls()) {
     //user sys ls is equal to meta sys ls
     share::ObLSStatusOperator status_op;
@@ -1752,11 +1833,11 @@ int ObTenantLSInfo::adjust_primary_zone_by_ls_group_(
     }
   } else {
     //Algorithm Description:
-    //Assumption: We have 5 ls, 3 primary_zones(z1, z2, z3). 
+    //Assumption: We have 5 ls, 3 primary_zones(z1, z2, z3).
     //1. Set the primary zone of ls to  tenant's primary zone,
     //choose the least number of log streams on the zone is selected for all zones
-    //2. After all the primary_zone of the ls are in the primary_zonw of the tenant, 
-    //choose the primary_zone with the most and least ls. Adjust a certain number of ls to the smallest zone without exceeding the balance 
+    //2. After all the primary_zone of the ls are in the primary_zonw of the tenant,
+    //choose the primary_zone with the most and least ls. Adjust a certain number of ls to the smallest zone without exceeding the balance
     //while guaranteeing that the number of the zone with the most is no less than the average.
     ObArray<ObZone> ls_primary_zone;//is match with primary_zone_infos
     ObSEArray<uint64_t, 3> count_group_by_zone;//ls count of each primary zone
@@ -1777,7 +1858,7 @@ int ObTenantLSInfo::adjust_primary_zone_by_ls_group_(
         LOG_WARN("failed to update ls primary zone", KR(ret), "primary_zone_info", primary_zone_infos.at(i),
             K(new_primary_zone), K(new_zone_priority));
       }
-    } 
+    }
   }
   return ret;
 }
@@ -1858,7 +1939,6 @@ int ObTenantLSInfo::balance_ls_primary_zone(
   } else {
     int64_t max_count = -1, max_index = 0;
     int64_t min_count = INT64_MAX, min_index = 0;
-    const int64_t each_ls_max_count = ceil((double)(ls_count)/primary_zone_count);
     do {
       max_count = -1, max_index = 0;
       min_count = INT64_MAX, min_index = 0;
@@ -1881,16 +1961,15 @@ int ObTenantLSInfo::balance_ls_primary_zone(
             K(primary_zone_array), K(primary_zone_count), K(ls_primary_zone));
       } else if (max_count - min_count > 1) {
         //choose the max count to min count
-        int64_t need_change = min(each_ls_max_count - min_count, max_count - each_ls_max_count);
-        for (int64_t i = 0; OB_SUCC(ret) && i < ls_count && need_change > 0; ++i) {
+        for (int64_t i = 0; OB_SUCC(ret) && i < ls_count; ++i) {
           if (ls_primary_zone.at(i) == primary_zone_array.at(max_index)) {
             if (OB_FAIL(ls_primary_zone.at(i).assign(primary_zone_array.at(min_index)))) {
               LOG_WARN("failed to push back ls primary zone", KR(ret), K(min_index));
             } else {
-              need_change--;
               count_group_by_zone.at(max_index)--;
               count_group_by_zone.at(min_index)++;
             }
+            break;
           }
         }
       }
@@ -1899,7 +1978,33 @@ int ObTenantLSInfo::balance_ls_primary_zone(
   return ret;
 }
 
-
+int ObTenantLSInfo::create_duplicate_ls()
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_valid()) || OB_ISNULL(tenant_schema_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("tenant ls info not valid", KR(ret), KP(tenant_schema_));
+  } else if (OB_UNLIKELY(0 == primary_zone_.count())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("primary zone is invalid", KR(ret));
+  } else {
+    const uint64_t tenant_id = tenant_schema_->get_tenant_id();
+    const ObZone &zone = primary_zone_.at(0);
+    share::ObLSID new_id;
+    share::ObLSStatusInfo new_info;
+    ObLSFlag flag(ObLSFlag::DUPLICATE_FLAG);
+    if (OB_FAIL(fetch_new_ls_id(tenant_id, new_id))) {
+      LOG_WARN("failed to get new id", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(new_info.init(tenant_id, new_id, 0/*ls_group_id*/, share::OB_LS_CREATING,
+                                     0/*unit_group_id*/, zone, flag))) {
+      LOG_WARN("failed to init new info", KR(ret), K(new_id), K(zone), K(tenant_id), K(flag));
+    } else if (OB_FAIL(create_new_ls_(new_info, share::NORMAL_SWITCHOVER_STATUS))) {
+      LOG_WARN("failed to create duplicate ls", KR(ret), K(new_info));
+    }
+    LOG_INFO("[LS_MGR] create duplicate ls", KR(ret), K(new_info));
+  }
+  return ret;
+}
 //////////////ObTenantThreadHelper
 int ObTenantThreadHelper::create(
     const char* thread_name, int tg_def_id, ObTenantThreadHelper &tenant_thread)
@@ -1913,14 +2018,14 @@ int ObTenantThreadHelper::create(
     LOG_WARN("thread name is null", KR(ret));
   } else if (OB_FAIL(TG_CREATE_TENANT(tg_def_id, tg_id_))) {
     LOG_ERROR("create tg failed", KR(ret));
-  } else if (OB_FAIL(TG_SET_RUNNABLE_AND_START(tg_id_, *this))) {
+  } else if (OB_FAIL(TG_SET_RUNNABLE(tg_id_, *this))) {
     LOG_ERROR("set thread runable fail", KR(ret));
   } else if (OB_FAIL(thread_cond_.init(ObWaitEventIds::REENTRANT_THREAD_COND_WAIT))) {
     LOG_WARN("fail to init cond, ", KR(ret));
   } else {
-    stop();
     thread_name_ = thread_name;
     is_created_ = true;
+    is_first_time_to_start_ = true;
   }
   return ret;
 }
@@ -1931,6 +2036,12 @@ int ObTenantThreadHelper::start()
   if (OB_UNLIKELY(!is_created_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret));
+  } else if (is_first_time_to_start_) {
+    if (OB_FAIL(TG_START(tg_id_))) {
+      LOG_WARN("fail ed to start at first time", KR(ret), K(tg_id_), K(thread_name_));
+    } else {
+      is_first_time_to_start_ = false;
+    }
   } else if (OB_FAIL(TG_REENTRANT_LOGICAL_START(tg_id_))) {
     LOG_WARN("failed to start", KR(ret));
   }
@@ -1956,13 +2067,36 @@ void ObTenantThreadHelper::wait()
   LOG_INFO("[TENANT THREAD] thread wait finish", K(tg_id_), K(thread_name_));
 }
 
+void ObTenantThreadHelper::mtl_thread_stop()
+{
+  LOG_INFO("[TENANT THREAD] thread stop start", K(tg_id_), K(thread_name_));
+  if (-1 != tg_id_) {
+    TG_STOP(tg_id_);
+  }
+  LOG_INFO("[TENANT THREAD] thread stop finish", K(tg_id_), K(thread_name_));
+}
+
+void ObTenantThreadHelper::mtl_thread_wait()
+{
+  LOG_INFO("[TENANT THREAD] thread wait start", K(tg_id_), K(thread_name_));
+  if (-1 != tg_id_) {
+    {
+      ObThreadCondGuard guard(thread_cond_);
+      thread_cond_.broadcast();
+    }
+    TG_WAIT(tg_id_);
+    is_first_time_to_start_ = true;
+  }
+  LOG_INFO("[TENANT THREAD] thread wait finish", K(tg_id_), K(thread_name_));
+}
+
 void ObTenantThreadHelper::destroy()
 {
   LOG_INFO("[TENANT THREAD] thread destory start", K(tg_id_), K(thread_name_));
   if (-1 != tg_id_) {
     TG_STOP(tg_id_);
     {
-      ObThreadCondGuard guard(thread_cond_); 
+      ObThreadCondGuard guard(thread_cond_);
       thread_cond_.broadcast();
     }
     TG_WAIT(tg_id_);
@@ -1970,6 +2104,7 @@ void ObTenantThreadHelper::destroy()
     tg_id_ = -1;
   }
   is_created_ = false;
+  is_first_time_to_start_ = true;
   LOG_INFO("[TENANT THREAD] thread destory finish", K(tg_id_), K(thread_name_));
 }
 
@@ -2006,16 +2141,11 @@ void ObTenantThreadHelper::run1()
 }
 void ObTenantThreadHelper::idle(const int64_t idle_time_us)
 {
-  ObThreadCondGuard guard(thread_cond_); 
+  ObThreadCondGuard guard(thread_cond_);
   thread_cond_.wait_us(idle_time_us);
 }
 
 //////////////ObPrimaryLSService
-int ObPrimaryLSService::mtl_init(ObPrimaryLSService *&ka)
-{
-  return ka->init();
-}
-
 int ObPrimaryLSService::init()
 {
   int ret = OB_SUCCESS;
@@ -2026,6 +2156,8 @@ int ObPrimaryLSService::init()
   } else if (OB_FAIL(ObTenantThreadHelper::create("PLSSer", 
           lib::TGDefIDs::SimpleLSService, *this))) {
     LOG_WARN("failed to create thread", KR(ret));
+  } else if (OB_FAIL(ObTenantThreadHelper::start())) {
+    LOG_WARN("fail to start", KR(ret));
   } else {
     inited_ = true;
   }
@@ -2046,10 +2178,11 @@ void ObPrimaryLSService::do_work()
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
   } else {
-    int64_t idle_time_us = 100 * 1000L;
+    int64_t idle_time_us = 1000 * 1000L;
     int tmp_ret = OB_SUCCESS;
+    ObAllTenantInfo tenant_info;
     while (!has_set_stop()) {
-      idle_time_us = is_meta_tenant(tenant_id_) ? 100 * 1000L : 10 * 1000 * 1000L;
+      idle_time_us = 1000 * 1000L;
       {
         ObCurTraceId::init(GCONF.self_addr_);
         share::schema::ObSchemaGetterGuard schema_guard;
@@ -2076,6 +2209,18 @@ void ObPrimaryLSService::do_work()
             if (OB_SUCCESS != (tmp_ret = try_force_drop_tenant_(user_tenant_id))) {
               ret = OB_SUCC(ret) ? tmp_ret : ret;
               LOG_WARN("failed to drop tenant", KR(ret), KR(tmp_ret), K(user_tenant_id));
+            }
+            MTL_SWITCH(user_tenant_id) {
+              ObTenantInfoLoader *tenant_info_loader = MTL(ObTenantInfoLoader*);
+              if (OB_ISNULL(tenant_info_loader)) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("tenant report is null", KR(ret), K(tenant_id_));
+              } else if (OB_FAIL(tenant_info_loader->get_tenant_info(tenant_info))) {
+                LOG_WARN("failed to get tenant info", KR(ret));
+              } else if (!tenant_info.is_primary()) {
+                //standby and restore
+                idle_time_us = 100 * 1000L;
+              }
             }
           }
         } else {
@@ -2186,15 +2331,17 @@ int ObPrimaryLSService::process_user_tenant_(const share::schema::ObTenantSchema
     //if tenant schema is in dropping
     //set the creating ls to create_abort,
     //set the normal or dropping tenant to drop_tennat_pre
-    if (OB_FAIL(tenant_stat.drop_tenant())) {
+    if (OB_FAIL(tenant_stat.drop_tenant(share::NORMAL_SWITCHOVER_STATUS))) {
       LOG_WARN("failed to drop tenant", KR(ret), K(tenant_id));
-    } else if (OB_FAIL(tenant_stat.process_ls_status_missmatch())) {
+    } else if (OB_FAIL(tenant_stat.process_ls_status_missmatch(false/* lock_sys_ls */,
+                                                               share::NORMAL_SWITCHOVER_STATUS))) {
       LOG_WARN("failed to process ls status missmatch", KR(ret), KR(tmp_ret));
     }
   } else {
     //normal tenant
     //some ls may failed to create ls, but can continue
-    if (OB_SUCCESS != (tmp_ret = tenant_stat.process_ls_status_missmatch())) {
+    if (OB_SUCCESS != (tmp_ret = tenant_stat.process_ls_status_missmatch(false/* lock_sys_ls */,
+                                                                share::NORMAL_SWITCHOVER_STATUS))) {
       ret = OB_SUCC(ret) ? tmp_ret : ret;
       LOG_WARN("failed to process ls status missmatch", KR(ret), KR(tmp_ret));
     }
@@ -2323,6 +2470,10 @@ int ObPrimaryLSService::gather_tenant_recovery_stat_()
     const uint64_t user_tenant_id = gen_user_tenant_id(tenant_id_);
     SCN sync_scn;
     SCN min_wrs_scn;
+<<<<<<< HEAD
+=======
+    DEBUG_SYNC(BLOCK_TENANT_SYNC_SNAPSHOT_INC);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     if (OB_FAIL(ls_recovery_op.get_tenant_recovery_stat(
             user_tenant_id, *GCTX.sql_proxy_, sync_scn, min_wrs_scn))) {
       LOG_WARN("failed to get tenant recovery stat", KR(ret), K(user_tenant_id));
@@ -2336,6 +2487,34 @@ int ObPrimaryLSService::gather_tenant_recovery_stat_()
   }
   return ret;
 }
-}
-}
 
+int ObPrimaryLSService::create_duplicate_ls()
+{
+  int ret = OB_SUCCESS;
+  share::schema::ObSchemaGetterGuard schema_guard;
+  const share::schema::ObTenantSchema *tenant_schema = NULL;
+  if (OB_ISNULL(GCTX.schema_service_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected error", KR(ret));
+  } else if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(
+          OB_SYS_TENANT_ID, schema_guard))) {
+    LOG_WARN("fail to get schema guard", KR(ret));
+  } else if (OB_FAIL(schema_guard.get_tenant_info(tenant_id_, tenant_schema))) {
+    LOG_WARN("failed to get tenant ids", KR(ret), K(tenant_id_));
+  } else if (OB_ISNULL(tenant_schema)) {
+    ret = OB_TENANT_NOT_EXIST;
+    LOG_WARN("tenant not exist", KR(ret), K(tenant_id_));
+  } else {
+    const uint64_t tenant_id = tenant_schema->get_tenant_id();
+    ObTenantLSInfo tenant_stat(GCTX.sql_proxy_, tenant_schema, tenant_id,
+        GCTX.srv_rpc_proxy_, GCTX.lst_operator_);
+    if (OB_FAIL(tenant_stat.gather_stat(false))) {
+      LOG_WARN("failed to gather stat", KR(ret));
+    } else if (OB_FAIL(tenant_stat.create_duplicate_ls())) {
+      LOG_WARN("failed to create ls for unit group", KR(ret));
+    }
+  }
+  return ret;
+}
+}//end of rootserver
+}

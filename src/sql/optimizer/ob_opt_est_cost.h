@@ -136,13 +136,22 @@ public:
   /*
    * entry point for estimating table access cost
    */
-  static int cost_table(ObCostTableScanInfo &est_cost_info,
+  static int cost_table(const ObCostTableScanInfo &est_cost_info,
                         int64_t parallel,
                         double query_range_row_count,
                         double phy_query_range_row_count,
                         double &cost,
                         double &index_back_cost,
                         MODEL_TYPE model_type);
+
+  static int cost_table_for_parallel(const ObCostTableScanInfo &est_cost_info,
+                                     const int64_t parallel,
+                                     const double part_cnt_per_dop,
+                                     double query_range_row_count,
+                                     double phy_query_range_row_count,
+                                     double &px_cost,
+                                     double &cost,
+                                     MODEL_TYPE model_type);
 
   static double cost_late_materialization_table_get(int64_t column_cnt, MODEL_TYPE model_type);
 
@@ -203,8 +212,6 @@ public:
   static int stat_estimate_single_range_rc(const ObCostTableScanInfo &est_cost_info,
                                            const ObNewRange &range,
                                            double &count);
-
-  static const char *get_method_name(const RowCountEstMethod method);
 
   static double get_estimate_width_from_type(const ObExprResType &type);
 private:

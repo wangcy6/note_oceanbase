@@ -62,8 +62,11 @@ struct AbstractPriority
   }
   // 判断字段内容是否有效的方法，或者refresh()成功后也是true
   bool is_valid() const { return is_valid_; }
+  // fatal failure将绕过RCS在选举层面直接切主
+  bool has_fatal_failure() const { return is_valid_ && has_fatal_failure_(); }
   virtual TO_STRING_KV(K_(is_valid));
 protected:
+  virtual bool has_fatal_failure_() const = 0;
   virtual int refresh_(const share::ObLSID &ls_id) = 0;
 protected:
   bool is_valid_;
@@ -82,6 +85,7 @@ public:
   virtual int compare(const AbstractPriority &rhs, int &result, ObStringHolder &reason) const override;
   TO_STRING_KV(K_(is_valid), K_(port_number));
 protected:
+  virtual bool has_fatal_failure_() const override { return false; }
   // 刷新优先级的方法
   virtual int refresh_(const share::ObLSID &ls_id) override;
 private:
@@ -111,6 +115,10 @@ public:
 protected:
   // 刷新优先级的方法
   virtual int refresh_(const share::ObLSID &ls_id) override;
+<<<<<<< HEAD
+=======
+  virtual bool has_fatal_failure_() const override;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int get_scn_(const share::ObLSID &ls_id, share::SCN &scn);
 private:
   int compare_observer_stopped_(int &ret, const PriorityV1&) const;
@@ -127,9 +135,13 @@ private:
   bool is_observer_stopped_;// kill -15
   bool is_server_stopped_;
   bool is_zone_stopped_;
-  common::ObSArray<FailureEvent> fatal_failures_;// negative infos
+  common::ObSEArray<FailureEvent, 3> fatal_failures_;// negative infos
   bool is_primary_region_;
+<<<<<<< HEAD
   common::ObSArray<FailureEvent> serious_failures_;// negative infos
+=======
+  common::ObSEArray<FailureEvent, 3> serious_failures_;// negative infos
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   share::SCN scn_;
   bool is_in_blacklist_;
   common::ObStringHolder in_blacklist_reason_;
@@ -146,7 +158,7 @@ class ElectionPriorityImpl : public palf::election::ElectionPriority
   friend class unittest::TestElectionPriority;
 public:
   ElectionPriorityImpl() {}
-  ElectionPriorityImpl(const share::ObLSID ls_id) : ls_id_(ls_id) {}
+  ElectionPriorityImpl(const share::ObLSID ls_id) : ls_id_(ls_id), lock_(common::ObLatchIds::ELECTION_LOCK) {}
   virtual ~ElectionPriorityImpl() {}
   void set_ls_id(const share::ObLSID ls_id);
   // 优先级需要序列化能力，以便通过消息传递给其他副本
@@ -159,6 +171,8 @@ public:
   virtual int compare_with(const palf::election::ElectionPriority &rhs, int &result, ObStringHolder &reason) const;
   virtual int get_size_of_impl_type() const;
   virtual void placement_new_impl(void *ptr) const;
+  // fatal failure跳过RCS直接切主
+  virtual bool has_fatal_failure() const;
   int64_t to_string(char *buf, const int64_t buf_len) const override;
 private:
   share::ObLSID ls_id_;

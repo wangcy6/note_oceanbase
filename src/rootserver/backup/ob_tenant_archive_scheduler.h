@@ -32,7 +32,6 @@ namespace common {
 namespace rootserver
 {
 
-class ObServerManager;
 class ObZoneManager;
 class ObUnitManager;
 
@@ -44,17 +43,21 @@ public:
 
   int init(
       const uint64_t tenant_id,
-      ObServerManager &server_mgr,
       ObZoneManager &zone_mgr,
       ObUnitManager &unit_manager,
       share::schema::ObMultiVersionSchemaService *schema_service,
       obrpc::ObSrvRpcProxy &rpc_proxy,
       common::ObMySQLProxy &sql_proxy);
 
+  int open_archive_mode();
+  int close_archive_mode();
+
   // Just mark archive is open, actual actions to open archive is a background task.
   int enable_archive(const int64_t dest_no);
   // Just mark archive is stop, actual actions to close archive is a background task.
   int disable_archive(const int64_t dest_no);
+  // Just mark archive is suspend, actual actions to suspend archive is a background task.
+  int defer_archive(const int64_t dest_no);
   int check_can_do_archive(bool &can) const;
   int checkpoint();
 
@@ -72,7 +75,6 @@ private:
 private:
   bool is_inited_;
   uint64_t tenant_id_; // user tenant id
-  ObServerManager *server_mgr_;
   ObZoneManager *zone_mgr_;
   ObUnitManager *unit_mgr_;
   obrpc::ObSrvRpcProxy *rpc_proxy_;

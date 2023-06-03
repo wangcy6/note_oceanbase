@@ -15,6 +15,7 @@
 
 #include "sql/rewrite/ob_transform_rule.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
+#include "sql/resolver/dml/ob_merge_stmt.h"
 #include "sql/rewrite/ob_transform_utils.h"
 #include "sql/ob_sql_context.h"
 
@@ -83,41 +84,100 @@ struct DistinctObjMeta
                                      ObIArray<ColumnItem> &column_items);
 
   /*
-   * following functions are for grouping sets and multi rollup
+   * following functions are for grouping sets and rollup and cube
    */
-  int transform_for_grouping_sets_and_multi_rollup(ObDMLStmt *&stmt, bool &trans_happened);
+  int transform_groupingsets_rollup_cube(ObDMLStmt *&stmt, bool &trans_happened);
+  int try_convert_rollup(ObDMLStmt *&stmt, ObSelectStmt *select_stmt);
+  int remove_single_item_groupingsets(ObSelectStmt &stmt, bool &trans_happened);
+  int create_set_view_stmt(ObSelectStmt *stmt, TableItem *view_table_item);
+  int create_cte_for_groupby_items(ObSelectStmt &select_stmt);
+  int expand_stmt_groupby_items(ObSelectStmt &select_stmt);
+
+  int is_subquery_correlated(const ObSelectStmt *stmt,
+                             bool &is_correlated);
+
+  int is_subquery_correlated(const ObSelectStmt *stmt,
+                             hash::ObHashSet<uint64_t> &param_set,
+                             bool &is_correlated);
+
+  int add_exec_params(const ObSelectStmt &stmt,
+                      hash::ObHashSet<uint64_t> &param_set);
+
+  int has_new_exec_param(const ObRawExpr *expr,
+                         const hash::ObHashSet<uint64_t> &param_set,
+                         bool &has_new);
+
   int add_generated_table_as_temp_table(ObTransformerCtx *ctx,
                                         ObDMLStmt *stmt);
-  int replace_with_set_stmt_view(ObSelectStmt *origin_stmt,
-                                 ObSelectStmt *grouping_sets_view,
-                                 ObSelectStmt *&union_stmt);
-  int create_set_view_stmt(ObSelectStmt *origin_stmt,
-                           ObSelectStmt *&set_view_stmt);
-  int create_select_list_from_grouping_sets(ObSelectStmt *stmt,
-                                            common::ObIArray<ObGroupbyExpr> &groupby_exprs_list,
-                                            int64_t cur_index,
-                                            ObIArray<ObRawExpr*> &old_exprs,
-                                            ObIArray<ObRawExpr*> &new_exprs,
-                                            int64_t origin_groupby_num = -1);
-  int64_t get_total_count_of_groupby_stmt(ObIArray<ObGroupingSetsItem> &grouping_sets_items,
-                                          ObIArray<ObMultiRollupItem> &multi_rollup_items);
-
   int get_groupby_exprs_list(ObIArray<ObGroupingSetsItem> &grouping_sets_items,
-                             ObIArray<ObMultiRollupItem> &multi_rollup_items,
+                             ObIArray<ObRollupItem> &rollup_items,
+                             ObIArray<ObCubeItem> &cube_items,
                              ObIArray<ObGroupbyExpr> &groupby_exprs_list);
-
-  int expand_multi_rollup_items(ObIArray<ObMultiRollupItem> &multi_rollup_items,
-                                ObIArray<ObGroupbyExpr> &rollup_list_exprs);
-
+  int expand_grouping_sets_items(common::ObIArray<ObGroupingSetsItem> &grouping_sets_items,
+                                 common::ObIArray<ObGroupbyExpr> &grouping_sets_exprs);
+  int expand_rollup_items(ObIArray<ObRollupItem> &rollup_items,
+                          ObIArray<ObGroupbyExpr> &rollup_list_exprs);
+  int expand_cube_items(ObIArray<ObCubeItem> &cube_items,
+                        ObIArray<ObRollupItem> &rollup_items_lists);
+  int expand_cube_item(ObCubeItem &cube_item,
+                       ObIArray<ObRollupItem> &rollup_items_lists);
   int combination_two_rollup_list(ObIArray<ObGroupbyExpr> &rollup_list_exprs1,
                                   ObIArray<ObGroupbyExpr> &rollup_list_exprs2,
                                   ObIArray<ObGroupbyExpr> &rollup_list_exprs);
-
+  int check_pre_aggregate(const ObSelectStmt &select_stmt, bool &can_pre_aggr);
+  int transform_grouping_sets_to_rollup_exprs(ObSelectStmt &origin_stmt,
+                                              ObIArray<ObGroupbyExpr> &origin_groupby_exprs_list,
+                                              ObIArray<ObGroupbyExpr> &groupby_exprs_list,
+                                              ObIArray<ObGroupbyExpr> &rollup_exprs_list);
+  int simple_expand_grouping_sets_items(ObIArray<ObGroupingSetsItem> &grouping_sets_items,
+                                        ObIArray<ObGroupingSetsItem> &simple_grouping_sets_items);
+  int create_child_stmts_for_groupby_sets(ObSelectStmt *origin_stmt,
+                                          ObIArray<ObSelectStmt*> &child_stmts);
+  int get_groupby_and_rollup_exprs_list(ObSelectStmt *origin_stmt,
+                                        ObIArray<ObGroupbyExpr> &groupby_exprs_list,
+                                        ObIArray<ObGroupbyExpr> &rollup_exprs_list);
+  int create_groupby_substmt(const ObIArray<ObRawExpr*> &origin_groupby_exprs,
+                             const ObIArray<ObRawExpr*> &origin_rollup_exprs,
+                             ObSelectStmt &origin_stmt,
+                             ObSelectStmt *&substmt,
+                             ObIArray<ObRawExpr*> &groupby_exprs);
+  int convert_select_having_in_groupby_stmt(const ObIArray<ObGroupbyExpr> &groupby_exprs_list,
+                                            const ObIArray<ObGroupbyExpr> &rollup_exprs_list,
+                                            const ObIArray<ObRawExpr*> &groupby_exprs,
+                                            const int64_t cur_index,
+                                            const ObSelectStmt &origin_stmt,
+                                            ObSelectStmt &substmt);
+  // calc 'grouping', 'grouping id', 'group id'
+  int calc_group_type_aggr_func(const ObIArray<ObRawExpr*> &groupby_exprs,
+                                const ObIArray<ObRawExpr*> &rollup_exprs,
+                                const ObIArray<ObGroupbyExpr> &groupby_exprs_list,
+                                const int64_t cur_index,
+                                const int64_t origin_groupby_num,
+                                ObAggFunRawExpr *expr,
+                                ObRawExpr *&new_expr);
+  int calc_grouping_in_grouping_sets(const ObIArray<ObRawExpr*> &groupby_exprs,
+                                     const ObIArray<ObRawExpr*> &rollup_exprs,
+                                     ObAggFunRawExpr *expr,
+                                     ObRawExpr *&new_expr);
+  int calc_grouping_id_in_grouping_sets(const ObIArray<ObRawExpr*> &groupby_exprs,
+                                        const ObIArray<ObRawExpr*> &rollup_exprs,
+                                        ObAggFunRawExpr *expr,
+                                        ObRawExpr *&new_expr);
+  int calc_group_id_in_grouping_sets(const ObIArray<ObRawExpr*> &groupby_exprs,
+                                     const ObIArray<ObRawExpr*> &rollup_exprs,
+                                     const ObIArray<ObGroupbyExpr> &groupby_exprs_list,
+                                     const int64_t cur_index,
+                                     const int64_t origin_groupby_num,
+                                     ObAggFunRawExpr *expr,
+                                     ObRawExpr *&new_expr);
   /*
    * following functions are for hierarchical query
    */
   int transform_for_hierarchical_query(ObDMLStmt *stmt, bool &trans_happened);
 
+  int try_split_hierarchical_query(ObSelectStmt &stmt, ObSelectStmt *&hierarchical_stmt);
+
+  int check_need_split_hierarchical_query(ObSelectStmt &stmt, bool &need_split);
   /**
    * @brief create_connect_by_view
    * 为层次查询构建一个spj，封装所有与层次查询相关的计算
@@ -149,6 +209,21 @@ struct DistinctObjMeta
 
   int extract_connect_by_related_exprs(ObRawExpr *expr, ObIArray<ObRawExpr*> &special_exprs);
 
+  int get_prior_exprs(ObIArray<ObRawExpr *> &expr, ObIArray<ObRawExpr *> &prior_exprs);
+  int get_prior_exprs(ObRawExpr *expr, ObIArray<ObRawExpr *> &prior_exprs);
+
+  /**
+   * @brief modify_prior_exprs
+   * replace prior exprs into left view columns
+   */
+  int modify_prior_exprs(ObRawExprFactory &expr_factory,
+                         ObSelectStmt &stmt,
+                         const ObIArray<ObRawExpr *> &parent_columns,
+                         const ObIArray<ObRawExpr *> &left_columns,
+                         const ObIArray<ObRawExpr *> &prior_exprs,
+                         ObIArray<ObRawExpr *> &convert_exprs,
+                         const bool only_columns);
+
   uint64_t get_real_tid(uint64_t tid, ObSelectStmt &stmt);
 
 	/*
@@ -170,8 +245,38 @@ struct DistinctObjMeta
                                       ObIAllocator &allocator,
                                       int64_t &result);
 
-  int transform_for_merge_into(ObDMLStmt *stmt, bool &trans_happened);
+  /*
+   * following functions are used to transform merge into stmt
+   */
+  int transform_for_merge_into(ObDMLStmt *&stmt, bool &trans_happened);
+  int transform_merge_into_subquery(ObMergeStmt *merge_stmt);
+  int create_matched_expr(ObMergeStmt &stmt,
+                          ObRawExpr *&matched_flag,
+                          ObRawExpr *&not_matched_flag);
+  int generate_merge_conditions_subquery(ObRawExpr *matched_expr,
+                                         ObIArray<ObRawExpr*> &condition_exprs);
+  int get_update_insert_condition_subquery(ObMergeStmt *merge_stmt,
+                                           ObRawExpr *matched_expr,
+                                           ObRawExpr *not_matched_expr,
+                                           bool &update_has_subquery,
+                                           bool &insert_has_subquery,
+                                           ObIArray<ObRawExpr*> &new_subquery_exprs);
+  int get_update_insert_target_subquery(ObMergeStmt *merge_stmt,
+                                        ObRawExpr *matched_expr,
+                                        ObRawExpr *not_matched_expr,
+                                        bool update_has_subquery,
+                                        bool insert_has_subquery,
+                                        ObIArray<ObRawExpr*> &new_subquery_exprs);
+  int get_delete_condition_subquery(ObMergeStmt *merge_stmt,
+                                    ObRawExpr *matched_expr,
+                                    bool update_has_subquery,
+                                    ObIArray<ObRawExpr*> &new_subquery_exprs);
 
+  int transform_insert_only_merge_into(ObDMLStmt* stmt, ObDMLStmt*& out);
+
+  int transform_update_only_merge_into(ObDMLStmt* stmt);
+
+  int create_source_view_for_merge_into(ObMergeStmt *merge_stmt, TableItem *&view_table);
 	/*
 	 * following functions are used for temporary and se table
 	 */
@@ -181,6 +286,71 @@ struct DistinctObjMeta
 	int collect_all_tableitem(ObDMLStmt *stmt,
                             TableItem *table_item,
                             common::ObArray<TableItem*> &table_item_list);
+  /*
+   * following functions are used for row level security
+   */
+  int transform_for_rls_table(ObDMLStmt *stmt, bool &trans_happened);
+  int check_exempt_rls_policy(bool &exempt_rls_policy);
+  int check_need_transform_column_level(ObDMLStmt &stmt,
+                                        const TableItem &table_item,
+                                        const share::schema::ObRlsPolicySchema &policy_schema,
+                                        bool &need_trans);
+  int transform_for_single_rls_policy(ObDMLStmt &stmt,
+                                      TableItem &table_item,
+                                      const share::schema::ObRlsPolicySchema &policy_schema,
+                                      bool &trans_happened);
+  int calc_policy_function(ObDMLStmt &stmt,
+                           const TableItem &table_item,
+                           const share::schema::ObRlsPolicySchema &policy_schema,
+                           ObRawExpr *&predicate_expr,
+                           common::ObString &predicate_str);
+  int build_policy_predicate_expr(const common::ObString &predicate_str,
+                                  const TableItem &table_item,
+                                  common::ObIArray<ObQualifiedName> &columns,
+                                  ObRawExpr *&expr);
+  int add_rls_policy_constraint(const ObRawExpr *expr, const common::ObString &predicate_str);
+  int build_rls_filter_expr(ObDMLStmt &stmt,
+                            const TableItem &table_item,
+                            const common::ObIArray<ObQualifiedName> &columns,
+                            ObRawExpr *predicate_expr,
+                            ObRawExpr *&expr);
+  int build_rls_constraint_expr(const ObDmlTableInfo &table_info,
+                                const ObIArray<ObQualifiedName> &columns,
+                                ObRawExpr *predicate_expr,
+                                ObRawExpr *&expr);
+  int add_filter_for_rls_select(ObDMLStmt &stmt,
+                                TableItem &table_item,
+                                const common::ObIArray<ObQualifiedName> &columns,
+                                ObRawExpr *predicate_expr);
+  int add_filter_for_rls_merge(ObDMLStmt &stmt,
+                               const TableItem &table_item,
+                               const common::ObIArray<ObQualifiedName> &columns,
+                               ObRawExpr *predicate_expr);
+  int add_filter_for_rls(ObDMLStmt &stmt,
+                         const TableItem &table_item,
+                         const common::ObIArray<ObQualifiedName> &columns,
+                         ObRawExpr *predicate_expr);
+  int add_constraint_for_rls(ObDMLStmt &stmt,
+                             const TableItem &table_item,
+                             const common::ObIArray<ObQualifiedName> &columns,
+                             ObRawExpr *predicate_expr);
+  int add_constraint_for_rls_insert(ObDMLStmt &stmt,
+                                   const TableItem &table_item,
+                                   const common::ObIArray<ObQualifiedName> &columns,
+                                   ObRawExpr *predicate_expr);
+  int add_constraint_for_rls_update(ObDMLStmt &stmt,
+                                    const TableItem &table_item,
+                                    const common::ObIArray<ObQualifiedName> &columns,
+                                    ObRawExpr *predicate_expr);
+  int add_constraint_for_rls_merge(ObDMLStmt &stmt,
+                                   const TableItem &table_item,
+                                   const common::ObIArray<ObQualifiedName> &columns,
+                                   ObRawExpr *predicate_expr);
+  int replace_expr_for_rls(ObDMLStmt &stmt,
+                           const TableItem &table_item,
+                           const share::schema::ObRlsPolicySchema &policy_schema,
+                           const common::ObIArray<ObQualifiedName> &columns,
+                           ObRawExpr *predicate_expr);
 
   int transform_exprs(ObDMLStmt *stmt, bool &trans_happened);
   int transform_for_nested_aggregate(ObDMLStmt *&stmt, bool &trans_happened);
@@ -255,7 +425,7 @@ struct DistinctObjMeta
                                        ObDMLStmt *&stmt,
                                        bool &trans_happened);
   int transform_common_rownum_as_limit(ObDMLStmt *&stmt, bool &trans_happened);
-  int try_transform_common_rownum_as_limit(ObDMLStmt *stmt, ObRawExpr *&limit_expr);
+  int try_transform_common_rownum_as_limit_or_false(ObDMLStmt *stmt, ObRawExpr *&limit_expr, bool& is_valid);
   int transform_generated_rownum_as_limit(const ObIArray<ObParentDMLStmt> &parent_stmts,
                                           ObDMLStmt *stmt,
                                           bool &trans_happened);
@@ -266,83 +436,28 @@ struct DistinctObjMeta
   int transform_generated_rownum_eq_cond(ObRawExpr *eq_value,
                                          ObRawExpr *&limit_expr,
                                          ObRawExpr *&offset_expr);
-  int expand_grouping_sets_items(common::ObIArray<ObGroupingSetsItem> &grouping_sets_items,
-                                 common::ObIArray<ObGroupbyExpr> &grouping_sets_exprs);
-  int replace_select_and_having_exprs(ObSelectStmt *select_stmt,
-                                      ObIArray<ObRawExpr*> &old_exprs,
-                                      ObIArray<ObRawExpr*> &new_exprs,
-                                      ObIArray<ObGroupbyExpr> &groupby_exprs_list,
-                                      int64_t cur_index = -1,
-                                      int64_t origin_groupby_num = -1);
-  int replace_stmt_special_exprs(ObSelectStmt *select_stmt,
-                                 ObRawExpr *&expr,
-                                 common::ObIArray<ObRawExpr*> &old_exprs,
-                                 common::ObIArray<ObRawExpr*> &new_exprs,
-                                 ObIArray<ObGroupbyExpr> &groupby_exprs_list,
-                                 bool ignore_const = false,
-                                 int64_t cur_index = -1,
-                                 int64_t origin_groupby_num = -1);
-  int replace_aggr_exprs_in_select_and_having(ObRawExpr *&expr,
-                                              ObIArray<ObRawExpr*> &groupby_exprs,
-                                              ObIArray<ObRawExpr*> &rollup_exprs,
-                                              ObIArray<ObAggFunRawExpr*> &aggr_items,
-                                              ObIArray<ObGroupbyExpr> &groupby_exprs_list,
-                                              int64_t cur_index,
-                                              ObIArray<ObRawExpr*> &old_exprs,
-                                              ObIArray<ObRawExpr*> &new_exprs,
-                                              ObRelIds &rel_ids,
-                                              int64_t origin_groupby_num = -1,
-                                              bool using_rel_ids = true);
-  int calc_grouping_in_grouping_sets(ObRawExpr *&expr,
-                                     ObIArray<ObRawExpr*> &groupby_exprs,
-                                     ObIArray<ObRawExpr*> &rollup_exprs,
-                                     ObIArray<ObAggFunRawExpr*> &aggr_items,
-                                     ObIArray<ObRawExpr*> &old_exprs,
-                                     ObIArray<ObRawExpr*> &new_exprs,
-                                     ObRelIds &rel_ids,
-                                     bool using_rel_ids = true);
-  int calc_grouping_id_in_grouping_sets(ObRawExpr *&expr,
-                                        ObIArray<ObRawExpr*> &groupby_exprs,
-                                        ObIArray<ObRawExpr*> &rollup_exprs,
-                                        ObIArray<ObAggFunRawExpr*> &aggr_items,
-                                        ObIArray<ObRawExpr*> &old_exprs,
-                                        ObIArray<ObRawExpr*> &new_exprs,
-                                        ObRelIds &rel_ids,
-                                        bool using_rel_ids = true);
-  int calc_group_id_in_grouping_sets(ObRawExpr *&expr,
-                                     ObIArray<ObRawExpr*> &groupby_exprs,
-                                     ObIArray<ObRawExpr*> &rollup_exprs,
-                                     ObIArray<ObAggFunRawExpr*> &aggr_items,
-                                     ObIArray<ObGroupbyExpr> &groupby_exprs_list,
-                                     int64_t cur_index,
-                                     ObIArray<ObRawExpr*> &old_exprs,
-                                     ObIArray<ObRawExpr*> &new_exprs,
-                                     ObRelIds &rel_ids,
-                                     int64_t origin_groupby_num = -1,
-                                     bool using_rel_ids = true);
-  bool is_select_expr_in_other_groupby_exprs(ObRawExpr *expr,
-                                             ObIArray<ObGroupbyExpr> &groupby_exprs_list,
-                                             int64_t cur_index);
-  bool is_expr_in_select_item(ObIArray<SelectItem> &select_items,
-                              ObRawExpr *expr);
-  int extract_select_expr_and_replace_expr(ObRawExpr *expr,
-                                           ObIArray<ObRawExpr*> &groupby_exprs,
-                                           ObIArray<ObRawExpr*> &rollup_exprs,
-                                           ObIArray<ObAggFunRawExpr*> &aggr_items,
-                                           ObIArray<ObGroupbyExpr> &groupby_exprs_list,
-                                           int64_t cur_index,
-                                           ObIArray<SelectItem> &select_items,
-                                           ObIArray<ObRawExpr*> &old_exprs,
-                                           ObIArray<ObRawExpr*> &new_exprs,
-                                           ObRelIds &rel_ids,
-                                           int64_t origin_groupby_num = -1);
-  int extract_stmt_replace_expr(ObSelectStmt *select_stmt, ObIArray<ObRawExpr*> &old_exprs);
-  int extract_replace_expr_from_select_expr(ObRawExpr *expr,
-                                            ObSelectStmt *select_stmt,
-                                            ObIArray<ObRawExpr*> &old_exprs);
 
   int replace_group_id_in_stmt(ObSelectStmt *stmt);
   int replace_group_id_in_expr_recursive(ObRawExpr *&expr);
+  int transform_udt_columns(const common::ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened);
+  int transform_udt_column_conv_function(ObDmlTableInfo &table_info,
+                                         ObIArray<ObRawExpr*> &column_conv_exprs,
+                                         ObColumnRefRawExpr &udt_col,
+                                         ObColumnRefRawExpr &hidd_col);
+  int transform_udt_column_value_expr_inner(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObRawExpr *&old_expr, ObRawExpr *hidd_expr = NULL);
+  int transform_xml_binary(ObRawExpr *hidden_blob_expr, ObRawExpr *&new_expr);
+  int transform_udt_column_value_expr(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObRawExpr *old_expr, ObRawExpr *&new_expr, ObRawExpr *hidd_expr = NULL);
+  int transform_udt_column_conv_param_expr(ObDmlTableInfo &table_info, ObRawExpr *old_expr, ObRawExpr *&new_expr);
+  int transform_udt_column_value_xml_parse(ObDmlTableInfo &table_info, ObRawExpr *old_expr, ObRawExpr *&new_expr);
+  int replace_udt_assignment_exprs(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObIArray<ObAssignment> &assignments, bool &trans_happened);
+  int set_hidd_col_not_null_attr(const ObColumnRefRawExpr &udt_col, ObIArray<ObColumnRefRawExpr *> &column_exprs);
+  int check_skip_child_select_view(const ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &skip_for_view_table);
+  int transform_query_udt_columns_exprs(const ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened);
+  int transform_udt_columns_constraint_exprs(ObDMLStmt *stmt, bool &trans_happened);
+  int get_update_generated_udt_in_parent_stmt(const ObIArray<ObParentDMLStmt> &parent_stmts, const ObDMLStmt *stmt,
+                                              ObIArray<ObColumnRefRawExpr*> &col_exprs);
+  int get_dml_view_col_exprs(const ObDMLStmt *stmt, ObIArray<ObColumnRefRawExpr*> &assign_col_exprs);
+
    /*
    * following functions are used for transform rowid in subquery
    */
@@ -403,6 +518,21 @@ struct DistinctObjMeta
 
   int mock_select_list_for_inner_view(ObDMLStmt &batch_stmt, ObSelectStmt &inner_view);
 
+  int transform_outerjoin_exprs(ObDMLStmt *stmt, bool &trans_happened);
+
+  int remove_shared_expr(ObDMLStmt *stmt,
+                         JoinedTable *joined_table,
+                         hash::ObHashSet<uint64_t> &expr_set,
+                         bool is_nullside);
+
+  int do_remove_shared_expr(hash::ObHashSet<uint64_t> &expr_set,
+                            ObIArray<ObRawExpr *> &padnull_exprs,
+                            bool is_nullside,
+                            ObRawExpr *&expr,
+                            bool &has_nullside_column);
+
+  int check_nullside_expr(ObRawExpr *expr, bool &bret);
+
   int transform_full_outer_join(ObDMLStmt *&stmt, bool &trans_happened);
 
   int check_join_condition(ObDMLStmt *stmt,
@@ -415,7 +545,7 @@ struct DistinctObjMeta
    * 以左-右-后的方式后续遍历from item及semi from item中的joined_table结构
    */
   int recursively_eliminate_full_join(ObDMLStmt &stmt,
-                                      TableItem &table_item,
+                                      TableItem *table_item,
                                       bool &trans_happened);
 
   /**
@@ -436,6 +566,8 @@ struct DistinctObjMeta
   int extract_idx_from_table_items(ObDMLStmt *sub_stmt,
                                    const TableItem *table_item,
                                    ObSqlBitSet<> &rel_ids);
+
+  int formalize_limit_expr(ObDMLStmt &stmt);
   int transform_rollup_exprs(ObDMLStmt *stmt, bool &trans_happened);
   int get_rollup_const_exprs(ObSelectStmt *stmt,
                              ObIArray<ObRawExpr*> &const_exprs,
@@ -452,6 +584,15 @@ struct DistinctObjMeta
                                 ObIArray<ObRawExpr*> &exec_params_remove_const_exprs,
                                 ObIArray<ObRawExpr*> &column_ref_exprs,
                                 ObIArray<ObRawExpr*> &column_ref_remove_const_exprs);
+
+  int transform_cast_multiset_for_stmt(ObDMLStmt *&stmt, bool &is_happened);
+  int transform_cast_multiset_for_expr(ObRawExpr *&expr, bool &trans_happened);
+  int add_constructor_to_multiset(ObQueryRefRawExpr *multiset_expr,
+                                  const pl::ObPLDataType &elem_type,
+                                  bool& trans_happened);
+  int add_column_conv_to_multiset(ObQueryRefRawExpr *multiset_expr,
+                                  const pl::ObPLDataType &elem_type,
+                                  bool& trans_happened);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTransformPreProcess);
 };

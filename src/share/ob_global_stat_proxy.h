@@ -51,11 +51,25 @@ public:
                              const int64_t baseline_schema_version,
                              const int64_t rootservice_epoch,
                              const SCN &snapshot_gc_scn,
+<<<<<<< HEAD
                              const int64_t gc_schema_version);
 
   virtual int set_tenant_init_global_stat(const int64_t core_schema_version,
                                           const int64_t baseline_schema_version,
                                           const SCN &snapshot_gc_scn);
+=======
+                             const int64_t gc_schema_version,
+			                       const int64_t ddl_epoch,
+                             const uint64_t target_data_version,
+                             const uint64_t current_data_version);
+
+  virtual int set_tenant_init_global_stat(const int64_t core_schema_version,
+                                          const int64_t baseline_schema_version,
+                                          const SCN &snapshot_gc_scn,
+                                          const int64_t ddl_epoch,
+                                          const uint64_t target_data_version,
+                                          const uint64_t current_data_version);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   virtual int set_core_schema_version(const int64_t core_schema_version);
   virtual int set_baseline_schema_version(const int64_t baseline_schema_version);
@@ -65,21 +79,52 @@ public:
   virtual int get_baseline_schema_version(int64_t &baseline_schema_version);
 
   virtual int get_rootservice_epoch(int64_t &rootservice_epoch);
+<<<<<<< HEAD
+=======
+
+  int update_current_data_version(const uint64_t current_data_version);
+  int get_current_data_version(uint64_t &current_data_version);
+  int update_target_data_version(const uint64_t target_data_version);
+  int get_target_data_version(const bool for_update, uint64_t &target_data_version);
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   virtual int get_snapshot_info(int64_t &snapshot_gc_scn,
                                 int64_t &gc_schema_version);
-  static int select_snapshot_gc_scn_for_update(common::ObISQLClient &sql_client, 
+  static int select_snapshot_gc_scn_for_update(common::ObISQLClient &sql_client,
                                                const uint64_t tenant_id,
                                                SCN &snapshot_gc_scn);
+<<<<<<< HEAD
   static int update_snapshot_gc_scn(common::ObISQLClient &sql_client, 
+=======
+  static int get_snapshot_gc_scn(common::ObISQLClient &sql_client,
+                                 const uint64_t tenant_id,
+                                 share::SCN &snapshot_gc_scn);
+  static int update_snapshot_gc_scn(common::ObISQLClient &sql_client,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                                     const uint64_t tenant_id,
                                     const SCN &snapshot_gc_scn,
                                     int64_t &affected_rows);
   int get_snapshot_gc_scn(share::SCN &snapshot_gc_scn);
   //interface of standby
   int set_snapshot_gc_scn(const SCN &snapshot_gc_scn);
+<<<<<<< HEAD
+=======
+  int set_snapshot_gc_scn(const int64_t snapshot_gc_scn);
+
+  int set_ddl_epoch(const int64_t ddl_epoch, bool is_incremental = true);
+
+  static int select_ddl_epoch_for_update(common::ObISQLClient &sql_client,
+                                               const uint64_t tenant_id,
+                                               int64_t &ddl_epoch);
+  int get_ddl_epoch(int64_t &ddl_epoch);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 private:
+  static int inner_get_snapshot_gc_scn_(common::ObISQLClient &sql_client,
+                                        const uint64_t tenant_id,
+                                        SCN &snapshot_gc_scn,
+                                        const bool is_for_update);
   int update(const ObGlobalStatItem::ItemList &list, const bool is_incremental = false);
-  int get(ObGlobalStatItem::ItemList &list);
+  int get(ObGlobalStatItem::ItemList &list, bool for_update = false);
 
 private:
   static const char* OB_ALL_GC_SCHEMA_VERSION_TNAME;

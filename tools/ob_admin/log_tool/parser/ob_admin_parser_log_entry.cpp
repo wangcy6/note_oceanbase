@@ -24,6 +24,10 @@
 #include "storage/tx/ob_keep_alive_ls_handler.h"
 #include "logservice/ob_log_base_header.h"
 #include "logservice/ob_garbage_collector.h"
+<<<<<<< HEAD
+=======
+#include "logservice/data_dictionary/ob_data_dict_iterator.h"     // ObDataDictIterator
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 #include "share/scn.h"
 
 
@@ -44,7 +48,11 @@ ObAdminParserLogEntry::ObAdminParserLogEntry(const LogEntry &entry,
                                              const LSN lsn,
                                              const ObAdminMutatorStringArg &str_arg)
     : buf_(entry.get_data_buf()), buf_len_(entry.get_data_len()), pos_(0),
+<<<<<<< HEAD
     scn_val_(entry.get_scn().get_val_for_logservice()), block_id_(block_id), lsn_(lsn)
+=======
+    scn_val_(entry.get_scn().get_val_for_logservice()), block_id_(block_id), lsn_(lsn), str_arg_()
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   str_arg_ = str_arg;
 }
@@ -353,15 +361,6 @@ int ObAdminParserLogEntry::parse_ddl_log_()
         }
         break;
       }
-      case ObDDLClogType::DDL_PREPARE_LOG: {
-        ObDDLPrepareLog log;
-        if (OB_FAIL(log.deserialize(buf_, buf_len_, pos_))) {
-          LOG_WARN("deserialize ddl commit log failed", K(ret), KP(buf_), K(buf_len_), K(pos_));
-        } else {
-          fprintf(stdout, " ###<ObDDLPrepareLog>: %s\n", to_cstring(log));
-        }
-        break;
-      }
       case ObDDLClogType::DDL_COMMIT_LOG: {
         ObDDLCommitLog log;
         if (OB_FAIL(log.deserialize(buf_, buf_len_, pos_))) {
@@ -483,6 +482,94 @@ int ObAdminParserLogEntry::parse_gais_log_()
   return ret;
 }
 
+int ObAdminParserLogEntry::parse_data_dict_log_()
+{
+  int ret = OB_SUCCESS;
+  static datadict::ObDataDictIterator dict_iterator;
+  ObArenaAllocator allocator("ObAdmDictDump");
+
+  if (OB_FAIL(dict_iterator.init(OB_SERVER_TENANT_ID))) {
+    LOG_WARN("dict_iterator init failed", KR(ret), KP_(buf), K_(buf_len), K_(pos));
+  } else if (OB_FAIL(dict_iterator.append_log_buf(buf_, buf_len_, pos_))) {
+    LOG_WARN("append palf_log to data_dict_iterator failed", KR(ret), KP_(buf), K_(buf_len), K_(pos));
+  } else {
+    while (OB_SUCC(ret)) {
+      datadict::ObDictMetaHeader header;
+
+      if (OB_FAIL(dict_iterator.next_dict_header(header))) {
+        if (OB_ITER_END != ret) {
+          LOG_WARN("next_dict_header failed", KR(ret), K(header));
+        }
+      } else if (! header.is_valid()) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_ERROR("expect valid dict_header", KR(ret), K(header));
+      } else {
+        ObAdminLogNormalDumper normal_writer;
+        str_arg_.writer_ptr_ = &normal_writer;
+        str_arg_.writer_ptr_->start_object();
+        str_arg_.writer_ptr_->dump_key("DictHeader");
+        str_arg_.writer_ptr_->dump_string(to_cstring(header));
+        switch (header.get_dict_meta_type()) {
+          case datadict::ObDictMetaType::TENANT_META: {
+            datadict::ObDictTenantMeta tenant_meta(&allocator);
+            if (OB_FAIL(dict_iterator.next_dict_entry(header, tenant_meta))) {
+              LOG_ERROR("get next_dict_entry failed", KR(ret), K(header), K(tenant_meta));
+            } else {
+              str_arg_.writer_ptr_->dump_key("TenantMeta");
+              str_arg_.writer_ptr_->dump_string(to_cstring(tenant_meta));
+            }
+            break;
+          }
+          case datadict::ObDictMetaType::DATABASE_META: {
+            datadict::ObDictDatabaseMeta db_meta(&allocator);
+            if (OB_FAIL(dict_iterator.next_dict_entry(header, db_meta))) {
+              LOG_ERROR("get next_dict_entry failed", KR(ret), K(header), K(db_meta));
+            } else {
+              str_arg_.writer_ptr_->dump_key("DatabaseMeta");
+              str_arg_.writer_ptr_->dump_string(to_cstring(db_meta));
+            }
+            break;
+          }
+          case datadict::ObDictMetaType::TABLE_META: {
+            datadict::ObDictTableMeta table_meta(&allocator);
+            if (OB_FAIL(dict_iterator.next_dict_entry(header, table_meta))) {
+              LOG_ERROR("get next_dict_entry failed", KR(ret), K(header), K(table_meta));
+            } else {
+              str_arg_.writer_ptr_->dump_key("TableMeta");
+              str_arg_.writer_ptr_->dump_string(to_cstring(table_meta));
+            }
+            break;
+          }
+          default: {
+            ret = OB_NOT_SUPPORTED;
+            LOG_WARN("invalid meta_type", KR(ret), K(header));
+          }
+        }
+        str_arg_.writer_ptr_->end_object();
+      }
+    }
+
+    if (OB_ITER_END == ret) {
+      ret = OB_SUCCESS;
+    }
+  }
+  return ret;
+}
+
+int ObAdminParserLogEntry::parse_reserved_snapshot_log_()
+{
+  //not supported so far, just reserved
+  int ret = OB_NOT_SUPPORTED;
+  return ret;
+}
+
+int ObAdminParserLogEntry::parse_medium_log_()
+{
+  //not supported so far, just reserved
+  int ret = OB_NOT_SUPPORTED;
+  return ret;
+}
+
 int ObAdminParserLogEntry::parse_different_entry_type_(const logservice::ObLogBaseHeader &header)
 {
   int ret = OB_SUCCESS;
@@ -549,6 +636,19 @@ int ObAdminParserLogEntry::parse_different_entry_type_(const logservice::ObLogBa
         ret = parse_gais_log_();
         break;
       }
+      case oceanbase::logservice::ObLogBaseType::DATA_DICT_LOG_BASE_TYPE: {
+        ret = parse_data_dict_log_();
+        break;
+      }
+      case oceanbase::logservice::ObLogBaseType::RESERVED_SNAPSHOT_LOG_BASE_TYPE: {
+        ret = parse_reserved_snapshot_log_();
+        break;
+      }
+      case oceanbase::logservice::ObLogBaseType::MEDIUM_COMPACTION_LOG_BASE_TYPE: {
+        ret = parse_medium_log_();
+        break;
+      }
+
       default: {
         fprintf(stdout, "  Unknown Base Log Type : %d\n", header.get_log_type());
         LOG_WARN("don't support this log type", K(header.get_log_type()));

@@ -16,6 +16,7 @@
 #include "share/ob_define.h"
 #include "share/ob_inner_kv_table_operator.h"
 #include "share/backup/ob_archive_struct.h"
+#include "share/backup/ob_archive_mode.h"
 
 namespace oceanbase
 {
@@ -58,6 +59,13 @@ public:
 
   int init(const uint64_t tenant_id);
 
+  int get_archive_mode(
+      common::ObISQLClient &proxy, ObArchiveMode &mode) const;
+
+  int open_archive_mode(common::ObISQLClient &proxy) const;
+
+  int close_archive_mode(common::ObISQLClient &proxy) const;
+
   // lock LOG_ARCHIVE_DEST
   int lock_archive_dest(common::ObISQLClient &trans, const int64_t dest_no, bool &is_exist) const;
 
@@ -80,6 +88,9 @@ public:
   int get_lag_target(common::ObISQLClient &proxy, const bool need_lock, const int64_t dest_no, 
       int64_t &lag_target) const;
 
+  int get_dest_state(common::ObISQLClient &proxy, const bool need_lock, const int64_t dest_no,
+      ObLogArchiveDestState &state) const;
+
   int set_kv_item(
       common::ObISQLClient &proxy, const int64_t dest_no, const common::ObSqlString &name, 
       const common::ObSqlString &value) const;
@@ -101,6 +112,7 @@ public:
   // dest round operation
   int get_round(common::ObISQLClient &proxy, const int64_t dest_no,
       const bool need_lock, ObTenantArchiveRoundAttr &round) const;
+  int clean_round_comment(common::ObISQLClient &proxy, const int64_t dest_no) const;
   int get_round_by_dest_id(common::ObISQLClient &proxy, const int64_t dest_id,
       const bool need_lock, ObTenantArchiveRoundAttr &round) const;
   int del_round(common::ObISQLClient &proxy, const int64_t dest_no) const;
@@ -146,12 +158,20 @@ public:
   // set all ls archive piece to 'STOP'
   int set_ls_archive_stop(common::ObISQLClient &proxy, const int64_t dest_id, const int64_t round_id,
       const ObLSID &id, int64_t &affected_rows) const;
+  int set_ls_archive_suspend(common::ObISQLClient &proxy, const int64_t dest_id, const int64_t round_id,
+      const ObLSID &id, int64_t &affected_rows) const;
+  int set_ls_archive_doing(common::ObISQLClient &proxy, const int64_t dest_id, const int64_t round_id,
+      const ObLSID &id, int64_t &affected_rows) const;
 
 
   // Returned log stream must with the same input round_id, or with 0 round_id which indicates
   // that it has not started archived yet and piece_id bigger or equal than input 'since_piece_id'.
   int get_dest_round_summary(common::ObISQLClient &proxy, const int64_t dest_id,
       const int64_t round_id, const int64_t since_piece_id, ObDestRoundSummary &summary) const;
+  int get_piece_by_scn(common::ObISQLClient &proxy, const int64_t dest_id,
+      const share::SCN &scn, ObTenantArchivePieceAttr &piece) const;
+  int get_pieces_by_range(common::ObISQLClient &proxy, const int64_t dest_id,
+      const int64_t start_piece_id, const int64_t end_piece_id, ObIArray<ObTenantArchivePieceAttr> &pieces) const;
 
 private:
   int parse_round_result_(sqlclient::ObMySQLResult &result, common::ObIArray<ObTenantArchiveRoundAttr> &rounds) const;

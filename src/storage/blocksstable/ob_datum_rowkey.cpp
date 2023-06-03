@@ -52,10 +52,14 @@ int ObDatumRowkey::murmurhash(const uint64_t seed, const ObStorageDatumUtils &da
   } else {
     hash = seed;
     if (is_ext_rowkey()) {
-      hash = datum_utils.get_ext_hash_funcs().hash_func_(datums_[0], hash);
+      if (OB_FAIL(datum_utils.get_ext_hash_funcs().hash_func_(datums_[0], hash, hash))) {
+        STORAGE_LOG(WARN, "fail to calc hash", K(ret));
+      }
     } else {
-      for (int64_t i = 0; i < datum_cnt_; i++) {
-        hash = datum_utils.get_hash_funcs().at(i).hash_func_(datums_[i], hash);
+      for (int64_t i = 0; i < datum_cnt_ && OB_SUCC(ret); i++) {
+        if (OB_FAIL(datum_utils.get_hash_funcs().at(i).hash_func_(datums_[i], hash, hash))) {
+          STORAGE_LOG(WARN, "fail to calc hash", K(ret));
+        }
       }
     }
   }
@@ -140,6 +144,10 @@ OB_DEF_DESERIALIZE(ObDatumRowkey)
     STORAGE_LOG(WARN, "datum row key is not init", K(ret), KP(datums_));
   } else {
     OB_UNIS_DECODE(datum_cnt_);
+    if (datum_cnt_ > OB_INNER_MAX_ROWKEY_COLUMN_NUMBER) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(ERROR, "table store inner max rowkey column number exceed the limit, too large", K(ret), K(datum_cnt_));
+    }
     OB_UNIS_DECODE_ARRAY(datums_, datum_cnt_);
     hash_ = 0;
     group_idx_ = 0;

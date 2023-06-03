@@ -44,7 +44,11 @@ public:
   share::SCN latest_snapshot_gc_scn_;
 
   ObFreezeInfo()
+<<<<<<< HEAD
     : frozen_statuses_(), latest_snapshot_gc_scn_()
+=======
+    : frozen_statuses_(), latest_snapshot_gc_scn_(share::SCN::min_scn())
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   {}
   ~ObFreezeInfo() {}
 
@@ -78,7 +82,7 @@ public:
       tenant_id_(common::OB_INVALID_ID),
       sql_proxy_(nullptr),
       merge_info_mgr_(nullptr), 
-      lock_(), 
+      lock_(common::ObLatchIds::OB_FREEZE_INFO_MANAGER_LOCK),
       freeze_info_()
   {}
   virtual ~ObFreezeInfoManager() {}
@@ -105,8 +109,13 @@ public:
   int get_global_last_merged_scn(share::SCN &global_last_merged_scn) const;
   int get_global_broadcast_scn(share::SCN &global_broadcast_scn) const;
   int get_local_latest_frozen_scn(share::SCN &frozen_scn);
+<<<<<<< HEAD
+=======
+  int adjust_global_merge_info(const int64_t expected_epoch);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   void reset_freeze_info();
+  int get_gts(share::SCN &gts_scn) const;
 
 private:
   int inner_reload(ObFreezeInfo &freeze_info);
@@ -118,7 +127,10 @@ private:
 
   int set_local_snapshot_gc_scn(const share::SCN &new_scn);
 
+<<<<<<< HEAD
   int get_gts(share::SCN &gts_scn) const;
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int get_schema_version(const share::SCN &frozen_scn, int64_t &schema_version) const;
 
   int get_min_freeze_info(share::ObSimpleFrozenStatus &frozen_status);

@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include "lib/utility/utility.h"
+#include "include/easy_define.h"
 
 namespace oceanbase
 {
@@ -28,6 +29,21 @@ namespace common
 // --------------------------------------------------------
 // class ObAddr implements
 // --------------------------------------------------------
+ObAddr::ObAddr(const easy_addr_t& addr)
+{
+  if (addr.family == AF_INET) {
+    version_ = IPV4;
+    ip_.v4_ = addr.u.addr;
+  } else if (addr.family == AF_INET6) {
+    version_ = IPV6;
+    MEMCPY(ip_.v6_, addr.u.addr6, sizeof(ip_.v6_));
+  } else if (addr.family == AF_UNIX) {
+    version_ = UNIX;
+    MEMCPY(ip_.unix_path_, addr.u.unix_path, sizeof(ip_.unix_path_));
+  }
+  port_ = addr.port;
+}
+
 int ObAddr::convert_ipv4_addr(const char *ip)
 {
   int ret = OB_SUCCESS;
@@ -378,7 +394,7 @@ int64_t ObAddr::get_ipv4_server_id() const
     server_id <<= 32;
     server_id |= port_;
   } else {
-    LOG_ERROR("this is ipv6 addr", K(*this));
+    LOG_ERROR_RET(OB_ERROR, "this is ipv6 addr", K(*this));
   }
   return server_id;
 }
@@ -403,7 +419,6 @@ ObAddr &ObAddr::as_mask(const int64_t mask_bits)
       ip_.v6_[bytes++] = 0xff;
       mask -= 8;
     }
-    LOG_WARN("LICQ - as_mask", K(*this));
     if (bytes < IPV6_LEN && mask > 0) {
       ip_.v6_[bytes] = static_cast<uint8_t>(((static_cast<uint8_t>(1) << mask) - 1) << (8 - mask));
     }
@@ -425,7 +440,7 @@ bool ObAddr::operator <(const ObAddr &rv) const
 {
   int64_t ipcmp = 0;
   if (version_ != rv.version_) {
-    LOG_ERROR("comparision between different IP versions hasn't supported!");
+    LOG_ERROR_RET(common::OB_NOT_SUPPORTED, "comparision between different IP versions hasn't supported!");
   } else if (IPV4 == version_) {
     ipcmp = static_cast<int64_t>(ip_.v4_) - static_cast<int64_t>(rv.ip_.v4_);
   } else if (IPV6 == version_) {
@@ -441,7 +456,7 @@ bool ObAddr::operator >(const ObAddr &rv) const
 {
   int64_t ipcmp = 0;
   if (version_ != rv.version_) {
-    LOG_ERROR("comparision between different IP versions hasn't supported!");
+    LOG_ERROR_RET(common::OB_NOT_SUPPORTED, "comparision between different IP versions hasn't supported!");
   } else if (IPV4 == version_) {
     ipcmp = static_cast<int64_t>(ip_.v4_) - static_cast<int64_t>(rv.ip_.v4_);
   } else if (IPV6 == version_) {
@@ -530,5 +545,14 @@ OB_DEF_SERIALIZE_SIZE(ObAddr)
 OB_SERIALIZE_MEMBER(ObAddrWithSeq,
                     server_addr_,
                     server_seq_);
+
+DEF_TO_STRING(ObAddrWithSeq)
+{
+  int64_t pos = 0;
+  J_OBJ_START();
+  J_KV(K_(server_addr), K_(server_seq));
+  J_OBJ_END();
+  return pos;
+}
 } // end namespace common
 } // end namespace oceanbase

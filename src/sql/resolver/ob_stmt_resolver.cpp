@@ -30,7 +30,7 @@ uint64_t ObStmtResolver::generate_table_id()
   if (NULL != params_.query_ctx_) {
     return params_.query_ctx_->available_tb_id_--;
   } else {
-    LOG_WARN("query ctx pointer is null");
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "query ctx pointer is null");
     return OB_INVALID_ID;
   }
 }
@@ -41,7 +41,8 @@ int ObStmtResolver::resolve_table_relation_node(const ParseNode *node,
                                                 bool is_org/*false*/,
                                                 bool is_oracle_sys_view,
                                                 char **dblink_name_ptr,
-                                                int32_t *dblink_name_len)
+                                                int32_t *dblink_name_len,
+                                                bool *has_dblink_node)
 {
   int ret = OB_SUCCESS;
   bool is_db_explicit = false;
@@ -53,7 +54,8 @@ int ObStmtResolver::resolve_table_relation_node(const ParseNode *node,
                                              is_org,
                                              is_oracle_sys_view,
                                              dblink_name_ptr,
-                                             dblink_name_len))) {
+                                             dblink_name_len,
+                                             has_dblink_node))) {
     LOG_WARN("failed to resolve table name", K(ret));
   } else {
     // do nothing
@@ -75,7 +77,8 @@ int ObStmtResolver::resolve_table_relation_node_v2(const ParseNode *node,
                                                    bool is_org/*false*/,
                                                    bool is_oracle_sys_view,
                                                    char **dblink_name_ptr,
-                                                   int32_t *dblink_name_len)
+                                                   int32_t *dblink_name_len,
+                                                   bool *has_dblink_node)
 {
   int ret = OB_SUCCESS;
   is_db_explicit = false;
@@ -85,15 +88,30 @@ int ObStmtResolver::resolve_table_relation_node_v2(const ParseNode *node,
   table_name.assign_ptr(const_cast<char*>(relation_node->str_value_), table_len);
   ObNameCaseMode mode = OB_NAME_CASE_INVALID;
   ObCollationType cs_type = CS_TYPE_INVALID;
+  if (OB_NOT_NULL(has_dblink_node)) {
+    *has_dblink_node = false;
+    if (node->num_child_ >= 3 && NULL != node->children_[2]) {
+      *has_dblink_node = true;
+    }
+  }
   if (NULL != dblink_name_ptr &&
       NULL != dblink_name_len &&
       node->num_child_ >= 3 && 
       NULL != node->children_[2] && 
-      T_IDENT == node->children_[2]->type_ &&
-      NULL != node->children_[2]->str_value_) {
+      T_DBLINK_NAME == node->children_[2]->type_ &&
+      NULL != node->children_[2]->children_ &&
+      2 == node->children_[2]->num_child_ &&
+      NULL != node->children_[2]->children_[0] &&
+      NULL != node->children_[2]->children_[1]) {
     //Obtaining dblink_name here is not to obtain the dblink name itself, but to determine whether there is an opt_dblink node
-    *dblink_name_ptr = const_cast<char*>(node->children_[2]->str_value_);
-    *dblink_name_len = static_cast<int32_t>(node->children_[2]->str_len_);
+    ParseNode *dblink_name_node = node->children_[2];
+    if (node->children_[2]->children_[1]->value_) { // dblink name is @!
+      *dblink_name_ptr = const_cast<char*>(node->children_[2]->children_[0]->str_value_);
+      *dblink_name_len = 1;
+    } else { // dblink name is @xxxx or @, @ will be skip before here
+      *dblink_name_ptr = const_cast<char*>(node->children_[2]->children_[0]->str_value_);
+      *dblink_name_len = static_cast<int32_t>(node->children_[2]->children_[0]->str_len_);
+    }
   }
   if (OB_ISNULL(session_info_)) {
     ret = OB_ERR_UNEXPECTED;
@@ -156,6 +174,37 @@ int ObStmtResolver::resolve_table_relation_node_v2(const ParseNode *node,
     } else {
       ret = tmp_ret;
       LOG_WARN("fail to check and convert table name", K(table_name), K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObStmtResolver::resolve_dblink_name(const ParseNode *table_node, uint64_t tenant_id, ObString &dblink_name, bool &is_reverse_link, bool &has_dblink_node)
+{
+  int ret = OB_SUCCESS;
+  dblink_name.reset();
+  if (!OB_ISNULL(table_node) && table_node->num_child_ > 2 &&
+      !OB_ISNULL(table_node->children_) && !OB_ISNULL(table_node->children_[2])) {
+    const ParseNode *dblink_node = table_node->children_[2];
+    has_dblink_node = true;
+    if (!lib::is_oracle_mode()) {
+      uint64_t compat_version = 0;
+      if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, compat_version))) {
+        LOG_WARN("fail to get data version", KR(ret), K(tenant_id));
+      } else if (compat_version < DATA_VERSION_4_2_0_0) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("mysql dblink is not supported when MIN_DATA_VERSION is below DATA_VERSION_4_2_0_0", K(ret));
+      }
+    }
+    if (OB_FAIL(ret)) {
+      // do nothing
+    } else if (2 == dblink_node->num_child_ && !OB_ISNULL(dblink_node->children_) &&
+        !OB_ISNULL(dblink_node->children_[0])) {
+      int32_t dblink_name_len = static_cast<int32_t>(dblink_node->children_[0]->str_len_);
+      dblink_name.assign_ptr(dblink_node->children_[0]->str_value_, dblink_name_len);
+      if (!OB_ISNULL(dblink_node->children_[1])) {
+        is_reverse_link = dblink_node->children_[1]->value_;
+      }
     }
   }
   return ret;
@@ -247,7 +296,7 @@ int ObStmtResolver::normalize_table_or_database_names(ObString &name)
   return ret;
 }
 
-int ObSynonymChecker::add_synonym_id(uint64_t synonym_id)
+int ObSynonymChecker::add_synonym_id(uint64_t synonym_id, uint64_t database_id)
 {
   int ret = OB_SUCCESS;
   for (int64_t i = 0; OB_SUCC(ret) && i < synonym_ids_.count(); ++i) {
@@ -260,6 +309,8 @@ int ObSynonymChecker::add_synonym_id(uint64_t synonym_id)
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(synonym_ids_.push_back(synonym_id))) {
     LOG_WARN("fail to add synonym_id", K(synonym_id), K(ret));
+  } else if (OB_FAIL(database_ids_.push_back(database_id))) {
+    LOG_WARN("fail to add database id", K(database_id), K(ret));
   }
   return ret;
 }
@@ -284,7 +335,7 @@ int ObStmtResolver::get_column_schema(const uint64_t table_id,
     if (OB_FAIL(schema_checker_->get_column_schema(
         session_info_->get_effective_tenant_id(), table_id, column_name, column_schema, true, is_link))) {
       LOG_WARN("fail to get column schema", K(table_id), K(column_name), K(ret));
-    } else if (!hidden && column_schema->is_hidden() && !column_schema->is_generated_column()) {
+    } else if (!hidden && column_schema->is_hidden() && !column_schema->is_generated_column() && !column_schema->is_udt_hidden_column()) {
       ret = OB_ERR_BAD_FIELD_ERROR;
       LOG_INFO("do not get hidden column", K(table_id), K(column_name), K(ret));
     }

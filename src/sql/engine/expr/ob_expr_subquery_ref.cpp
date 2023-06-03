@@ -72,7 +72,7 @@ int ObExprSubQueryRef::ExtraInfo::init_cursor_info(ObIAllocator *allocator,
     LOG_WARN("fail to alloc memory", K(ret));
   } else {
     cursor_info = new(buf) ExtraInfo(*allocator, type);
-    bool result_is_scalar = (expr.get_output_column() == 1 && !expr.is_set());
+    bool result_is_scalar = (expr.get_output_column() == 1 && !expr.is_set() && !expr.is_multiset());
     if (result_is_scalar) {
       cursor_info->scalar_result_type_ = expr.get_result_type();
     }
@@ -193,6 +193,7 @@ ObExprSubQueryRef::ObExprSubQueryRef(ObIAllocator &alloc)
   : ObExprOperator(alloc, T_REF_QUERY,
                    N_REF_QUERY,
                    0,
+                   VALID_FOR_GENERATED_COL,
                    NOT_ROW_DIMENSION,
                    INTERNAL_IN_MYSQL_MODE,
                    INTERNAL_IN_ORACLE_MODE),

@@ -19,6 +19,10 @@
 #include "storage/blocksstable/ob_imicro_block_reader.h"
 #include "storage/meta_mem/ob_meta_obj_struct.h"
 #include "share/scn.h"
+<<<<<<< HEAD
+=======
+#include "storage/ddl/ob_ddl_struct.h"
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 namespace oceanbase
 {
@@ -37,6 +41,7 @@ public:
                            const blocksstable::ObMicroBlockData &data) const;
 
   TO_STRING_KV(K_(table_key),
+      K_(sstable_logic_seq),
       K_(schema_version),
       K_(create_snapshot_version),
       K_(progressive_merge_round),
@@ -47,6 +52,7 @@ public:
       K_(root_block_addr),
       K_(root_block_data),
       K_(root_row_store_type),
+      K_(latest_row_store_type),
       K_(data_index_tree_height),
       K_(data_block_macro_meta_addr),
       K_(data_block_macro_meta),
@@ -64,14 +70,19 @@ public:
       K_(max_merged_trans_version),
       K_(ddl_scn),
       K_(contain_uncommitted_row),
+      K_(is_meta_root),
       K_(compressor_type),
       K_(encrypt_id),
       K_(master_key_id),
+      K_(recycle_version),
+      K_(nested_offset),
+      K_(nested_size),
       KPHEX_(encrypt_key, sizeof(encrypt_key_)));
 private:
   static const int64_t DEFAULT_MACRO_BLOCK_CNT = 64;
 public:
   ObITable::TableKey table_key_;
+  int16_t sstable_logic_seq_;
   int64_t schema_version_;
   int64_t create_snapshot_version_;
   int64_t progressive_merge_round_;
@@ -82,6 +93,7 @@ public:
   ObMetaDiskAddr root_block_addr_;
   blocksstable::ObMicroBlockData root_block_data_;
   common::ObRowStoreType root_row_store_type_;
+  common::ObRowStoreType latest_row_store_type_;
   int16_t data_index_tree_height_;
   ObMetaDiskAddr data_block_macro_meta_addr_;
   blocksstable::ObMicroBlockData data_block_macro_meta_;
@@ -97,12 +109,20 @@ public:
   int64_t occupy_size_;
   int64_t original_size_;
   int64_t max_merged_trans_version_;
+<<<<<<< HEAD
   share::SCN ddl_scn_;
+=======
+  share::SCN ddl_scn_; // saved into sstable meta
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   share::SCN filled_tx_scn_;
   bool contain_uncommitted_row_;
+  bool is_meta_root_;
   common::ObCompressorType compressor_type_;
   int64_t encrypt_id_;
   int64_t master_key_id_;
+  int64_t recycle_version_;
+  int64_t nested_offset_;
+  int64_t nested_size_;
   char encrypt_key_[share::OB_MAX_TABLESPACE_ENCRYPT_KEY_LENGTH];
   common::ObSEArray<blocksstable::MacroBlockId, DEFAULT_MACRO_BLOCK_CNT> data_block_ids_;
   common::ObSEArray<blocksstable::MacroBlockId, DEFAULT_MACRO_BLOCK_CNT> other_block_ids_;

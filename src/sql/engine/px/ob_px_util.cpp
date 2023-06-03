@@ -18,6 +18,7 @@
 #include "sql/dtl/ob_dtl_channel_group.h"
 #include "sql/dtl/ob_dtl.h"
 #include "sql/engine/px/ob_px_util.h"
+#include "sql/engine/px/ob_px_scheduler.h"
 #include "sql/executor/ob_task_spliter.h"
 #include "observer/ob_server_struct.h"
 #include "sql/engine/px/exchange/ob_receive_op.h"
@@ -27,15 +28,25 @@
 #include "sql/engine/expr/ob_expr.h"
 #include "share/schema/ob_part_mgr_util.h"
 #include "sql/engine/dml/ob_table_insert_op.h"
-#include "sql/engine/table/ob_table_lookup_op.h"
 #include "sql/session/ob_sql_session_info.h"
-#include "share/ob_server_blacklist.h"
 #include "common/ob_smart_call.h"
+#include "storage/ob_locality_manager.h"
+#include "share/external_table/ob_external_table_file_mgr.h"
+#include "rpc/obrpc/ob_net_keepalive.h"
+#include "share/external_table/ob_external_table_utils.h"
+
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 using namespace oceanbase::sql::dtl;
 using namespace oceanbase::share;
+
+#define CASE_IGNORE_ERR_HELPER(ERR_CODE)                        \
+case ERR_CODE: {                                                \
+  should_ignore = true;                                         \
+  LOG_USER_WARN(OB_IGNORE_ERR_ACCESS_VIRTUAL_TABLE, ERR_CODE);  \
+  break;                                                        \
+}                                                               \
 
 OB_SERIALIZE_MEMBER(ObExprExtraSerializeInfo, *current_time_, *last_trace_id_);
 
@@ -58,25 +69,6 @@ int ObPXServerAddrUtil::alloc_by_data_distribution(const ObIArray<ObTableLocatio
   return ret;
 }
 
-int ObPXServerAddrUtil::mark_virtual_table_dfo(common::ObIArray<const ObTableScanSpec*> &scan_ops,
-    ObDfo &dfo)
-{
-  int ret = OB_SUCCESS;
-  bool is_vtable = true;
-  for (int i = 0; i < scan_ops.count() && OB_SUCC(ret); ++i) {
-    if (OB_ISNULL(scan_ops.at(i))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("scan ops is null", K(ret));
-    } else if (!is_virtual_table(scan_ops.at(i)->get_ref_table_id())) {
-      is_vtable = false;
-      break;
-    }
-  }
-  if (OB_SUCC(ret)) {
-    dfo.set_ignore_vtable_error(is_vtable && scan_ops.count() > 0);
-  }
-  return ret;
-}
 
 int ObPXServerAddrUtil::build_dynamic_partition_table_location(common::ObIArray<const ObTableScanSpec *> &scan_ops,
       const ObIArray<ObTableLocation> *table_locations, ObDfo &dfo)
@@ -105,6 +97,165 @@ int ObPXServerAddrUtil::build_dynamic_partition_table_location(common::ObIArray<
         }
       }
     }
+  }
+  return ret;
+}
+
+int ObPXServerAddrUtil::sort_and_collect_local_file_distribution(
+    ObIArray<ObExternalFileInfo> &files,
+    ObIArray<ObAddr> &dst_addrs)
+{
+  int ret = OB_SUCCESS;
+  ObAddr pre_addr;
+  if (OB_SUCC(ret)) {
+    auto addrcmp = [](const ObExternalFileInfo &l, const ObExternalFileInfo &r) -> bool {
+      return l.file_addr_ < r.file_addr_;
+    };
+    std::sort(files.get_data(), files.get_data() + files.count(), addrcmp);
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < files.count(); i++) {
+    ObAddr &cur_addr = files.at(i).file_addr_;
+    if (cur_addr != pre_addr) {
+      pre_addr = cur_addr;
+      OZ (dst_addrs.push_back(files.at(i).file_addr_));
+    }
+  }
+  return ret;
+}
+
+int ObPXServerAddrUtil::get_external_table_loc(
+    ObExecContext &ctx,
+    uint64_t table_id,
+    uint64_t ref_table_id,
+    const ObQueryRange &pre_query_range,
+    ObDfo &dfo,
+    ObDASTableLoc *&table_loc)
+{
+  int ret = OB_SUCCESS;
+  ObDASTableLoc *local_loc = NULL;
+  uint64_t tenant_id = OB_INVALID_ID;
+  bool is_external_files_on_disk = false;
+  ObIArray<ObExternalFileInfo> &ext_file_urls = dfo.get_external_table_files();
+  ObQueryRangeArray ranges;
+  if (OB_ISNULL(local_loc = DAS_CTX(ctx).get_table_loc_by_id(table_id, ref_table_id))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("fail to get table loc", K(ret), K(table_id), K(ref_table_id));
+  } else if (OB_ISNULL(ctx.get_my_session())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session is null", K(ret));
+  } else {
+    tenant_id = ctx.get_my_session()->get_effective_tenant_id();
+    is_external_files_on_disk = local_loc->loc_meta_->is_external_files_on_disk_;
+  }
+  if (OB_SUCC(ret) && ext_file_urls.empty()) {
+    // TODO EXTARNAL TABLE
+    // if (pre_query_range.has_exec_param() || 0 == pre_query_range.get_column_count()) {
+    //   ret = OB_NOT_SUPPORTED;
+    //   LOG_WARN("Has dynamic params in external table or empty range is not supported", K(ret),
+    //            K(pre_query_range.has_exec_param()), K(pre_query_range.get_column_count()));
+    if (OB_FAIL(ObSQLUtils::extract_pre_query_range(
+                                    pre_query_range, ctx.get_allocator(), ctx, ranges,
+                                    ObBasicSessionInfo::create_dtc_params(ctx.get_my_session())))) {
+      LOG_WARN("failed to extract external file fiter", K(ret));
+    } else if (OB_FAIL(ObExternalTableFileManager::get_instance().get_external_files(
+                            tenant_id, ref_table_id, is_external_files_on_disk,
+                            ctx.get_allocator(), ext_file_urls, ranges.empty() ? NULL : &ranges))) {
+      LOG_WARN("fail to get external files", K(ret));
+    } else if (ext_file_urls.empty()) {
+      const char* dummy_file_name = "#######DUMMY_FILE#######";
+      ObExternalFileInfo dummy_file;
+      dummy_file.file_url_ = dummy_file_name;
+      dummy_file.file_id_ = INT64_MAX;
+      if (is_external_files_on_disk) {
+        dummy_file.file_addr_ = GCTX.self_addr();
+      }
+      OZ (dfo.get_external_table_files().push_back(dummy_file));
+    }
+  }
+
+  if (OB_SUCC(ret)
+      && NULL == (table_loc = DAS_CTX(ctx).get_external_table_loc_by_id(table_id, ref_table_id))) {
+    //generate locations
+    ObSEArray<ObAddr, 16> target_locations;
+    if (is_external_files_on_disk) {
+      // locations are the collection of file's ip
+      if (OB_FAIL(sort_and_collect_local_file_distribution(dfo.get_external_table_files(),
+                                                           target_locations))) {
+        LOG_WARN("fail to collect local file distribution", K(ret));
+      }
+      for (int i = 0; OB_SUCC(ret) && i < target_locations.count(); ++i) {
+        if (OB_UNLIKELY(ObPxCheckAlive::is_in_blacklist(
+                          target_locations.at(i), ctx.get_my_session()->get_process_query_time()))) {
+          ret = OB_SERVER_NOT_ALIVE;
+          LOG_WARN("observer is not alive", K(target_locations.at(i)));
+        }
+      }
+    } else {
+      ObSEArray<ObAddr, 16> all_locations;
+      int64_t expected_location_cnt = std::min(dfo.get_dop(), dfo.get_external_table_files().count());
+      if (OB_FAIL(GCTX.location_service_->external_table_get(tenant_id, ref_table_id, all_locations))) {
+        LOG_WARN("fail to get external table location", K(ret));
+      } else if (expected_location_cnt >= all_locations.count() ?
+                 OB_FAIL(target_locations.assign(all_locations))
+               : OB_FAIL(ObPXServerAddrUtil::do_random_dfo_distribution(all_locations,
+                                                                        expected_location_cnt,
+                                                                        target_locations)))
+      LOG_WARN("fail to calc random dfo distribution", K(ret), K(all_locations), K(expected_location_cnt));
+    }
+    LOG_TRACE("calc external table location", K(target_locations));
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(DAS_CTX(ctx).build_external_table_location(table_id, ref_table_id, target_locations))) {
+        LOG_WARN("fail to build external table locations", K(ret));
+      } else if (OB_ISNULL(table_loc = DAS_CTX(ctx).get_external_table_loc_by_id(table_id, ref_table_id))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected location", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObPXServerAddrUtil::assign_external_files_to_sqc(
+    const ObIArray<ObExternalFileInfo> &files,
+    bool is_file_on_disk,
+    ObIArray<ObPxSqcMeta *> &sqcs)
+{
+  int ret = OB_SUCCESS;
+  if (is_file_on_disk) {
+    ObAddr pre_addr;
+    ObPxSqcMeta *target_sqc = NULL;
+    for (int i = 0; OB_SUCC(ret) && i < files.count(); ++i) {
+      if (pre_addr != files.at(i).file_addr_) {
+        // TODO [External Table] OPT this
+        target_sqc = NULL;
+        for (int j = 0; j < sqcs.count(); j++) {
+          if (sqcs.at(j)->get_exec_addr() == files.at(i).file_addr_) {
+            target_sqc = sqcs.at(j);
+            break;
+          }
+        }
+        pre_addr = files.at(i).file_addr_;
+      }
+      if (OB_ISNULL(target_sqc)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("fail to find sqc", K(files.at(i).file_addr_));
+      } else if (OB_FAIL(target_sqc->get_access_external_table_files().push_back(files.at(i)))) {
+        LOG_WARN("fail to push back", K(ret));
+      }
+    }
+  } else {
+    const int64_t file_count = files.count();
+    int64_t files_per_sqc = (file_count - 1) / sqcs.count() + 1;
+
+    for (int64_t i = 0; OB_SUCC(ret) && i < sqcs.count(); ++i) {
+      for (int j = i * files_per_sqc; OB_SUCC(ret) && j < std::min((i + 1) * files_per_sqc, file_count); j++) {
+        OZ (sqcs.at(i)->get_access_external_table_files().push_back(files.at(j)));
+      }
+    }
+  }
+  LOG_TRACE("check dfo external files", K(files));
+  for (int64_t i = 0; i < sqcs.count(); ++i) {
+    LOG_TRACE("check sqc external files", K(sqcs.at(i)->get_access_external_table_files()));
   }
   return ret;
 }
@@ -166,14 +317,16 @@ int ObPXServerAddrUtil::alloc_by_data_distribution_inner(
     } else if (dml_op && dml_op->is_table_location_uncertain()) {
       // 需要获取FULL TABLE LOCATION. FIX ME YISHEN.
       CK(OB_NOT_NULL(ctx.get_my_session()));
-      OZ(ObTableLocation::get_full_leader_table_loc(ctx.get_allocator(),
-                                   ctx.get_my_session()->get_effective_tenant_id(),
-                                   table_location_key,
-                                   ref_table_id,
-                                   table_loc));
+      OZ(ObTableLocation::get_full_leader_table_loc(DAS_CTX(ctx).get_location_router(),
+                                                    ctx.get_allocator(),
+                                                    ctx.get_my_session()->get_effective_tenant_id(),
+                                                    table_location_key,
+                                                    ref_table_id,
+                                                    table_loc));
     } else {
-      if (OB_FAIL(mark_virtual_table_dfo(scan_ops, dfo))) {
-        LOG_WARN("fail to mark virtual table dfo", K(ret));
+      if (OB_NOT_NULL(scan_op) && scan_op->is_external_table_) {
+        // create new table loc for a random dfo distribution for external table
+        OZ (get_external_table_loc(ctx, table_location_key, ref_table_id, scan_op->get_query_range(), dfo, table_loc));
       } else
       // 通过TSC或者DML获得当前的DFO的partition对应的location信息
       // 后续利用location信息构建对应的SQC meta
@@ -220,6 +373,8 @@ int ObPXServerAddrUtil::find_dml_ops_inner(common::ObIArray<const ObTableModifyS
     if (static_cast<const ObTableModifySpec &>(op).use_dist_das() &&
         PHY_MERGE != op.get_type()) {
       // px no need schedule das except merge
+    } else if (PHY_LOCK == op.get_type()) {
+      // no need lock op
     } else if (OB_FAIL(insert_ops.push_back(static_cast<const ObTableModifySpec *>(&op)))) {
       LOG_WARN("fail to push back table insert op", K(ret));
     }
@@ -238,30 +393,45 @@ int ObPXServerAddrUtil::find_dml_ops_inner(common::ObIArray<const ObTableModifyS
   return ret;
 }
 
-template<class T>
-static int get_location_addrs(const T &locations,
-                              ObIArray<ObAddr> &addrs)
+
+int ObPXServerAddrUtil::generate_dh_map_info(ObDfo &dfo)
 {
   int ret = OB_SUCCESS;
-  hash::ObHashSet<ObAddr> addr_set;
-  if (OB_FAIL(addr_set.create(locations.size()))) {
-    LOG_WARN("fail creat addr set", "size", locations.size(), K(ret));
-  }
-  for (auto iter = locations.begin(); OB_SUCC(ret) && iter != locations.end(); ++iter) {
-    ret = addr_set.exist_refactored((*iter)->server_);
-    if (OB_HASH_EXIST == ret) {
-      ret = OB_SUCCESS;
-    } else if (OB_HASH_NOT_EXIST == ret) {
-      if (OB_FAIL(addrs.push_back((*iter)->server_))) {
-        LOG_WARN("fail push back server", K(ret));
-      } else if (OB_FAIL(addr_set.set_refactored((*iter)->server_))) {
-        LOG_WARN("fail set addr to addr_set", K(ret));
+  ObP2PDhMapInfo &p2p_map_info = dfo.get_p2p_dh_map_info();
+  if (OB_ISNULL(dfo.get_coord_info_ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected coord info ptr", K(ret));
+  } else if (!dfo.get_p2p_dh_ids().empty() && p2p_map_info.is_empty()) {
+    ObP2PDfoMapNode node;
+    for (int i = 0; i < dfo.get_p2p_dh_ids().count() && OB_SUCC(ret); ++i) {
+      node.reset();
+      if (OB_FAIL(dfo.get_coord_info_ptr()->p2p_dfo_map_.get_refactored(
+          dfo.get_p2p_dh_ids().at(i), node))) {
+        LOG_WARN("fail to get target dfo id", K(ret));
+      } else if (node.addrs_.empty()) {
+        ObDfo *target_dfo_ptr = nullptr;
+        if (OB_FAIL(dfo.get_coord_info_ptr()->dfo_mgr_.find_dfo_edge(
+            node.target_dfo_id_, target_dfo_ptr))) {
+          LOG_WARN("fail to find dfo edge", K(ret));
+        } else if (target_dfo_ptr->get_p2p_dh_addrs().empty()) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("fail to get p2p dh addrs", K(ret), K(dfo.get_p2p_dh_ids().at(i)));
+        } else if (OB_FAIL(node.addrs_.assign(target_dfo_ptr->get_p2p_dh_addrs()))) {
+          LOG_WARN("fail to assign p2p dh addrs", K(ret));
+        } else if (OB_FAIL(dfo.get_coord_info_ptr()->p2p_dfo_map_.set_refactored(
+              dfo.get_p2p_dh_ids().at(i), node, 1/*over_write*/))) {
+          LOG_WARN("fail to set p2p dh addrs", K(ret));
+        }
       }
-    } else {
-      LOG_WARN("fail check server exist in addr_set", K(ret));
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(p2p_map_info.p2p_sequence_ids_.push_back(dfo.get_p2p_dh_ids().at(i)))) {
+          LOG_WARN("fail to push back p2p map info", K(ret));
+        } else if (OB_FAIL(p2p_map_info.target_addrs_.push_back(node.addrs_))) {
+          LOG_WARN("fail to push back addrs", K(ret));
+        }
+      }
     }
   }
-  (void)addr_set.destroy();
   return ret;
 }
 
@@ -291,6 +461,13 @@ int ObPXServerAddrUtil::build_dfo_sqc(ObExecContext &ctx,
       LOG_TRACE("parallel not set in query hint. set default to 1");
     }
   }
+  // generate dh map info
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(generate_dh_map_info(dfo))) {
+      LOG_WARN("fail to generate dh map info", K(ret));
+    }
+  }
+
   if (OB_SUCC(ret) && addrs.count() > 0) {
     common::ObArray<ObPxSqcMeta *> sqcs;
     int64_t total_part_cnt = 0;
@@ -306,11 +483,19 @@ int ObPXServerAddrUtil::build_dfo_sqc(ObExecContext &ctx,
         sqc.set_px_sequence_id(dfo.get_px_sequence_id());
         sqc.set_qc_id(dfo.get_qc_id());
         sqc.set_interrupt_id(dfo.get_interrupt_id());
+        sqc.set_px_detectable_ids(dfo.get_px_detectable_ids());
         sqc.set_fulltree(dfo.is_fulltree());
-        sqc.set_rpc_worker(dfo.is_rpc_worker());
         sqc.set_qc_server_id(dfo.get_qc_server_id());
         sqc.set_parent_dfo_id(dfo.get_parent_dfo_id());
-        sqc.set_ignore_vtable_error(dfo.is_ignore_vtable_error());
+        sqc.set_single_tsc_leaf_dfo(dfo.is_single_tsc_leaf_dfo());
+        sqc.get_monitoring_info().init(ctx);
+        if (OB_SUCC(ret)) {
+          if (!dfo.get_p2p_dh_map_info().is_empty()) {
+            if (OB_FAIL(sqc.get_p2p_dh_map_info().assign(dfo.get_p2p_dh_map_info()))) {
+              LOG_WARN("fail to assign p2p dh map info", K(ret));
+            }
+          }
+        }
         for (auto iter = locations.begin(); OB_SUCC(ret) && iter != locations.end(); ++iter) {
           if (addrs.at(i) == (*iter)->server_) {
             if (OB_FAIL(sqc_locations.push_back(*iter))) {
@@ -347,6 +532,13 @@ int ObPXServerAddrUtil::build_dfo_sqc(ObExecContext &ctx,
       sqcs.at(i)->set_total_task_count(total_task_count);
       sqcs.at(i)->set_total_part_count(total_part_cnt);
     }
+    if (OB_SUCC(ret) && !locations.empty()
+        && (*locations.begin())->loc_meta_->is_external_table_) {
+      if (OB_FAIL(assign_external_files_to_sqc(dfo.get_external_table_files(),
+                    (*locations.begin())->loc_meta_->is_external_files_on_disk_, sqcs))) {
+        LOG_WARN("fail to assign external files to sqc", K(ret));
+      }
+    }
   }
   return ret;
 }
@@ -368,7 +560,7 @@ int ObPXServerAddrUtil::alloc_by_temp_child_distribution(ObExecContext &exec_ctx
 }
 
 int ObPXServerAddrUtil::alloc_by_temp_child_distribution_inner(ObExecContext &exec_ctx,
-                                                              ObDfo &child)
+                                                               ObDfo &child)
 {
   int ret = OB_SUCCESS;
   ObSEArray<const ObTableScanSpec *, 2> scan_ops;
@@ -394,6 +586,8 @@ int ObPXServerAddrUtil::alloc_by_temp_child_distribution_inner(ObExecContext &ex
     ObArray<int64_t> sqc_result_count;
     if (OB_FAIL(sqc_result_count.prepare_allocate(interm_result_infos.count()))) {
       LOG_WARN("Failed to pre allocate sqc part count");
+    } else if (OB_FAIL(generate_dh_map_info(child))) {
+      LOG_WARN("fail to generate dh map info", K(ret));
     }
     for (int64_t j = 0; OB_SUCC(ret) && j < interm_result_infos.count(); j++) {
       SMART_VAR(ObPxSqcMeta, sqc) {
@@ -406,11 +600,20 @@ int ObPXServerAddrUtil::alloc_by_temp_child_distribution_inner(ObExecContext &ex
         sqc.set_px_sequence_id(child.get_px_sequence_id());
         sqc.set_qc_id(child.get_qc_id());
         sqc.set_interrupt_id(child.get_interrupt_id());
+        sqc.set_px_detectable_ids(child.get_px_detectable_ids());
         sqc.set_fulltree(child.is_fulltree());
-        sqc.set_rpc_worker(child.is_rpc_worker());
         sqc.set_qc_server_id(child.get_qc_server_id());
         sqc.set_parent_dfo_id(child.get_parent_dfo_id());
-        if (OB_FAIL(child.add_sqc(sqc))) {
+        sqc.get_monitoring_info().init(exec_ctx);
+        if (OB_SUCC(ret)) {
+          if (!child.get_p2p_dh_map_info().is_empty()) {
+            if (OB_FAIL(sqc.get_p2p_dh_map_info().assign(child.get_p2p_dh_map_info()))) {
+              LOG_WARN("fail to assign p2p dh map info", K(ret));
+            }
+          }
+        }
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(child.add_sqc(sqc))) {
           LOG_WARN("fail add sqc", K(sqc), K(ret));
         }
       }
@@ -483,10 +686,11 @@ int ObPXServerAddrUtil::alloc_by_child_distribution(const ObDfo &child, ObDfo &p
         sqc.set_px_sequence_id(parent.get_px_sequence_id());
         sqc.set_qc_id(parent.get_qc_id());
         sqc.set_interrupt_id(parent.get_interrupt_id());
+        sqc.set_px_detectable_ids(parent.get_px_detectable_ids());
         sqc.set_fulltree(parent.is_fulltree());
-        sqc.set_rpc_worker(parent.is_rpc_worker());
         sqc.set_qc_server_id(parent.get_qc_server_id());
         sqc.set_parent_dfo_id(parent.get_parent_dfo_id());
+        sqc.get_monitoring_info().assign(child_sqc.get_monitoring_info());
         if (OB_FAIL(parent.add_sqc(sqc))) {
           LOG_WARN("fail add sqc", K(sqc), K(ret));
         }
@@ -526,7 +730,7 @@ int ObPXServerAddrUtil::alloc_by_random_distribution(ObExecContext &exec_ctx,
   } else if (OB_FAIL(get_location_addrs<DASTabletLocArray>(locations, addrs))) {
     LOG_WARN("fail get location addrs", K(ret));
   } else {
-    int64_t parallel = child.get_assigned_worker_count();
+    int64_t parallel = parent.get_assigned_worker_count();
     if (0 >= parallel) {
       parallel = 1;
     }
@@ -551,6 +755,12 @@ int ObPXServerAddrUtil::alloc_by_random_distribution(ObExecContext &exec_ctx,
         total_task_count += sqc_max_task_counts.at(i);
       }
     }
+    // generate dh map info
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(generate_dh_map_info(parent))) {
+        LOG_WARN("fail to generate dh map info", K(ret));
+      }
+    }
     for (int64_t i = 0; i < addrs.count() && OB_SUCC(ret); ++i) {
       SMART_VAR(ObPxSqcMeta, sqc) {
         sqc.set_exec_addr(addrs.at(i));
@@ -565,11 +775,20 @@ int ObPXServerAddrUtil::alloc_by_random_distribution(ObExecContext &exec_ctx,
         sqc.set_px_sequence_id(parent.get_px_sequence_id());
         sqc.set_qc_id(parent.get_qc_id());
         sqc.set_interrupt_id(parent.get_interrupt_id());
+        sqc.set_px_detectable_ids(parent.get_px_detectable_ids());
         sqc.set_fulltree(parent.is_fulltree());
-        sqc.set_rpc_worker(parent.is_rpc_worker());
         sqc.set_qc_server_id(parent.get_qc_server_id());
         sqc.set_parent_dfo_id(parent.get_parent_dfo_id());
-        if (OB_FAIL(parent.add_sqc(sqc))) {
+        sqc.get_monitoring_info().init(exec_ctx);
+        if (OB_SUCC(ret)) {
+          if (!parent.get_p2p_dh_map_info().is_empty()) {
+            if (OB_FAIL(sqc.get_p2p_dh_map_info().assign(parent.get_p2p_dh_map_info()))) {
+              LOG_WARN("fail to assign p2p dh map info", K(ret));
+            }
+          }
+        }
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(parent.add_sqc(sqc))) {
           LOG_WARN("fail add sqc", K(sqc), K(ret));
         }
       }
@@ -583,7 +802,14 @@ int ObPXServerAddrUtil::alloc_by_local_distribution(ObExecContext &exec_ctx,
 {
   int ret = OB_SUCCESS;
   ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(exec_ctx);
-  if (OB_ISNULL(plan_ctx)) {
+  // generate dh map info
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(generate_dh_map_info(dfo))) {
+      LOG_WARN("fail to generate dh map info", K(ret));
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(plan_ctx)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("NULL phy plan ctx", K(ret));
   } else {
@@ -598,13 +824,15 @@ int ObPXServerAddrUtil::alloc_by_local_distribution(ObExecContext &exec_ctx,
       sqc.set_px_sequence_id(dfo.get_px_sequence_id());
       sqc.set_qc_id(dfo.get_qc_id());
       sqc.set_interrupt_id(dfo.get_interrupt_id());
+      sqc.set_px_detectable_ids(dfo.get_px_detectable_ids());
       sqc.set_fulltree(dfo.is_fulltree());
-      sqc.set_rpc_worker(dfo.is_rpc_worker());
       sqc.set_parent_dfo_id(dfo.get_parent_dfo_id());
       sqc.set_qc_server_id(dfo.get_qc_server_id());
-      if (OB_FAIL(dfo.add_sqc(sqc))) {
-        LOG_WARN("fail add sqc", K(sqc), K(ret));
+      sqc.get_monitoring_info().init(exec_ctx);
+      if (!dfo.get_p2p_dh_map_info().is_empty()) {
+        OZ(sqc.get_p2p_dh_map_info().assign(dfo.get_p2p_dh_map_info()));
       }
+      OZ(dfo.add_sqc(sqc));
     }
   }
   return ret;
@@ -703,7 +931,7 @@ int ObPXServerAddrUtil::get_access_partition_order_recursively (
     LOG_DEBUG("No GI in this dfo");
   } else if (PHY_GRANULE_ITERATOR == phy_op->get_type()) {
     const ObGranuleIteratorSpec *gi = static_cast<const ObGranuleIteratorSpec*>(phy_op);
-    asc_order = !gi->desc_order();
+    asc_order = !ObGranuleUtil::desc_order(gi->gi_attri_flag_);
   } else if (OB_FAIL(get_access_partition_order_recursively(root, phy_op->get_parent(), asc_order))) {
     LOG_WARN("fail to access partition order", K(ret));
   }
@@ -731,11 +959,12 @@ int ObPXServerAddrUtil::set_dfo_accessed_location(ObExecContext &ctx,
     } else {
       if (dml_op->is_table_location_uncertain()) {
         CK(OB_NOT_NULL(ctx.get_my_session()));
-        OZ(ObTableLocation::get_full_leader_table_loc(ctx.get_allocator(),
-                                     ctx.get_my_session()->get_effective_tenant_id(),
-                                     table_location_key,
-                                     ref_table_id,
-                                     table_loc));
+        OZ(ObTableLocation::get_full_leader_table_loc(DAS_CTX(ctx).get_location_router(),
+                                                      ctx.get_allocator(),
+                                                      ctx.get_my_session()->get_effective_tenant_id(),
+                                                      table_location_key,
+                                                      ref_table_id,
+                                                      table_loc));
       } else {
         // 通过TSC或者DML获得当前的DFO的partition对应的location信息
         // 后续利用location信息构建对应的SQC meta
@@ -758,7 +987,7 @@ int ObPXServerAddrUtil::set_dfo_accessed_location(ObExecContext &ctx,
 
   // 处理tsc对应的partition location信息
   for (int64_t i = 0; OB_SUCC(ret) && i < scan_ops.count(); ++i) {
-    const ObDASTableLoc *table_loc = nullptr;
+    ObDASTableLoc *table_loc = nullptr;
     const ObTableScanSpec *scan_op = nullptr;
     uint64_t table_location_key = common::OB_INVALID_ID;
     uint64_t ref_table_id = common::OB_INVALID_ID;
@@ -771,6 +1000,9 @@ int ObPXServerAddrUtil::set_dfo_accessed_location(ObExecContext &ctx,
     } else if (OB_ISNULL(table_loc = DAS_CTX(ctx).get_table_loc_by_id(table_location_key, ref_table_id))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("failed to get phy table location", K(ret));
+    } else if (scan_op->is_external_table_
+               && OB_FAIL(get_external_table_loc(ctx, table_location_key, ref_table_id, scan_op->get_query_range(), dfo, table_loc))) {
+      LOG_WARN("fail to get external table loc", K(ret));
     } else if (OB_FAIL(set_sqcs_accessed_location(ctx,
           // dml op has already set sqc.get_location information,
           // table scan does not need to be set again
@@ -800,6 +1032,12 @@ int ObPXServerAddrUtil::set_sqcs_accessed_location(ObExecContext &ctx,
     LOG_WARN("unexpected null table_loc or phy_op", K(phy_op), K(table_loc));
   } else if (OB_FAIL(dfo.get_sqcs(sqcs))) {
     LOG_WARN("fail to get sqcs", K(ret));
+  } else if (table_loc->loc_meta_->is_external_table_) {
+    //just copy locations, do not need reorder
+    OZ (temp_locations.reserve(locations.size()));
+    for (auto iter = locations.begin(); iter != locations.end() && OB_SUCC(ret); ++iter) {
+      OZ (temp_locations.push_back(*iter));
+    }
   } else {
     int64_t table_location_key = table_loc->get_table_location_key();
     bool asc_order = true;
@@ -1009,7 +1247,7 @@ int ObPXServerAddrUtil::reorder_all_partitions(int64_t table_location_key,
 }
 
 /**
- * 算法文档：https://yuque.antfin-inc.com/ob/sql/pbaedu
+ * 算法文档：
  * 大致思路：
  * n为总线程数，p为涉及总的partition数，ni为第i个sqc被计算分的线程数，pi为第i个sqc的partition数量。
  * a. 一个adjust函数，递归的调整sqc的线程数。求得ni ＝ n*pi/p的值，保证每个都是大于等于1。
@@ -1191,15 +1429,21 @@ int ObPXServerAddrUtil::build_tablet_idx_map(
       ObTabletIdxMap &idx_map)
 {
   int ret = OB_SUCCESS;
+  int64_t tablet_idx = 0;
   if (OB_ISNULL(table_schema)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("table schema is null", K(ret));
   } else if (OB_FAIL(idx_map.create(table_schema->get_all_part_num(), "TabletOrderIdx"))) {
     LOG_WARN("fail create index map", K(ret), "cnt", table_schema->get_all_part_num());
+  } else if (is_virtual_table(table_schema->get_table_id())) {
+    for (int i = 0; OB_SUCC(ret) && i < table_schema->get_all_part_num(); ++i) {
+      if (OB_FAIL(idx_map.set_refactored(i + 1, tablet_idx++))) {
+        LOG_WARN("fail set value to hashmap", K(ret));
+      }
+    }
   } else {
     ObPartitionSchemaIter iter(*table_schema, CHECK_PARTITION_MODE_NORMAL);
     ObPartitionSchemaIter::Info info;
-    int64_t tablet_idx = 0;
     do {
       if (OB_FAIL(iter.next_partition_info(info))) {
         if (OB_ITER_END != ret) {
@@ -1660,6 +1904,7 @@ int ObPxTreeSerializer::serialize_tree(char *buf,
                                        int64_t &pos,
                                        ObOpSpec &root,
                                        bool is_fulltree,
+                                       const ObAddr &run_svr,
                                        ObPhyOpSeriCtx *seri_ctx)
 {
   int ret = OB_SUCCESS;
@@ -1671,10 +1916,24 @@ int ObPxTreeSerializer::serialize_tree(char *buf,
   } else if (OB_FAIL((seri_ctx == NULL ? root.serialize(buf, buf_len, pos) :
       root.serialize(buf, buf_len, pos, *seri_ctx)))) {
     LOG_WARN("fail to serialize root", K(ret), "type", root.type_, "root", to_cstring(root));
-  } else if ((PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == root.type_
-              || PHY_TABLE_LOOKUP == root.type_)
+  } else if ((PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == root.type_)
              && OB_FAIL(serialize_sub_plan(buf, buf_len, pos, root))) {
     LOG_WARN("fail to serialize sub plan", K(ret));
+  }
+  if (OB_SUCC(ret)
+      && GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_1_0_0
+      && root.is_table_scan()
+      && static_cast<ObTableScanSpec&>(root).is_global_index_back()) {
+    bool is_same_zone = false;
+    if (OB_ISNULL(GCTX.locality_manager_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid argument", K(ret), K(GCTX.locality_manager_));
+    } else if (OB_FAIL(GCTX.locality_manager_->is_same_zone(run_svr, is_same_zone))) {
+      LOG_WARN("check same zone failed", K(ret), K(run_svr));
+    } else if (!is_same_zone) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "Cross-zone global index lookup during 4.0 upgrade");
+    }
   }
   // Terminate serialization when meet ObReceive, as this op indicates
   for (int32_t i = 0; OB_SUCC(ret) && i < child_cnt; ++i) {
@@ -1682,7 +1941,7 @@ int ObPxTreeSerializer::serialize_tree(char *buf,
     if (OB_ISNULL(child_op)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("null child operator", K(i), K(root.type_));
-    } else if (OB_FAIL(serialize_tree(buf, buf_len, pos, *child_op, is_fulltree, seri_ctx))) {
+    } else if (OB_FAIL(serialize_tree(buf, buf_len, pos, *child_op, is_fulltree, run_svr, seri_ctx))) {
       LOG_WARN("fail to serialize tree", K(ret));
     }
   }
@@ -1717,8 +1976,7 @@ int ObPxTreeSerializer::deserialize_tree(const char *buf,
     } else {
       if (OB_FAIL(op->deserialize(buf, data_len, pos))) {
         LOG_WARN("fail to deserialize operator", K(ret), N_TYPE, phy_operator_type);
-      } else if ((PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == op->type_
-                 || PHY_TABLE_LOOKUP == op->type_)
+      } else if ((PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == op->type_)
                  && OB_FAIL(deserialize_sub_plan(buf, data_len, pos, phy_plan, op))) {
         LOG_WARN("fail to deserialize sub plan", K(ret));
       } else {
@@ -1987,8 +2245,7 @@ int64_t ObPxTreeSerializer::get_serialize_op_input_tree_size(
     OB_UNIS_ADD_LEN(static_cast<int64_t>(op_spec_input->get_type())); //serialize operator type
     OB_UNIS_ADD_LEN(*op_spec_input); //serialize input parameter
   }
-  if (PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == op_spec.type_
-              || PHY_TABLE_LOOKUP == op_spec.type_) {
+  if (PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == op_spec.type_) {
     len += get_serialize_op_input_subplan_size(op_spec, op_kit_store, true/*is_fulltree*/);
     // do nothing
   }
@@ -2055,8 +2312,7 @@ int ObPxTreeSerializer::serialize_op_input_tree(
       ++real_input_count;
     }
   }
-  if (OB_SUCC(ret) && (PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == op_spec.type_
-              || PHY_TABLE_LOOKUP == op_spec.type_)
+  if (OB_SUCC(ret) && (PHY_TABLE_SCAN_WITH_DOMAIN_INDEX == op_spec.type_)
              && OB_FAIL(serialize_op_input_subplan(
                buf, buf_len, pos, op_spec, op_kit_store, true/*is_fulltree*/, real_input_count))) {
     LOG_WARN("fail to serialize sub plan", K(ret));
@@ -3493,18 +3749,16 @@ int ObExtraServerAliveCheck::do_check() const
     if (OB_FAIL(dfo_mgr_->get_running_dfos(dfos))) {
       LOG_WARN("fail find dfo", K(ret));
     } else {
-      share::ObServerBlacklist &server_black_list = share::ObServerBlacklist::get_instance();
       // need check all sqc because we set sqc need_report = false here and don't need wait sqc finish msg.
       for (int64_t i = 0; i < dfos.count(); i++) {
         ObIArray<ObPxSqcMeta> &sqcs = dfos.at(i)->get_sqcs();
         for (int64_t j = 0; j < sqcs.count(); j++) {
           if (sqcs.at(j).need_report()) {
-            if (OB_UNLIKELY(server_black_list.is_in_blacklist(
-                share::ObCascadMember(sqcs.at(j).get_exec_addr(), cluster_id_), true,
+            if (OB_UNLIKELY(ObPxCheckAlive::is_in_blacklist(sqcs.at(j).get_exec_addr(),
                 query_start_time_))) {
               sqcs.at(j).set_need_report(false);
               sqcs.at(j).set_thread_finish(true);
-              sqcs.at(j).set_server_not_alive();
+              sqcs.at(j).set_server_not_alive(true);
               if (!sqcs.at(j).is_ignore_vtable_error()) {
                 ret = OB_RPC_CONNECT_ERROR;
                 LOG_WARN("server not in communication, maybe crashed.", K(ret),
@@ -3516,12 +3770,42 @@ int ObExtraServerAliveCheck::do_check() const
       }
     }
   } else if (OB_LIKELY(qc_addr_.is_valid())) {
-    if (OB_UNLIKELY(share::ObServerBlacklist::get_instance().is_in_blacklist(share::ObCascadMember(
-          qc_addr_, cluster_id_), true, query_start_time_))) {
+    if (OB_UNLIKELY(ObPxCheckAlive::is_in_blacklist(qc_addr_, query_start_time_))) {
       ret = OB_RPC_CONNECT_ERROR;
       LOG_WARN("qc not in communication, maybe crashed", K(ret), K(qc_addr_));
     }
   }
   LOG_DEBUG("server alive do check", K(ret), K(qc_addr_), K(cluster_id_), K(dfo_mgr_));
   return ret;
+}
+
+bool ObVirtualTableErrorWhitelist::should_ignore_vtable_error(int error_code)
+{
+  bool should_ignore = false;
+  switch (error_code) {
+    CASE_IGNORE_ERR_HELPER(OB_ALLOCATE_MEMORY_FAILED)
+    CASE_IGNORE_ERR_HELPER(OB_RPC_CONNECT_ERROR)
+    CASE_IGNORE_ERR_HELPER(OB_RPC_SEND_ERROR)
+    CASE_IGNORE_ERR_HELPER(OB_TENANT_NOT_IN_SERVER)
+    default: {
+      break;
+    }
+  }
+  return should_ignore;
+}
+
+bool ObPxCheckAlive::is_in_blacklist(const common::ObAddr &addr, int64_t server_start_time)
+{
+  int ret = OB_SUCCESS;
+  bool in_blacklist = false;
+  obrpc::ObNetKeepAliveData alive_data;
+  if (OB_FAIL(ObNetKeepAlive::get_instance().in_black(addr, in_blacklist, &alive_data))) {
+    LOG_WARN("check in black failed", K(ret));
+  } else if (!in_blacklist && server_start_time > 0) {
+    in_blacklist = alive_data.start_service_time_ >= server_start_time;
+  }
+  if (in_blacklist) {
+    LOG_WARN("server in blacklist", K(addr), K(server_start_time), K(alive_data.start_service_time_));
+  }
+  return in_blacklist;
 }

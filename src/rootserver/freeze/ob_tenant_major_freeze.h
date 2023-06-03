@@ -44,6 +44,7 @@ public:
   ObTenantMajorFreeze();
   virtual ~ObTenantMajorFreeze();
   int init(const uint64_t tenant_id,
+           const bool is_primary_service,
            common::ObMySQLProxy &sql_proxy,
            common::ObServerConfig &config,
            share::schema::ObMultiVersionSchemaService &schema_service,
@@ -58,6 +59,8 @@ public:
   void pause();
   void resume();
 
+  bool is_paused() const;
+
   uint64_t get_tenant_id() const { return tenant_id_; }
 
   int get_frozen_scn(share::SCN &frozen_scn);
@@ -71,6 +74,8 @@ public:
 
   int clear_merge_error();
 
+  int get_uncompacted_tablets(common::ObArray<share::ObTabletReplica> &uncompacted_tablets) const;
+
 private:
   // major merge one by one
   static const int64_t UNMERGED_VERSION_LIMIT = 1;
@@ -80,9 +85,12 @@ private:
 
   int set_freeze_info();
 
+  bool is_primary_service() const { return is_primary_service_; }
+
 private:
   bool is_inited_;
   uint64_t tenant_id_;
+  bool is_primary_service_;  // identify ObMajorFreezeServiceType::SERVICE_TYPE_PRIMARY
 
   ObZoneMergeManager zone_merge_mgr_;
   ObFreezeInfoManager freeze_info_mgr_;

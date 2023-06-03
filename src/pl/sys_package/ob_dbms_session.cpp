@@ -22,7 +22,7 @@
 #include "pl/ob_pl.h"
 #include "share/ob_dml_sql_splicer.h"
 #include "share/ob_global_context_operator.h"
-#include "sql/monitor/full_link_trace/ob_flt_control_info_mgr.h"
+#include "sql/monitor/flt/ob_flt_control_info_mgr.h"
 
 namespace oceanbase
 {
@@ -301,6 +301,27 @@ int ObDBMSSession::set_identifier(sql::ObExecContext &ctx,
     } else {
       // do nothing
     }
+  }
+  return ret;
+}
+
+int ObDBMSSession::reset_package(sql::ObExecContext &ctx,
+                                  sql::ParamStore &params,
+                                  common::ObObj &result)
+{
+  int ret = OB_SUCCESS;
+  sql::ObSQLSessionInfo *session = ctx.get_my_session();
+  ObPLContext *pl_ctx = nullptr;
+  ObString client_id;
+  if (OB_UNLIKELY(OB_ISNULL(session))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session info is nullptr", K(ret));
+  } else if (OB_UNLIKELY(0 != params.count())) {
+    ObString func_name("RESET_PACKAGE");
+    ret = OB_ERR_WRONG_FUNC_ARGUMENTS_TYPE;
+    LOG_USER_ERROR(OB_ERR_WRONG_FUNC_ARGUMENTS_TYPE, func_name.length(), func_name.ptr());
+  } else {
+    session->set_need_reset_package(true);
   }
   return ret;
 }

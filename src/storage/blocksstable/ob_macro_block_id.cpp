@@ -71,10 +71,26 @@ uint64_t MacroBlockId::hash() const
     hash_val = block_index_ * HASH_MAGIC_NUM;
     break;
   default:
-    LOG_ERROR("unexpected id mode!", K(*this));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "unexpected id mode!", K(*this));
     break;
   }
   return hash_val;
+}
+
+int MacroBlockId::hash(uint64_t &hash_val) const
+{
+  int ret = OB_SUCCESS;
+  hash_val = 0;
+  switch ((ObMacroBlockIdMode)id_mode_) {
+    case ObMacroBlockIdMode::ID_MODE_LOCAL:
+      hash_val = block_index_ * HASH_MAGIC_NUM;
+      break;
+    default:
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("unexpected id mode!", K(ret), K(*this));
+      break;
+  }
+  return ret;
 }
 
 DEFINE_SERIALIZE(MacroBlockId)
@@ -135,14 +151,14 @@ bool MacroBlockId::operator <(const MacroBlockId &other) const
 {
   bool bret = false;
   if (other.id_mode_ != id_mode_) {
-    LOG_ERROR("different id_mode_!", K(*this), K(other));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "different id_mode_!", K(*this), K(other));
   } else {
     switch ((ObMacroBlockIdMode)id_mode_) {
     case ObMacroBlockIdMode::ID_MODE_LOCAL:
       bret = (block_index_ < other.block_index_);
       break;
     default:
-      LOG_ERROR("unexpected id mode!", K(*this));
+      LOG_ERROR_RET(OB_ERR_UNEXPECTED, "unexpected id mode!", K(*this));
       break;
     }
   }

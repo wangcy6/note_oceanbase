@@ -17,6 +17,7 @@
 #include "sql/engine/ob_physical_plan_ctx.h"
 #include "sql/engine/ob_exec_context.h"
 #include "pl/ob_pl.h"
+#include "sql/engine/expr/ob_expr_lob_utils.h"
 
 namespace oceanbase
 {
@@ -29,7 +30,7 @@ namespace sql
 OB_SERIALIZE_MEMBER((ObExprPLSQLVariable, ObFuncExprOperator), plsql_line_, plsql_variable_);
 
 ObExprPLSQLVariable::ObExprPLSQLVariable(ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, T_FUN_PLSQL_VARIABLE, N_PLSQL_VARIABLE, 0, NOT_ROW_DIMENSION,
+    : ObFuncExprOperator(alloc, T_FUN_PLSQL_VARIABLE, N_PLSQL_VARIABLE, 0, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION,
                          false, INTERNAL_IN_ORACLE_MODE),
       plsql_line_(OB_INVALID_INDEX),
       plsql_variable_(),
@@ -333,6 +334,9 @@ int ObExprPLSQLVariable::eval_plsql_variable(const ObExpr &expr, ObEvalCtx &ctx,
     }
   }
   OZ(res.from_obj(result, expr.obj_datum_map_));
+  if (is_lob_storage(result.get_type())) {
+    OZ(ob_adjust_lob_datum(result, expr.obj_meta_, ctx.exec_ctx_.get_allocator(), res));
+  }
   OZ(expr.deep_copy_datum(ctx, res));
   return ret;
 }

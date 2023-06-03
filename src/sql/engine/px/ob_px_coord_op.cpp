@@ -42,6 +42,9 @@
 #include "sql/dtl/ob_dtl_utils.h"
 #include "sql/dtl/ob_dtl_interm_result_manager.h"
 #include "sql/engine/px/exchange/ob_px_ms_coord_op.h"
+#include "sql/engine/px/datahub/components/ob_dh_init_channel.h"
+#include "share/detect/ob_detect_manager_utils.h"
+#include "sql/engine/px/p2p_datahub/ob_p2p_dh_mgr.h"
 
 namespace oceanbase
 {
@@ -128,10 +131,13 @@ ObPxCoordOp::ObPxCoordOp(ObExecContext &exec_ctx, const ObOpSpec &spec, ObOpInpu
   register_interrupted_(false),
   px_sequence_id_(0),
   interrupt_id_(0),
+  register_detectable_id_(false),
+  detectable_id_(),
   px_dop_(1),
   time_recorder_(0),
   batch_rescan_param_version_(0),
-  server_alive_checker_(coord_info_.dfo_mgr_, exec_ctx.get_my_session()->get_process_query_time())
+  server_alive_checker_(coord_info_.dfo_mgr_, exec_ctx.get_my_session()->get_process_query_time()),
+  last_px_batch_rescan_size_(0)
 {}
 
 
@@ -160,7 +166,7 @@ int ObPxCoordOp::init_dfc(ObDfo &dfo, dtl::ObDtlChTotalInfo *ch_info)
     bool force_block = false;
 #ifdef ERRSIM
     int ret = OB_SUCCESS;
-    ret = E(EventTable::EN_FORCE_DFC_BLOCK) ret;
+    ret = OB_E(EventTable::EN_FORCE_DFC_BLOCK) ret;
     force_block = (OB_HASH_NOT_EXIST == ret);
     LOG_TRACE("Worker init dfc", K(dfo_key), K(dfc_.is_receive()), K(force_block), K(ret));
     ret = OB_SUCCESS;
@@ -244,6 +250,7 @@ int ObPxCoordOp::rescan()
       }
     }
     if (OB_FAIL(ret)) {
+    } else if (FALSE_IT(ObDetectManagerUtils::qc_unregister_detectable_id_from_dm(detectable_id_, register_detectable_id_))) {
     } else if (FALSE_IT(clear_interrupt())) {
     } else if (OB_FAIL(destroy_all_channel())) {
       LOG_WARN("release dtl channel failed", K(ret));
@@ -258,6 +265,10 @@ int ObPxCoordOp::rescan()
     } else if (FALSE_IT(px_sequence_id_ = GCTX.sql_engine_->get_px_sequence_id())) {
     } else if (OB_FAIL(register_interrupt())) {
       LOG_WARN("fail to register interrupt", K(ret));
+    } else if (OB_NOT_NULL(get_spec().get_phy_plan()) && get_spec().get_phy_plan()->is_enable_px_fast_reclaim()
+        && OB_FAIL(ObDetectManagerUtils::qc_register_detectable_id_into_dm(detectable_id_, register_detectable_id_,
+                                                                           GET_TENANT_ID(), coord_info_))) {
+      LOG_WARN("fail to register detectable_id", K(ret));
     } else if (OB_FAIL(init_dfo_mgr(
                 ObDfoInterruptIdGen(interrupt_id_,
                                     (uint32_t)GCTX.server_id_,
@@ -341,12 +352,21 @@ int ObPxCoordOp::inner_open()
   int ret = OB_SUCCESS;
   ObDfo *root_dfo = NULL;
   if (OB_FAIL(ObPxReceiveOp::inner_open())) {
+  } else if (!is_valid_server_id(GCTX.server_id_)) {
+    ret = OB_SERVER_IS_INIT;
+    LOG_WARN("Server is initializing", K(ret), K(GCTX.server_id_));
   } else if (OB_FAIL(post_init_op_ctx())) {
     LOG_WARN("init operator context failed", K(ret));
+  } else if (OB_FAIL(coord_info_.init())) {
+    LOG_WARN("fail to init coord info", K(ret));
   } else if (FALSE_IT(px_sequence_id_ = GCTX.sql_engine_->get_px_sequence_id())) {
     LOG_WARN("fail to get px sequence id", K(ret));
   } else if (OB_FAIL(register_interrupt())) {
     LOG_WARN("fail to register interrupt", K(ret));
+  } else if (OB_NOT_NULL(get_spec().get_phy_plan()) && get_spec().get_phy_plan()->is_enable_px_fast_reclaim()
+      && OB_FAIL(ObDetectManagerUtils::qc_register_detectable_id_into_dm(detectable_id_, register_detectable_id_,
+                                                                         GET_TENANT_ID(), coord_info_))) {
+    LOG_WARN("fail to register detectable_id", K(ret));
   } else if (OB_FAIL(init_dfo_mgr(
               ObDfoInterruptIdGen(interrupt_id_,
                                   (uint32_t)GCTX.server_id_,
@@ -399,83 +419,9 @@ int ObPxCoordOp::post_init_op_ctx()
 int ObPxCoordOp::init_dfo_mgr(const ObDfoInterruptIdGen &dfo_id_gen, ObDfoMgr &dfo_mgr)
 {
   int ret = OB_SUCCESS;
-  ObPhysicalPlanCtx *phy_plan_ctx = nullptr;
-  ObTaskExecutorCtx *task_exec_ctx = nullptr;
-  if (OB_ISNULL(phy_plan_ctx = GET_PHY_PLAN_CTX(ctx_))) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("phy plan ctx NULL", K(ret));
-  } else if (OB_ISNULL(task_exec_ctx = GET_TASK_EXECUTOR_CTX(ctx_))) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("task exec ctx NULL", K(ret));
-  } else {
-    //
-    // 传入当前 PX 可用 worker 数 px_admited_worker_count。
-    // 这个 worker 数的计算方法为：PX 中记录理想值 a ，
-    // ExecContext 中记录 query 理想值 b 和 query 实际分得的值 c。
-    // 公式：px_admited_worker_count = a * c / b;
-    // 这个公式意味着: 当分配线程数降级时，Query 下所有 PX 都一起平均降级
-
-    // px 级, 表示 optimizer 计算的数量，当前 px 理论上需要多少线程
-    int64_t px_expected = (static_cast<const ObPxCoordSpec*>(&get_spec()))->get_expected_worker_count();
-    // query 级, 表示 optimizer 计算的数量
-    int64_t query_expected = task_exec_ctx->get_expected_worker_cnt();
-    // query 级, 表示 admission 实际分配的数量
-    int64_t query_admited = task_exec_ctx->get_admited_worker_cnt();
-
-    int64_t px_admited_worker_count = 0;
-    if (OB_FAIL(calc_admited_worker_count(
-                px_expected,
-                query_expected,
-                query_admited,
-                px_admited_worker_count))) {
-      LOG_WARN("fail allocate worker count for px",
-               K(px_expected),
-               K(query_expected),
-               K(query_admited),
-               K(ret));
-    } else if (OB_FAIL(dfo_mgr.init(
-                ctx_,
-                get_spec(),
-                px_expected,
-                px_admited_worker_count,
-                dfo_id_gen))) {
-      LOG_WARN("fail init dfo mgr",
-               K(px_expected),
-               K(query_expected),
-               K(query_admited),
-               K(px_admited_worker_count),
-               K(ret));
-    }
+  if (OB_FAIL(dfo_mgr.init(ctx_, get_spec(), dfo_id_gen, coord_info_))) {
+    LOG_WARN("fail init dfo mgr", K(ret));
   }
-  return ret;
-}
-
-int ObPxCoordOp::calc_admited_worker_count(int64_t px_expected,
-                                           int64_t query_expected,
-                                           int64_t query_admited,
-                                           int64_t &admited_worker_count)
-{
-  int ret = OB_SUCCESS;
-  if (query_expected > 0 && 0 >= query_admited) {
-    ret = OB_ERR_INSUFFICIENT_PX_WORKER;
-    LOG_WARN("not enough thread resource",
-             K(px_expected),
-             K(query_admited),
-             K(query_expected),
-             K(ret));
-  } else if (0 == query_expected) {
-    // note: 对于单表、dop=1的查询，会走 fast dfo，此时 query_expected = 0
-    admited_worker_count = 0;
-  } else {
-    admited_worker_count = static_cast<int64_t>(
-        (double) query_admited * (double)px_expected / (double) query_expected);
-  }
-  LOG_TRACE("calc px worker count",
-            K(px_expected),
-            K(query_expected),
-            K(query_admited),
-            K(admited_worker_count),
-            K(ret));
   return ret;
 }
 
@@ -490,6 +436,9 @@ int ObPxCoordOp::terminate_running_dfos(ObDfoMgr &dfo_mgr)
     LOG_WARN("fail broadcast interrupt to all of a px", K(ret));
   } else if (!dfos.empty() && OB_FAIL(wait_all_running_dfos_exit())) {
     LOG_WARN("fail to exit dfo", K(ret));
+  }
+  if (OB_NOT_NULL(get_spec().get_phy_plan()) && get_spec().get_phy_plan()->is_enable_px_fast_reclaim()) {
+    (void)ObDetectManagerUtils::qc_unregister_all_check_items_from_dm(dfos);
   }
   return ret;
 }
@@ -540,27 +489,120 @@ int ObPxCoordOp::setup_op_input(ObDfo &root)
   return ret;
 }
 
+int ObPxCoordOp::try_clear_p2p_dh_info()
+{
+  int ret = OB_SUCCESS;
+
+#ifdef ERRSIM
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  int64_t query_timeout = 0;
+  session->get_query_timeout(query_timeout);
+  if (OB_FAIL(OB_E(EventTable::EN_PX_NOT_ERASE_P2P_DH_MSG) OB_SUCCESS)) {
+    LOG_WARN("qc not clear p2p dh info by design", K(ret), K(query_timeout));
+    return OB_SUCCESS;
+  }
+#endif
+
+  if (!coord_info_.p2p_dfo_map_.empty()) {
+    hash::ObHashMap<ObAddr, ObSArray<int64_t> *, hash::NoPthreadDefendMode> dh_map;
+    if (OB_FAIL(dh_map.create(coord_info_.p2p_dfo_map_.size() * 2,
+        "ClearP2PDhMap",
+        "ClearP2PDhMap"))) {
+      LOG_WARN("fail to create dh map", K(ret));
+    }
+    ObSArray<int64_t> *p2p_ids = nullptr;
+    void *ptr = nullptr;
+    common::ObArenaAllocator allocator;
+    int64_t tenant_id = ctx_.get_my_session()->get_effective_tenant_id();
+    allocator.set_tenant_id(tenant_id);
+    FOREACH_X(entry, coord_info_.p2p_dfo_map_, OB_SUCC(ret)) {
+      for (int i = 0; OB_SUCC(ret) && i < entry->second.addrs_.count(); ++i) {
+        ptr = nullptr;
+        p2p_ids = nullptr;
+        if (OB_FAIL(dh_map.get_refactored(entry->second.addrs_.at(i), p2p_ids))) {
+          if (OB_HASH_NOT_EXIST == ret) {
+            if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSArray<int64_t>)))) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+              LOG_WARN("fail to alloc memory", K(ret));
+            } else {
+              p2p_ids = new(ptr) ObSArray<int64_t>();
+              ret = OB_SUCCESS;
+            }
+          } else {
+            LOG_WARN("fail to get array", K(ret));
+          }
+        }
+        if (OB_SUCC(ret) && OB_NOT_NULL(p2p_ids)) {
+          if (OB_FAIL(p2p_ids->push_back(entry->first))) {
+            LOG_WARN("fail to push back array ptr", K(ret));
+          } else if (OB_FAIL(dh_map.set_refactored(entry->second.addrs_.at(i), p2p_ids, 1))) {
+            LOG_WARN("fail to set p2p sequence ids", K(ret));
+          }
+        }
+      }
+    }
+    FOREACH_X(entry, dh_map, true) {
+      ObPxP2PClearMsgArg arg;
+      arg.px_seq_id_ = px_sequence_id_;
+      int tmp_ret = arg.p2p_dh_ids_.assign(*entry->second);
+      if (OB_SUCCESS == tmp_ret && !arg.p2p_dh_ids_.empty()) {
+        if (OB_FAIL(PX_P2P_DH.get_proxy().to(entry->first).
+            by(tenant_id).
+            clear_dh_msg(arg, nullptr))) {
+          LOG_WARN("fail to clear dh msg", K(ret));
+          ret = OB_SUCCESS;
+        }
+      }
+      entry->second->reset();
+    }
+    allocator.reset();
+  }
+  return ret;
+}
+
 int ObPxCoordOp::inner_close()
 {
   int ret = OB_SUCCESS;
   // close过程中忽略terminate错误码
   int terminate_ret = OB_SUCCESS;
-  if (OB_SUCCESS != (terminate_ret = terminate_running_dfos(coord_info_.dfo_mgr_))) {
-    // #issue/44180396
-    if (OB_NOT_NULL(ctx_.get_my_session()) &&
-        ctx_.get_my_session()->get_trans_result().is_incomplete()) {
-      ret = terminate_ret;
-    } else {
-      LOG_WARN("fail to terminate running dfo, ignore ret", K(terminate_ret));
+  bool should_terminate_running_dfos = true;
+
+#ifdef ERRSIM
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  int64_t query_timeout = 0;
+  session->get_query_timeout(query_timeout);
+  if (OB_FAIL(OB_E(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout) OB_SUCCESS)) {
+    LOG_WARN("qc not interrupt qc by design", K(ret), K(query_timeout));
+    should_terminate_running_dfos = false;
+  }
+#endif
+
+  if (should_terminate_running_dfos) {
+    if (OB_SUCCESS != (terminate_ret = terminate_running_dfos(coord_info_.dfo_mgr_))) {
+      // #issue/44180396
+      if (OB_NOT_NULL(ctx_.get_my_session()) &&
+          ctx_.get_my_session()->get_trans_result().is_incomplete()) {
+        ret = terminate_ret;
+      } else {
+        LOG_WARN("fail to terminate running dfo, ignore ret", K(terminate_ret));
+      }
     }
   }
+
   unregister_first_buffer_cache();
+  (void)ObDetectManagerUtils::qc_unregister_detectable_id_from_dm(detectable_id_, register_detectable_id_);
+  const ObIArray<ObDfo *> &dfos = coord_info_.dfo_mgr_.get_all_dfos();
+  if (OB_NOT_NULL(get_spec().get_phy_plan()) && get_spec().get_phy_plan()->is_enable_px_fast_reclaim()) {
+    (void)ObDetectManagerUtils::qc_unregister_all_check_items_from_dm(dfos);
+  }
+  (void)try_clear_p2p_dh_info();
   (void)clear_interrupt();
   int release_channel_ret = OB_SUCCESS;
   if (OB_SUCCESS != (release_channel_ret = destroy_all_channel())) {
     LOG_WARN("release dtl channel failed", K(release_channel_ret));
   }
   ctx_.del_extra_check(server_alive_checker_);
+  clean_dfos_dtl_interm_result();
   LOG_TRACE("byebye. exit QC Coord");
   return ret;
 }
@@ -640,7 +682,6 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
   ObPhysicalPlanCtx *phy_plan_ctx = GET_PHY_PLAN_CTX(ctx_);
   ObSEArray<ObDfo *, 32> active_dfos;
   bool all_dfo_terminate = false;
-  int64_t timeout_us = 0;
   int64_t nth_channel = OB_INVALID_INDEX_INT64;
   bool collect_trans_result_ok = false;
   if (OB_FAIL(coord_info_.dfo_mgr_.get_running_dfos(active_dfos))) {
@@ -663,7 +704,10 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
     ObDynamicSamplePieceMsgP sample_piece_msg_proc(ctx_, terminate_msg_proc);
     ObRollupKeyPieceMsgP rollup_key_piece_msg_proc(ctx_, terminate_msg_proc);
     ObRDWFPieceMsgP rd_wf_piece_msg_proc(ctx_, terminate_msg_proc);
+    ObInitChannelPieceMsgP init_channel_piece_msg_proc(ctx_, terminate_msg_proc);
+    ObReportingWFPieceMsgP reporting_wf_piece_msg_proc(ctx_, terminate_msg_proc);
     ObPxQcInterruptedP interrupt_proc(ctx_, terminate_msg_proc);
+    ObOptStatsGatherPieceMsgP opt_stats_gather_piece_msg_proc(ctx_, terminate_msg_proc);
 
     // 这个注册会替换掉旧的proc.
     (void)msg_loop_.clear_all_proc();
@@ -676,7 +720,10 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
       .register_processor(winbuf_piece_msg_proc)
       .register_processor(sample_piece_msg_proc)
       .register_processor(rollup_key_piece_msg_proc)
-      .register_processor(rd_wf_piece_msg_proc);
+      .register_processor(rd_wf_piece_msg_proc)
+      .register_processor(init_channel_piece_msg_proc)
+      .register_processor(reporting_wf_piece_msg_proc)
+      .register_processor(opt_stats_gather_piece_msg_proc);
     loop.ignore_interrupt();
 
     ObPxControlChannelProc control_channels;
@@ -686,17 +733,15 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
     int64_t start_wait_time = ObTimeUtility::current_time();
     while (OB_SUCC(ret) && wait_msg) {
       ObDtlChannelLoop &loop = msg_loop_;
-      timeout_us = phy_plan_ctx->get_timeout_timestamp() - get_timestamp();
-      bool server_all_alive = true;
       /**
        * 开始收下一个消息。
        */
       if (OB_FAIL(check_all_sqc(active_dfos, times_offset, all_dfo_terminate,
-                                last_timestamp, server_all_alive))) {
+                                last_timestamp))) {
         LOG_WARN("fail to check sqc");
       } else if (all_dfo_terminate) {
         wait_msg = false;
-        collect_trans_result_ok = server_all_alive;
+        collect_trans_result_ok = true;
         LOG_TRACE("all dfo has been terminate", K(ret));
         break;
       } else if (OB_FAIL(ctx_.fast_check_status_ignore_interrupt())) {
@@ -714,7 +759,7 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
         }
       }
       if (OB_FAIL(ret)) {
-      } else if (OB_FAIL(loop.process_one_if(&control_channels, timeout_us, nth_channel))) {
+      } else if (OB_FAIL(loop.process_one_if(&control_channels, nth_channel))) {
         if (OB_EAGAIN == ret) {
           LOG_DEBUG("no msessage, waiting sqc report", K(ret));
           ret = OB_SUCCESS;
@@ -736,6 +781,9 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
           case ObDtlMsgType::DH_DYNAMIC_SAMPLE_PIECE_MSG:
           case ObDtlMsgType::DH_ROLLUP_KEY_PIECE_MSG:
           case ObDtlMsgType::DH_RANGE_DIST_WF_PIECE_MSG:
+          case ObDtlMsgType::DH_INIT_CHANNEL_PIECE_MSG:
+          case ObDtlMsgType::DH_SECOND_STAGE_REPORTING_WF_PIECE_MSG:
+          case ObDtlMsgType::DH_OPT_STATS_GATHER_PIECE_MSG:
             break;
           default:
             ret = OB_ERR_UNEXPECTED;
@@ -746,16 +794,18 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
     }
   }
   //过滤掉4662的原因是，在QC希望所有dfo退出时会向所有dfo广播4662中断，这个错误码可能会被sqc report回来
-  if (OB_GOT_SIGNAL_ABORTING != coord_info_.first_error_code_
+  if (OB_SUCCESS != coord_info_.first_error_code_
+      && OB_GOT_SIGNAL_ABORTING != coord_info_.first_error_code_
       && OB_ERR_SIGNALED_IN_PARALLEL_QUERY_SERVER != coord_info_.first_error_code_) {
     ret = coord_info_.first_error_code_;
   }
-  if (!collect_trans_result_ok && OB_FAIL(ret)) {
+  if (!collect_trans_result_ok) {
     ObSQLSessionInfo *session = ctx_.get_my_session();
     session->get_trans_result().set_incomplete();
     LOG_WARN("collect trans_result fail", K(ret),
              "session_id", session->get_sessid(),
              "trans_result", session->get_trans_result());
+
   }
   return ret;
 }
@@ -763,12 +813,10 @@ int ObPxCoordOp::wait_all_running_dfos_exit()
 int ObPxCoordOp::check_all_sqc(ObIArray<ObDfo *> &active_dfos,
                                int64_t &times_offset,
                                bool &all_dfo_terminate,
-                               int64_t &last_timestamp,
-                               bool &server_all_alive)
+                               int64_t &last_timestamp)
 {
   int ret = OB_SUCCESS;
   all_dfo_terminate = true;
-  server_all_alive = true;
   for (int64_t i = 0; i < active_dfos.count() && all_dfo_terminate && OB_SUCC(ret); ++i) {
     ObArray<ObPxSqcMeta *> sqcs;
     if (OB_FAIL(active_dfos.at(i)->get_sqcs(sqcs))) {
@@ -793,8 +841,16 @@ int ObPxCoordOp::check_all_sqc(ObIArray<ObDfo *> &active_dfos,
           }
           all_dfo_terminate = false;
           break;
-        } else if (sqc->is_server_not_alive()) {
-          server_all_alive = false;
+        } else if (sqc->is_server_not_alive() || sqc->is_interrupt_by_dm()) {
+          sqc->set_server_not_alive(false);
+          sqc->set_interrupt_by_dm(false);
+          const DASTabletLocIArray &access_locations = sqc->get_access_table_locations();
+          for (int64_t i = 0; i < access_locations.count() && OB_SUCC(ret); i++) {
+            if (OB_FAIL(ctx_.get_my_session()->get_trans_result().add_touched_ls(access_locations.at(i)->ls_id_))) {
+              LOG_WARN("add touched ls failed", K(ret));
+            }
+          }
+          LOG_WARN("server not alive", K(access_locations), K(sqc->get_access_table_location_keys()));
         }
       }
     }
@@ -830,7 +886,11 @@ int ObPxCoordOp::receive_channel_root_dfo(
   ObExecContext &ctx, ObDfo &parent_dfo, ObPxTaskChSets &parent_ch_sets)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(task_ch_set_.assign(parent_ch_sets.at(0)))) {
+  uint64_t min_cluster_version = 0;
+  CK (OB_NOT_NULL(ctx.get_physical_plan_ctx()) && OB_NOT_NULL(ctx.get_physical_plan_ctx()->get_phy_plan()));
+  OX (min_cluster_version = ctx.get_physical_plan_ctx()->get_phy_plan()->get_min_cluster_version());
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(task_ch_set_.assign(parent_ch_sets.at(0)))) {
     LOG_WARN("fail assign data", K(ret));
   } else if (OB_FAIL(init_dfc(parent_dfo, nullptr))) {
     LOG_WARN("Failed to init dfc", K(ret));
@@ -845,6 +905,7 @@ int ObPxCoordOp::receive_channel_root_dfo(
     msg_loop_.set_tenant_id(ctx.get_my_session()->get_effective_tenant_id());
     msg_loop_.set_interm_result(enable_px_batch_rescan());
     msg_loop_.set_process_query_time(ctx_.get_my_session()->get_process_query_time());
+    msg_loop_.set_query_timeout_ts(ctx_.get_physical_plan_ctx()->get_timeout_timestamp());
     // root dfo 的 receive channel sets 在本机使用，不需要通过  DTL 发送
     // 直接注册到 msg_loop 中收取数据即可
     int64_t cnt = task_channels_.count();
@@ -860,9 +921,11 @@ int ObPxCoordOp::receive_channel_root_dfo(
         ch->set_is_px_channel(true);
         ch->set_operator_owner();
         ch->set_thread_id(thread_id);
+        ch->set_enable_channel_sync(min_cluster_version >= CLUSTER_VERSION_4_1_0_0);
         if (enable_px_batch_rescan()) {
           ch->set_interm_result(true);
           ch->set_batch_id(get_batch_id());
+          last_px_batch_rescan_size_ = max(get_batch_id() + 1, get_rescan_param_count());
         }
       }
       LOG_TRACE("link qc-task channel and registered to qc msg loop. ready to receive task data msg",
@@ -895,7 +958,11 @@ int ObPxCoordOp::receive_channel_root_dfo(
 {
   int ret = OB_SUCCESS;
   ObPxTaskChSets tmp_ch_sets;
-  if (OB_FAIL(ObPxChProviderUtil::inner_get_data_ch(
+  uint64_t min_cluster_version = 0;
+  CK (OB_NOT_NULL(ctx.get_physical_plan_ctx()) && OB_NOT_NULL(ctx.get_physical_plan_ctx()->get_phy_plan()));
+  OX (min_cluster_version = ctx.get_physical_plan_ctx()->get_phy_plan()->get_min_cluster_version());
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(ObPxChProviderUtil::inner_get_data_ch(
       tmp_ch_sets, ch_info, 0, 0, task_ch_set_, false))) {
     LOG_WARN("fail get data ch set", K(ret));
   } else if (OB_FAIL(init_dfc(parent_dfo, &ch_info))) {
@@ -911,6 +978,7 @@ int ObPxCoordOp::receive_channel_root_dfo(
     msg_loop_.set_tenant_id(ctx.get_my_session()->get_effective_tenant_id());
     msg_loop_.set_interm_result(enable_px_batch_rescan());
     msg_loop_.set_process_query_time(ctx_.get_my_session()->get_process_query_time());
+    msg_loop_.set_query_timeout_ts(ctx_.get_physical_plan_ctx()->get_timeout_timestamp());
     // root dfo 的 receive channel sets 在本机使用，不需要通过  DTL 发送
     // 直接注册到 msg_loop 中收取数据即可
     int64_t cnt = task_channels_.count();
@@ -926,9 +994,11 @@ int ObPxCoordOp::receive_channel_root_dfo(
         ch->set_thread_id(thread_id);
         ch->set_audit(enable_audit);
         ch->set_is_px_channel(true);
+        ch->set_enable_channel_sync(min_cluster_version >= CLUSTER_VERSION_4_1_0_0);
         if (enable_px_batch_rescan()) {
           ch->set_interm_result(true);
           ch->set_batch_id(get_batch_id());
+          last_px_batch_rescan_size_ = max(get_batch_id() + 1, get_rescan_param_count());
         }
       }
       LOG_TRACE("link qc-task channel and registered to qc msg loop. ready to receive task data msg",
@@ -1008,7 +1078,16 @@ int ObPxCoordOp::batch_rescan()
 int ObPxCoordOp::erase_dtl_interm_result()
 {
   int ret = OB_SUCCESS;
-  if (enable_px_batch_rescan()) {
+#ifdef ERRSIM
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  int64_t query_timeout = 0;
+  session->get_query_timeout(query_timeout);
+  if (OB_FAIL(OB_E(EventTable::EN_PX_SINGLE_DFO_NOT_ERASE_DTL_INTERM_RESULT) OB_SUCCESS)) {
+    LOG_WARN("ObPxCoordOp not erase_dtl_interm_result by design", K(ret), K(query_timeout));
+    return OB_SUCCESS;
+  }
+#endif
+  if (static_cast<const ObPxCoordSpec&>(get_spec()).batch_op_info_.is_inited()) {
     ObDTLIntermResultKey key;
     ObDtlChannelInfo ci;
     // no need OB_SUCCESS in for-loop.
@@ -1017,12 +1096,13 @@ int ObPxCoordOp::erase_dtl_interm_result()
         LOG_WARN("fail get channel info", K(ret));
       } else {
         key.channel_id_ = ci.chid_;
-        for (int j = 0; j < max(get_batch_id() + 1, get_rescan_param_count()); ++j) {
+        for (int j = 0; j < last_px_batch_rescan_size_; ++j) {
           key.batch_id_ = j;
           if (OB_FAIL(ObDTLIntermResultManager::getInstance().erase_interm_result_info(key))) {
             LOG_TRACE("fail to release recieve internal result", K(ret));
           }
         }
+        last_px_batch_rescan_size_ = 0;
       }
     }
   }

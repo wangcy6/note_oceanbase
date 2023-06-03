@@ -25,6 +25,7 @@
 #include "observer/ob_server_struct.h"
 #include "share/ob_rpc_struct.h"
 #include "sql/plan_cache/ob_plan_cache_util.h"
+#include "sql/optimizer/ob_log_join_filter.h"
 #include "share/ob_encryption_util.h"
 #include "share/ob_resource_limit.h"
 
@@ -147,7 +148,7 @@ bool ObConfigTabletSizeChecker::check(const ObConfigItem &t) const
 {
   bool is_valid = false;
   const int64_t mask = (1 << 21) - 1;
-  int64_t value = ObConfigCapacityParser::get(t.str(), is_valid);
+  int64_t value = ObConfigCapacityParser::get(t.str(), is_valid, false);
   if (is_valid) {
     // value has to be a multiple of 2M
     is_valid = (value >= 0) && !(value & mask);
@@ -343,9 +344,19 @@ bool ObConfigRpcChecksumChecker::check(const ObConfigItem &t) const
 bool ObConfigMemoryLimitChecker::check(const ObConfigItem &t) const
 {
   bool is_valid = false;
+  int64_t value = ObConfigCapacityParser::get(t.str(), is_valid, false);
+  if (is_valid) {
+    is_valid = 0 == value || value >= lib::ObRunningModeConfig::instance().MIN_MEM;
+  }
+  return is_valid;
+}
+
+bool ObConfigTenantMemoryChecker::check(const ObConfigItem &t) const
+{
+  bool is_valid = false;
   int64_t value = ObConfigCapacityParser::get(t.str(), is_valid);
   if (is_valid) {
-    is_valid = 0 == value || value >= lib::ObRunningModeConfig::instance().MINI_MEM_LOWER;
+    is_valid = 0 == value || (value >= ObUnitResource::UNIT_MIN_MEMORY);
   }
   return is_valid;
 }
@@ -444,13 +455,14 @@ int64_t ObConfigIntParser::get(const char *str, bool &valid)
       valid = true;
     } else {
       valid = false;
-      OB_LOG(WARN, "set int error", K(str), K(valid));
+      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "set int error", K(str), K(valid));
     }
   }
   return value;
 }
 
-int64_t ObConfigCapacityParser::get(const char *str, bool &valid)
+int64_t ObConfigCapacityParser::get(const char *str, bool &valid,
+                                    bool check_unit /* = true */)
 {
   char *p_unit = NULL;
   int64_t value = 0;
@@ -466,7 +478,11 @@ int64_t ObConfigCapacityParser::get(const char *str, bool &valid)
     } else if (value < 0) {
       valid = false;
     } else if ('\0' == *p_unit) {
-      value <<= CAP_MB; // default
+      if (check_unit) {
+        valid = false;
+      } else {
+        value <<= CAP_MB;
+      }
     } else if (0 == STRCASECMP("b", p_unit)
         || 0 == STRCASECMP("byte", p_unit)) {
       // do nothing
@@ -487,7 +503,7 @@ int64_t ObConfigCapacityParser::get(const char *str, bool &valid)
       value <<= CAP_PB;
     } else {
       valid = false;
-      OB_LOG(WARN, "set capacity error", K(str), K(p_unit));
+      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "set capacity error", K(str), K(p_unit));
     }
   }
 
@@ -510,7 +526,7 @@ int64_t ObConfigReadableIntParser::get(const char *str, bool &valid)
     } else if (value < 0) {
       valid = false;
     } else if ('\0' == *p_unit) {
-      // https://aone.alibaba-inc.com/req/23558382
+      //
       // without any unit, do nothing
     } else if (0 == STRCASECMP("k", p_unit)) {
       value *= UNIT_K;
@@ -518,7 +534,7 @@ int64_t ObConfigReadableIntParser::get(const char *str, bool &valid)
       value *= UNIT_M;
     } else {
       valid = false;
-      OB_LOG(WARN, "set readable int error", K(str), K(p_unit));
+      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "set readable int error", K(str), K(p_unit));
     }
   }
 
@@ -554,7 +570,7 @@ int64_t ObConfigTimeParser::get(const char *str, bool &valid)
       value = value * TIME_DAY;
     } else {
       valid = false;
-      OB_LOG(WARN, "set time error", K(str), K(p_unit));
+      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "set time error", K(str), K(p_unit));
     }
   }
 
@@ -605,7 +621,7 @@ bool ObConfigBoolParser::get(const char *str, bool &valid)
 
   if (OB_ISNULL(str)) {
     valid = false;
-    OB_LOG(WARN, "Get bool config item fail, str is NULL!");
+    OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "Get bool config item fail, str is NULL!");
   } else if (0 == STRCASECMP(str, "false")) {
     valid = true;
     value = false;
@@ -637,7 +653,7 @@ bool ObConfigBoolParser::get(const char *str, bool &valid)
     valid = true;
     value = false;
   } else {
-    OB_LOG(WARN, "Get bool config item fail", K(str));
+    OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "Get bool config item fail", K(str));
     valid = false;
   }
   return value;
@@ -661,7 +677,7 @@ bool ObCtxMemoryLimitChecker::check(const char* str, uint64_t& ctx_id, int64_t& 
     auto len = STRLEN(str);
     for (int64_t i = 0; i + 1 < len && !is_valid; ++i) {
       if (':' == str[i]) {
-        limit = ObConfigCapacityParser::get(str + i + 1, is_valid);
+        limit = ObConfigCapacityParser::get(str + i + 1, is_valid, false);
         if (is_valid) {
           int ret = OB_SUCCESS;
           SMART_VAR(char[OB_MAX_CONFIG_VALUE_LEN], tmp_str) {
@@ -687,5 +703,126 @@ bool ObAutoIncrementModeChecker::check(const ObConfigItem &t) const
   return is_valid;
 }
 
+bool ObRpcClientAuthMethodChecker::check(const ObConfigItem &t) const
+{
+  ObString v_str(t.str());
+  return 0 == v_str.case_compare("NONE") ||
+         0 == v_str.case_compare("SSL_NO_ENCRYPT") ||
+         0 == v_str.case_compare("SSL_IO");
+}
+
+bool ObRpcServerAuthMethodChecker::is_valid_server_auth_method(const ObString &str) const
+{
+  return 0 == str.case_compare("NONE") ||
+         0 == str.case_compare("SSL_NO_ENCRYPT") ||
+         0 == str.case_compare("SSL_IO") ||
+         0 == str.case_compare("ALL");
+}
+
+bool ObRpcServerAuthMethodChecker::check(const ObConfigItem &t) const
+{
+  bool bret = true;
+  int MAX_METHOD_LENGTH = 256;
+  char tmp_str[MAX_METHOD_LENGTH];
+  size_t str_len = STRLEN(t.str());
+  if (str_len >= MAX_METHOD_LENGTH) {
+    bret = false;
+  } else {
+    MEMCPY(tmp_str, t.str(), str_len);
+    tmp_str[str_len] = 0;
+    ObString str(str_len, reinterpret_cast<const char *>(tmp_str));
+    if (NULL == str.find(',')) {
+      bret = is_valid_server_auth_method(str);
+    } else {
+      //split by comma
+      char *token = NULL;
+      char *save = NULL;
+      char *str_token = tmp_str;
+      int hint = 0;
+      do {
+        token = strtok_r(str_token, ",", &save);
+        str_token = NULL;
+        if (token) {
+          hint = 1;
+          ObString tmp(STRLEN(token), reinterpret_cast<const char *>(token));
+          ObString tmp_to_check = tmp.trim();
+          if (is_valid_server_auth_method(tmp_to_check)) {
+          } else {
+            bret = false;
+            break;
+          }
+        } else {
+          if (!hint) {
+            bret = false;
+          }
+          break;
+        }
+      } while(true);
+    }
+  }
+  return bret;
+}
+
+int64_t ObConfigRuntimeFilterChecker::get_runtime_filter_type(const char *str, int64_t len)
+{
+  int64_t rf_type = -1;
+  int64_t l = 0, r = len;
+  if (0 == len) {
+    rf_type = 0;
+  } else {
+    int64_t l = 0, r = len;
+    bool is_valid = true;
+    int flag[3] = {0, 0, 0};
+    auto fill_flag = [&] (ObString &p_str) {
+      bool valid = true;
+      ObString trim_str = p_str.trim();
+      if (0 == trim_str.case_compare("bloom_filter")) {
+        flag[0]++;
+      } else if (0 == trim_str.case_compare("range")) {
+        flag[1]++;
+      } else if (0 == trim_str.case_compare("in")) {
+        flag[2]++;
+      } else {
+        valid = false;
+      }
+      if (valid) {
+        if (flag[0] > 1 || flag[1] > 1 || flag[2] > 1) {
+          valid = false;
+        }
+      }
+      return valid;
+    };
+    for (int i = 0; i < len && is_valid; ++i) {
+      if (str[i] == ',') {
+        r = i;
+        ObString p_str(r - l, str + l);
+        is_valid = fill_flag(p_str);
+        l = i + 1;
+        continue;
+      }
+    }
+    if (is_valid) {
+      ObString p_str(len - l, str + l);
+      is_valid = fill_flag(p_str);
+    }
+    if (is_valid) {
+      rf_type = flag[0] << 1 |
+                flag[1] << 2 |
+                flag[2] << 3;
+    } else {
+      rf_type = -1;
+    }
+
+  }
+  return rf_type;
+}
+
+bool ObConfigRuntimeFilterChecker::check(const ObConfigItem &t) const
+{
+  int64_t len = strlen(t.str());
+  const char *p = t.str();
+  int64_t rf_type = get_runtime_filter_type(t.str(), len);
+  return rf_type >= 0;
+}
 } // end of namepace common
 } // end of namespace oceanbase

@@ -17,6 +17,7 @@
 #include "common/object/ob_obj_type.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_extra_info_factory.h"
+#include "sql/engine/expr/ob_expr_lob_utils.h"
 namespace oceanbase
 {
 using namespace common;
@@ -24,7 +25,7 @@ namespace sql
 {
 
 ObExprNLSSort::ObExprNLSSort(ObIAllocator &alloc)
-  : ObFuncExprOperator(alloc, T_FUN_SYS_NLSSORT, N_NLSSORT, ONE_OR_TWO, NOT_ROW_DIMENSION)
+  : ObFuncExprOperator(alloc, T_FUN_SYS_NLSSORT, N_NLSSORT, ONE_OR_TWO, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -82,7 +83,10 @@ int ObExprNLSSort::convert_to_coll_code(ObEvalCtx &ctx,
                                         ObString &to_str)
 {
   int ret = OB_SUCCESS;
-  if (to_type == CS_TYPE_GB18030_CHINESE_CS) {
+  if (to_type == CS_TYPE_GB18030_CHINESE_CS ||
+      to_type == CS_TYPE_GB18030_2022_PINYIN_CS ||
+      to_type == CS_TYPE_GB18030_2022_RADICAL_CS ||
+      to_type == CS_TYPE_GB18030_2022_STROKE_CS) {
     char *conv_buf = NULL;
     const int32_t MostBytes = 4; //most 4 bytes
     size_t conv_buf_len = from_str.length() * MostBytes;
@@ -108,6 +112,51 @@ int ObExprNLSSort::convert_to_coll_code(ObEvalCtx &ctx,
     LOG_DEBUG("charset convert", KPHEX(from_str.ptr(), from_str.length()), K(from_type), K(to_type), KPHEX(to_str.ptr(), to_str.length()), K(result_len));
   } else { 
     to_str.assign_ptr(from_str.ptr(), from_str.length());
+  }
+  return ret;
+}
+
+int ObExprNLSSort::eval_nlssort_inner(const ObExpr &expr,
+                                      ObEvalCtx &ctx,
+                                      ObDatum &expr_datum,
+                                      const ObCollationType &coll_type,
+                                      const ObCollationType &arg0_coll_type,
+                                      const ObObjType &arg0_obj_type,
+                                      ObString input_str)
+{
+  int ret = OB_SUCCESS;
+  ObString out;
+  const ObCharsetInfo *cs = ObCharset::get_charset(coll_type);
+  if (OB_ISNULL(cs)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid cs", K(ret), K(coll_type));
+  } else if (((ob_is_nchar(arg0_obj_type)) || (ob_is_char(arg0_obj_type, arg0_coll_type)))
+            && (OB_FAIL(ObCharsetUtils::remove_char_endspace(input_str,
+                                        ObCharset::charset_type_by_coll(arg0_coll_type))))) {
+    LOG_WARN("remove char endspace failed", K(ret));
+  } else if (OB_FAIL(convert_to_coll_code(ctx, arg0_coll_type, input_str, coll_type, out))) {
+    LOG_WARN("convert to coll code failed", K(ret));
+  } else {
+    LOG_DEBUG("check coll type", K(coll_type), K(arg0_coll_type), K(expr),
+        K(arg0_obj_type), K(out.length()));
+    size_t buf_len = cs->coll->strnxfrmlen(cs, out.length());
+    char *buf = NULL;
+    size_t result_len = 0;
+    if (OB_ISNULL(buf = expr.get_str_res_mem(ctx, buf_len))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to alloc buf", K(ret), K(buf_len), K(input_str));
+    } else {
+      bool is_valid_unicode_tmp = 1;
+      result_len = cs->coll->strnxfrm(cs,
+                                      reinterpret_cast<uchar *>(buf),
+                                      buf_len,
+                                      buf_len,
+                                      reinterpret_cast<const uchar *>(out.ptr()),
+                                      out.length(),
+                                      0,
+                                      &is_valid_unicode_tmp);
+      expr_datum.set_string(buf, result_len);
+    }
   }
   return ret;
 }
@@ -165,38 +214,25 @@ int ObExprNLSSort::eval_nlssort(const ObExpr &expr,
       }
     }
     if (OB_SUCC(ret)) {
-      ObString input_str = input->get_string();
-      ObString out;
-      const ObCharsetInfo *cs = ObCharset::get_charset(coll_type);
-      if (OB_ISNULL(cs)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("invalid cs", K(ret), K(coll_type));
-      } else if (((ob_is_nchar(arg0_obj_type)) || (ob_is_char(arg0_obj_type, arg0_coll_type)))
-               && (OB_FAIL(ObCharsetUtils::remove_char_endspace(input_str, 
-                                            ObCharset::charset_type_by_coll(arg0_coll_type))))) {
-        LOG_WARN("remove char endspace failed", K(ret));
-      } else if (OB_FAIL(convert_to_coll_code(ctx, arg0_coll_type, input_str, coll_type, out))) {
-        LOG_WARN("convert to coll code failed", K(ret));
-      } else {
-        LOG_DEBUG("check coll type", K(coll_type), K(arg0_coll_type), K(expr), 
-            K(arg0_obj_type), K(out.length()));
-        size_t buf_len = cs->coll->strnxfrmlen(cs, out.length());
-        char *buf = NULL;
-        size_t result_len = 0;
-        if (OB_ISNULL(buf = expr.get_str_res_mem(ctx, buf_len))) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-          LOG_WARN("fail to alloc buf", K(ret), K(buf_len), K(input_str));
+      if (!ob_is_text_tc(arg0_obj_type)) {
+        ObString input_str = input->get_string();
+        ret = eval_nlssort_inner(expr, ctx, expr_datum, coll_type, arg0_coll_type, arg0_obj_type, input_str);
+      } else { // text tc
+        ObString input_str = input->get_string();
+        // result type is raw, not a lob and length is set to OB_MAX_ORACLE_VARCHAR_LENGTH at most
+        // so just use prefix for calc
+        ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
+        common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
+        if (OB_FAIL(ObTextStringHelper::read_prefix_string_data(ctx,
+                                                                *input,
+                                                                expr.args_[0]->datum_meta_,
+                                                                expr.args_[0]->obj_meta_.has_lob_header(),
+                                                                &temp_allocator,
+                                                                input_str,
+                                                                OB_MAX_ORACLE_VARCHAR_LENGTH))) {
+          LOG_WARN("failed to get string data", K(ret), K(expr.args_[0]->datum_meta_));
         } else {
-          bool is_valid_unicode_tmp = 1;
-          result_len = cs->coll->strnxfrm(cs,
-                                          reinterpret_cast<uchar *>(buf),
-                                          buf_len,
-                                          buf_len,
-                                          reinterpret_cast<const uchar *>(out.ptr()),
-                                          out.length(),
-                                          0,
-                                          &is_valid_unicode_tmp);
-          expr_datum.set_string(buf, result_len);
+          ret = eval_nlssort_inner(expr, ctx, expr_datum, coll_type, arg0_coll_type, arg0_obj_type, input_str);
         }
       }
     }

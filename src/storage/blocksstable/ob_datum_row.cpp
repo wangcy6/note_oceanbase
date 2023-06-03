@@ -23,9 +23,9 @@ namespace blocksstable
 {
 static int nonext_nonext_compare(const ObStorageDatum &left, const ObStorageDatum &right, const common::ObCmpFunc &cmp_func, int &cmp_ret)
 {
-  cmp_ret = cmp_func.cmp_func_(left, right);
-  STORAGE_LOG(DEBUG, "chaser debug compare datum", K(left), K(right), K(cmp_ret));
-  return OB_SUCCESS;
+  int ret = cmp_func.cmp_func_(left, right, cmp_ret);
+  STORAGE_LOG(DEBUG, "chaser debug compare datum", K(ret), K(left), K(right), K(cmp_ret));
+  return ret;
 }
 
 static int nonext_ext_compare(const ObStorageDatum &left, const ObStorageDatum &right, const common::ObCmpFunc &cmp_func, int &cmp_ret)
@@ -196,7 +196,8 @@ ObDatumRow::ObDatumRow()
     storage_datums_(nullptr),
     datum_buffer_(),
     old_row_(),
-    obj_buf_()
+    obj_buf_(),
+    trans_info_(nullptr)
 {}
 
 ObDatumRow::~ObDatumRow()
@@ -204,7 +205,7 @@ ObDatumRow::~ObDatumRow()
   reset();
 }
 
-int ObDatumRow::init(ObIAllocator &allocator, const int64_t capacity)
+int ObDatumRow::init(ObIAllocator &allocator, const int64_t capacity, char *trans_info_ptr)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(is_valid())) {
@@ -219,8 +220,10 @@ int ObDatumRow::init(ObIAllocator &allocator, const int64_t capacity)
   } else {
     storage_datums_ = datum_buffer_.get_datums();
     count_ = capacity;
+    // trans_info_ptr maybe is nullptr,
+    // ObDatumRow does not care about the free of trans_info_ptr's memory
+    trans_info_ = trans_info_ptr;
   }
-
 
   return ret;
 }
@@ -275,10 +278,11 @@ int ObDatumRow::reserve(const int64_t capacity, const bool keep_data)
     // skip
   } else if (OB_FAIL(datum_buffer_.reserve(capacity))) {
     STORAGE_LOG(WARN, "Failed to reserve datum buffer", K(ret), K(capacity));
+  } else if (OB_FAIL(obj_buf_.reserve(capacity))) {
+    STORAGE_LOG(WARN, "Failed to reserve obj buf", K(ret), K(capacity));
   } else {
     storage_datums_ = datum_buffer_.get_datums();
     old_row_.reset();
-    obj_buf_.reset();
   }
   if (OB_SUCC(ret)) {
     mvcc_row_flag_.reset();
@@ -309,6 +313,7 @@ void ObDatumRow::reset()
   row_flag_.reset();
   count_ = 0;
   local_allocator_.reset();
+  trans_info_ = nullptr;
 }
 
 void ObDatumRow::reuse()
@@ -325,6 +330,9 @@ void ObDatumRow::reuse()
   snapshot_version_ = 0;
   fast_filter_skipped_ = false;
   have_uncommited_row_ = false;
+  if (OB_NOT_NULL(trans_info_)) {
+    trans_info_[0] = '\0';
+  }
 }
 
 int ObDatumRow::deep_copy(const ObDatumRow &src, ObIAllocator &allocator)
@@ -362,6 +370,7 @@ int ObDatumRow::prepare_new_row(const ObIArray<share::schema::ObColDesc> &out_co
   int ret = OB_SUCCESS;
 
   if (OB_UNLIKELY(!is_valid())) {
+    ret = OB_NOT_INIT;
     STORAGE_LOG(WARN, "ObDatumRow is not inited", K(ret), K(*this));
   } else if (OB_UNLIKELY(out_cols.count() < count_)) {
     ret = OB_INVALID_ARGUMENT;
@@ -515,12 +524,12 @@ bool ObDatumRow::operator==(const ObDatumRow &other) const
   bool is_equal = true;
   if (count_ != other.count_) {
     is_equal = false;
-    STORAGE_LOG(WARN, "datum row count no equal", K(other), K(*this));
+    STORAGE_LOG_RET(WARN, OB_INVALID_ARGUMENT, "datum row count no equal", K(other), K(*this));
   } else {
     for (int64_t i = 0; is_equal && i < count_; i++) {
       is_equal = storage_datums_[i] == other.storage_datums_[i];
       if (!is_equal) {
-        STORAGE_LOG(WARN, "obj and datum no equal", K(i), K(other), K(*this));
+        STORAGE_LOG_RET(WARN, OB_ERR_UNEXPECTED, "obj and datum no equal", K(i), K(other), K(*this));
       }
     }
   }
@@ -532,13 +541,13 @@ bool ObDatumRow::operator==(const ObNewRow &other) const
   bool is_equal = true;
   if (count_ != other.count_) {
     is_equal = false;
-    STORAGE_LOG(WARN, "datum row count no equal", K(other), K(*this));
+    STORAGE_LOG_RET(WARN, OB_INVALID_ARGUMENT, "datum row count no equal", K(other), K(*this));
   } else {
     int ret = OB_SUCCESS;
     for (int64_t i = 0; is_equal && i < count_; i++) {
       is_equal = storage_datums_[i] == other.cells_[i];
       if (!is_equal) {
-        STORAGE_LOG(WARN, "obj and datum no equal", K(i), K(other), K(*this));
+        STORAGE_LOG_RET(WARN, OB_ERR_UNEXPECTED, "obj and datum no equal", K(i), K(other), K(*this));
       }
     }
   }
@@ -608,7 +617,7 @@ int ObStorageDatumUtils::init(const ObIArray<share::schema::ObColDesc> &col_desc
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
     STORAGE_LOG(WARN, "ObStorageDatumUtils init twice", K(ret), K(*this));
-  } else if (OB_UNLIKELY(schema_rowkey_cnt < 0 || schema_rowkey_cnt >= OB_MAX_ROWKEY_COLUMN_NUMBER
+  } else if (OB_UNLIKELY(schema_rowkey_cnt < 0 || schema_rowkey_cnt > OB_MAX_ROWKEY_COLUMN_NUMBER
                   || schema_rowkey_cnt > col_descs.count())) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "Invalid argument to init storage datum utils", K(ret), K(col_descs), K(schema_rowkey_cnt));
@@ -624,7 +633,7 @@ int ObStorageDatumUtils::init(const ObIArray<share::schema::ObColDesc> &col_desc
       STORAGE_LOG(WARN, "Failed to reserve hash func array", K(ret));
     } else {
       // support column order index until next task done
-      // https://aone.alibaba-inc.com/task/39441116
+      //
       // we could use the cmp funcs in the basic funcs directlly
       bool is_null_last = is_oracle_mode_;
       ObCmpFunc cmp_func;
@@ -633,9 +642,12 @@ int ObStorageDatumUtils::init(const ObIArray<share::schema::ObColDesc> &col_desc
         const share::schema::ObColDesc &col_desc = mv_col_descs.at(i);
         //TODO @hanhui support desc rowkey
         bool is_ascending = true || col_desc.col_order_ == ObOrderType::ASC;
+        bool has_lob_header = is_lob_storage(col_desc.col_type_.get_type());
         sql::ObExprBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(col_desc.col_type_.get_type(),
                                                                           col_desc.col_type_.get_collation_type(),
-                                                                          is_oracle_mode);
+                                                                          col_desc.col_type_.get_scale(),
+                                                                          is_oracle_mode,
+                                                                          has_lob_header);
         if (OB_UNLIKELY(nullptr == basic_funcs
                        || nullptr == basic_funcs->null_last_cmp_
                        || nullptr == basic_funcs->murmur_hash_)) {

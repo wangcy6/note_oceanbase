@@ -13,6 +13,9 @@
 #ifndef OCEANBASE_TRANSACTION_TEST_BASIC_FAKE_DEFINE_
 #define OCEANBASE_TRANSACTION_TEST_BASIC_FAKE_DEFINE_
 
+#define protected public
+#define private public
+
 #include "storage/tx/ob_trans_define.h"
 #include "storage/tx_table/ob_tx_table.h"
 #include "lib/utility/ob_defer.h"
@@ -27,74 +30,92 @@
 namespace oceanbase {
 using namespace share;
 using namespace memtable;
+
+
 namespace transaction {
 
 class ObFakeTxDataTable : public ObTxDataTable {
 public:
-  ObFakeTxDataTable() : map_() { IGNORE_RETURN map_.init(); }
+  ObFakeTxDataTable() : arena_allocator_(), map_(arena_allocator_, 1 << 20 /*2097152*/)
+  {
+    IGNORE_RETURN map_.init();
+    ObMemAttr mem_attr;
+    mem_attr.label_ = "TX_DATA_TABLE";
+    mem_attr.tenant_id_ = 1;
+    mem_attr.ctx_id_ = ObCtxIds::DEFAULT_CTX_ID;
+    ObMemtableMgrHandle memtable_mgr_handle;
+    OB_ASSERT(OB_SUCCESS == slice_allocator_.init(
+                                sizeof(ObTxData), OB_MALLOC_NORMAL_BLOCK_SIZE, common::default_blk_alloc, mem_attr));
+    slice_allocator_.set_nway(ObTxDataTable::TX_DATA_MAX_CONCURRENCY);
+    is_inited_ = true;
+  }
   virtual int init(ObLS *ls, ObTxCtxTable *tx_ctx_table) override
-  { return OB_SUCCESS; }
+  {
+    return OB_SUCCESS;
+  }
   virtual int start() override { return OB_SUCCESS; }
   virtual void stop() override {}
   virtual void reset() override {}
   virtual void destroy() override {}
-  virtual int alloc_tx_data(ObTxData *&tx_data) override
+  virtual int alloc_tx_data(ObTxDataGuard &tx_data_guard) override
   {
-    return map_.alloc_value(tx_data);
+    void *ptr = slice_allocator_.alloc();
+    ObTxData *tx_data = new (ptr) ObTxData();
+    tx_data->ref_cnt_ = 100;
+    tx_data->slice_allocator_ = &slice_allocator_;
+    tx_data->flag_ = 269381;
+    tx_data_guard.init(tx_data);
+    return OB_ISNULL(tx_data) ? OB_ALLOCATE_MEMORY_FAILED : OB_SUCCESS;
   }
-  virtual int deep_copy_tx_data(ObTxData *from, ObTxData *&to) override
+  virtual int deep_copy_tx_data(const ObTxDataGuard &from_guard, ObTxDataGuard &to_guard) override
   {
     int ret = OB_SUCCESS;
-    OZ (map_.alloc_value(to));
+    void *ptr = slice_allocator_.alloc();
+    ObTxData *to = new (ptr) ObTxData();
+    ObTxData *from = (ObTxData*)from_guard.tx_data();
+    to->ref_cnt_ = 100;
+    to->slice_allocator_ = &slice_allocator_;
+    to->flag_ = 269381;
+    to_guard.init(to);
     OX (*to = *from);
     OZ (deep_copy_undo_status_list_(from->undo_status_list_, to->undo_status_list_));
     return ret;
   }
-  virtual void free_tx_data(ObTxData *tx_data) override
+  virtual void free_tx_data(ObTxData *tx_data)
   {
-    map_.free_value(tx_data);
   }
   virtual int alloc_undo_status_node(ObUndoStatusNode *&undo_status_node) override
   {
-    undo_status_node = new ObUndoStatusNode();
+    void *ptr = ob_malloc(TX_DATA_SLICE_SIZE, ObNewModIds::TEST);
+    undo_status_node = new (ptr) ObUndoStatusNode();
     return OB_SUCCESS;
   }
   virtual int free_undo_status_node(ObUndoStatusNode *&undo_status_node) override
   {
-    delete undo_status_node;
     return OB_SUCCESS;
   }
   virtual int insert(ObTxData *&tx_data) override
   {
     int ret = OB_SUCCESS;
-    ObTxData *old = NULL;
-    if (OB_SUCC(map_.get(tx_data->tx_id_, old))) {
-      OX (map_.revert(old));
-      OZ (map_.del(tx_data->tx_id_));
-    } else if (OB_ENTRY_NOT_EXIST == ret) {
-      ret = OB_SUCCESS;
-    }
-    OZ (map_.insert_and_get(tx_data->tx_id_, tx_data));
-    OX (map_.revert(tx_data));
+    OZ (map_.insert(tx_data->tx_id_, tx_data));
     return ret;
   }
-  virtual int check_with_tx_data(const ObTransID tx_id, ObITxDataCheckFunctor &fn) override
+  virtual int check_with_tx_data(const ObTransID tx_id, ObITxDataCheckFunctor &fn, ObTxDataGuard &tx_data_guard) override
   {
     int ret = OB_SUCCESS;
-    ObTxData *tx_data = NULL;
-    OZ (map_.get(tx_id, tx_data));
-    OZ (fn(*tx_data));
-    if (OB_NOT_NULL(tx_data)) { map_.revert(tx_data); }
+    OZ (map_.get(tx_id, tx_data_guard));
+    OZ (fn(*tx_data_guard.tx_data()));
     if (OB_ENTRY_NOT_EXIST == ret) { ret = OB_TRANS_CTX_NOT_EXIST; }
     return ret;
   }
-  common::ObLinkHashMap<ObTransID, ObTxData> map_;
+  ObArenaAllocator arena_allocator_;
+  ObTxDataHashMap map_;
 };
 
 class ObFakeTxTable : public ObTxTable {
 public:
   ObFakeTxTable() : ObTxTable(tx_data_table_) {}
-private:
+public:
   ObFakeTxDataTable tx_data_table_;
 };
 
@@ -166,7 +187,7 @@ public:
     ObLSReplicaLocation rep_loc;
     ObLSRestoreStatus restore_status(ObLSRestoreStatus::Status::RESTORE_NONE);
     auto p = ObReplicaProperty::create_property(100);
-    OZ(rep_loc.init(leader, ObRole::LEADER, 10000, ObReplicaType::REPLICA_TYPE_FULL, p, restore_status));
+    OZ(rep_loc.init(leader, ObRole::LEADER, 10000, ObReplicaType::REPLICA_TYPE_FULL, p, restore_status, 1));
     OZ(location.add_replica_location(rep_loc));
     return ret;
   }
@@ -368,6 +389,7 @@ public:
   const static int64_t TASK_QUEUE_CNT = 128;
   ObSpScLinkQueue apply_task_queue_arr[TASK_QUEUE_CNT];
   ObSpScLinkQueue replay_task_queue_arr[TASK_QUEUE_CNT];
+  share::SCN max_submit_scn_ =  share::SCN::invalid_scn();
 
   void run1() {
     while(true) {
@@ -421,7 +443,11 @@ public:
 
   int submit_log(const char *buf,
                  const int64_t size,
+<<<<<<< HEAD
                  const share::SCN base_ts,
+=======
+                 const share::SCN &base_ts,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                  ObTxBaseLogCb *cb,
                  const bool need_nonblock)
   {
@@ -440,10 +466,12 @@ public:
         const palf::LSN lsn = palf::LSN(++lsn_);
         cb->set_log_ts(scn);
         cb->set_lsn(lsn);
+        cb->set_submit_ts(ObTimeUtility::current_time());
         ts_ = ts;
         ApplyCbTask *apply_task = new ApplyCbTask();
         apply_task->replay_hint_ = replay_hint;
         apply_task->cb_ = cb;
+        max_submit_scn_ = share::SCN::max(max_submit_scn_, scn);
 
         apply_task_queue_arr[queue_idx].push(apply_task);
         ATOMIC_INC(&inflight_cnt_);
@@ -474,6 +502,52 @@ public:
   int get_role(bool &is_leader, int64_t &epoch) {
     is_leader = true;
     epoch = 1;
+    return OB_SUCCESS;
+  }
+
+  int get_max_decided_scn(share::SCN &scn) {
+    int ret = OB_SUCCESS;
+    share::SCN min_unreplayed_scn;
+    share::SCN min_unapplyed_scn;
+    min_unreplayed_scn.invalid_scn();
+    min_unapplyed_scn.invalid_scn();
+
+    for (int64_t i = 0; i < TASK_QUEUE_CNT; ++i) {
+      if (!replay_task_queue_arr[i].empty()) {
+        share::SCN tmp_scn;
+        tmp_scn.convert_for_gts(
+            static_cast<ReplayCbTask *>(replay_task_queue_arr[i].top())->log_ts_);
+        if (min_unreplayed_scn.is_valid() && tmp_scn.is_valid()) {
+          min_unreplayed_scn = share::SCN::min(tmp_scn, min_unreplayed_scn);
+        } else if (tmp_scn.is_valid()) {
+          min_unreplayed_scn = tmp_scn;
+        }
+      }
+    }
+
+    for (int64_t i = 0; i < TASK_QUEUE_CNT; ++i) {
+      if (!apply_task_queue_arr[i].empty()) {
+        share::SCN tmp_scn;
+        tmp_scn = (static_cast<ObTxBaseLogCb *>(
+                       (static_cast<ApplyCbTask *>(apply_task_queue_arr[i].top()))
+                           ->cb_))
+                      ->get_log_ts();
+        if (min_unapplyed_scn.is_valid() && tmp_scn.is_valid()) {
+          min_unapplyed_scn = share::SCN::min(tmp_scn, min_unapplyed_scn);
+        } else if (tmp_scn.is_valid()) {
+          min_unapplyed_scn = tmp_scn;
+        }
+      }
+    }
+
+    if (min_unapplyed_scn.is_valid() && min_unapplyed_scn.is_valid()) {
+      scn = share::SCN::max(min_unapplyed_scn, min_unapplyed_scn);
+    } else {
+      scn = max_submit_scn_;
+    }
+    if (scn.is_valid()) {
+      share::SCN::minus(scn, 1);
+    }
     return OB_SUCCESS;
   }
 
@@ -564,8 +638,7 @@ private:
   }
 
   int replay_one_row_in_memtable_(memtable::ObMutatorRowHeader& row_head,
-                                  memtable::ObMemtableMutatorIterator *mmi_ptr,
-                                  memtable::ObEncryptRowBuf &row_buf) override
+                                  memtable::ObMemtableMutatorIterator *mmi_ptr) override
   {
     int ret = OB_SUCCESS;
     storage::ObStoreCtx storeCtx;
@@ -578,7 +651,7 @@ private:
 
     switch (row_head.mutator_type_) {
     case memtable::MutatorType::MUTATOR_ROW: {
-      if (OB_FAIL(memtable_->replay_row(storeCtx, mmi_ptr_, row_buf))) {
+      if (OB_FAIL(memtable_->replay_row(storeCtx, mmi_ptr_))) {
         TRANS_LOG(WARN, "[Replay Tx] replay row error", K(ret));
       } else {
         TRANS_LOG(INFO, "[Replay Tx] replay row in memtable success");

@@ -21,7 +21,6 @@ namespace oceanbase
 namespace common
 {
 using lib::ObMemAttr;
-extern ObMemAttr default_memattr;
 class ObIAllocator
 {
 public:
@@ -80,7 +79,8 @@ public:
   {
     return NULL == alloc_ ? NULL : alloc_->alloc(sz, attr);
   }
-  virtual void *alloc(const int64_t sz) { return alloc(sz, default_memattr); }
+  virtual void *alloc(const int64_t sz)
+  { return NULL == alloc_ ? NULL : alloc_->alloc(sz); }
   virtual void* realloc(const void *ptr, const int64_t size, const ObMemAttr &attr)
   { return NULL == alloc_ ? NULL : alloc_->realloc(ptr, size, attr); }
 
@@ -104,6 +104,7 @@ public:
     return *this;
   }
   const ObIAllocator *get_alloc() const { return alloc_;}
+  ObIAllocator *get_alloc() { return alloc_;}
   static uint32_t alloc_offset_bits()
   {
 DISABLE_WARNING_GCC_PUSH

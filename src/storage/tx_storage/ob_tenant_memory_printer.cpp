@@ -25,13 +25,11 @@ namespace oceanbase
 using namespace share;
 namespace storage
 {
-
 void ObPrintTenantMemoryUsage::runTimerTask()
 {
   LOG_INFO("=== Run print tenant memory usage task ===");
   ObTenantMemoryPrinter &printer = ObTenantMemoryPrinter::get_instance();
-  printer.print_tenant_usage();
-  ObObjFreeListList::get_freelists().dump();
+  PRINT_WITH_TRACE_MODE(LIB, INFO, printer.print_tenant_usage());
 }
 
 ObTenantMemoryPrinter &ObTenantMemoryPrinter::get_instance()
@@ -91,27 +89,26 @@ int ObTenantMemoryPrinter::print_tenant_usage()
           LOG_WARN("print mtl tenant usage failed", K(tmp_ret), K(tenant_id));
         }
       }
-      static int64_t last_print_ts = 0;
-      const int64_t now = ObTimeUtility::current_time();
-      const int64_t INTERVAL = 10 * 60 * 1000000L;
-      if (now - last_print_ts >= INTERVAL) {
-        omt::TenantIdList current_ids(nullptr, ObModIds::OMT);
-        omt->get_tenant_ids(current_ids);
-        int tenant_cnt = 0;
-        static uint64_t all_tenant_ids[OB_MAX_SERVER_TENANT_CNT] = {0};
-        common::get_tenant_ids(all_tenant_ids, OB_MAX_SERVER_TENANT_CNT, tenant_cnt);
-        for (int64_t i = 0; OB_SUCC(ret) && i < tenant_cnt; ++i) {
-          uint64_t id = all_tenant_ids[i];
-          if (OB_SERVER_TENANT_ID != id && current_ids.find(id) == current_ids.end()) {
-            // id is deleted tenant
-            lib::ObMallocAllocator *mallocator = lib::ObMallocAllocator::get_instance();
-            if (OB_NOT_NULL(mallocator)) {
-              mallocator->print_tenant_memory_usage(id);
-              mallocator->print_tenant_ctx_memory_usage(id);
+      int tenant_cnt = 0;
+      static uint64_t all_tenant_ids[OB_MAX_SERVER_TENANT_CNT] = {0};
+      common::get_tenant_ids(all_tenant_ids, OB_MAX_SERVER_TENANT_CNT, tenant_cnt);
+      lib::ObMallocAllocator *mallocator = lib::ObMallocAllocator::get_instance();
+      for (int64_t i = 0; OB_SUCC(ret) && i < tenant_cnt; ++i) {
+        uint64_t id = all_tenant_ids[i];
+        if (!is_virtual_tenant_id(id)) {
+          bool is_deleted_tenant = true;
+          for (int j = 0; j < mtl_tenant_ids.count(); ++j) {
+            if (id == mtl_tenant_ids[j]) {
+              is_deleted_tenant = false;
+              break;
             }
           }
+          if (is_deleted_tenant) {
+            mallocator->print_tenant_memory_usage(id);
+            mallocator->print_tenant_ctx_memory_usage(id);
+            mallocator->print_malloc_sample(id);
+          }
         }
-        last_print_ts = now;
       }
     }
 
@@ -126,11 +123,12 @@ int ObTenantMemoryPrinter::print_tenant_usage()
     }
 
     // print global chunk freelist
-    int64_t memory_used = get_virtual_memory_used();
+    int64_t resident_size = 0;
+    int64_t memory_used = get_virtual_memory_used(&resident_size);
     _STORAGE_LOG(INFO,
         "[CHUNK_MGR] free=%ld pushes=%ld pops=%ld limit=%'15ld hold=%'15ld total_hold=%'15ld used=%'15ld" \
         " freelist_hold=%'15ld maps=%'15ld unmaps=%'15ld large_maps=%'15ld large_unmaps=%'15ld" \
-        " memalign=%d"
+        " memalign=%d resident_size=%'15ld"
 #ifndef ENABLE_SANITY
         " virtual_memory_used=%'15ld\n",
 #else
@@ -149,6 +147,7 @@ int ObTenantMemoryPrinter::print_tenant_usage()
         CHUNK_MGR.get_large_maps(),
         CHUNK_MGR.get_large_unmaps(),
         0,
+        resident_size,
 #ifndef ENABLE_SANITY
         memory_used
 #else

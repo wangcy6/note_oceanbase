@@ -24,73 +24,100 @@ using namespace oceanbase::common;
 namespace oceanbase {
 namespace obsys {
 
-int ObNetUtil::get_local_addr_ipv6(const char *dev_name, char *ipv6, int len)
+int ObNetUtil::get_local_addr_ipv6(const char *dev_name, char *ipv6, int len,
+                                   bool *is_linklocal)
 {
-  int ret = -1;
+  int ret = OB_ERROR;
+  int level = -1; // 0: loopback; 1: linklocal; 2: sitelocal; 3: v4mapped; 4: global
   struct ifaddrs *ifa = nullptr, *ifa_tmp = nullptr;
 
-  if (len < INET6_ADDRSTRLEN || getifaddrs(&ifa) == -1) {
+  if (nullptr == dev_name) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("devname can not be NULL", K(ret));
+  } else if (len < INET6_ADDRSTRLEN) {
+    ret = OB_BUF_NOT_ENOUGH;
+    LOG_WARN("the buffer size cannot be less than INET6_ADDRSTRLEN",
+             "INET6_ADDRSTRLEN", INET6_ADDRSTRLEN, K(len), K(ret));
+  } else if (-1 == getifaddrs(&ifa)) {
+    ret = OB_ERR_SYS;
+    LOG_WARN("call getifaddrs fail", K(errno), K(ret));
   } else {
     ifa_tmp = ifa;
     while (ifa_tmp) {
-      if (ifa_tmp->ifa_addr && ifa_tmp->ifa_addr->sa_family == AF_INET6 &&
-                               !strcmp(ifa_tmp->ifa_name, dev_name)) {
+      if (ifa_tmp->ifa_addr &&
+          ifa_tmp->ifa_addr->sa_family == AF_INET6 &&
+          0 == strcmp(ifa_tmp->ifa_name, dev_name)) {
         struct sockaddr_in6 *in6 = (struct sockaddr_in6 *) ifa_tmp->ifa_addr;
-        if (IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr)
-            || IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr)
-            || IN6_IS_ADDR_SITELOCAL(&in6->sin6_addr)
-            || IN6_IS_ADDR_V4MAPPED(&in6->sin6_addr)) {
-          // filter ipv6 local, site-local etc.
-        } else if (!inet_ntop(AF_INET6, &in6->sin6_addr, ipv6, len)) { // use ipv6 global
-          ret = 0;
-          break;
+        int cur_level = -1;
+        bool linklocal = false;
+        if (IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr)) {
+          cur_level = 0;
+        } else if (IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr)) {
+          cur_level = 1;
+          linklocal = true;
+        } else if (IN6_IS_ADDR_SITELOCAL(&in6->sin6_addr)) {
+          cur_level = 2;
+        } else if (IN6_IS_ADDR_V4MAPPED(&in6->sin6_addr)) {
+          cur_level = 3;
+        } else {
+          cur_level = 4;
         }
-      }
+        if (cur_level > level) {
+          if (nullptr == inet_ntop(AF_INET6, &in6->sin6_addr, ipv6, len)) {
+            ret = OB_ERR_SYS;
+            LOG_WARN("call inet_ntop fail", K(errno), K(ret));
+          } else {
+            level = cur_level;
+            ret = OB_SUCCESS;
+            if (nullptr != is_linklocal) {
+              *is_linklocal = linklocal;
+            }
+          }
+        }
+      } // if end
       ifa_tmp = ifa_tmp->ifa_next;
-    } // while
+    } // while end
   }
+
+  if (nullptr != ifa) {
+    freeifaddrs(ifa);
+  }
+
   return ret;
 }
 
 uint32_t ObNetUtil::get_local_addr_ipv4(const char *dev_name)
 {
-    uint32_t ret_addr = 0;
-    int ret = OB_SUCCESS;
-    int fd = -1;
-    int interface = 0;
-    struct ifreq buf[16];
-    struct ifconf ifc;
+  int ret = OB_SUCCESS;
+  uint32_t ret_addr = 0;
+  struct ifaddrs *ifa = nullptr, *ifa_tmp = nullptr;
 
-    if ((fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        LOG_ERROR("syscall socket failed", K(errno), KP(dev_name));
-    } else {
-        ifc.ifc_len = sizeof(buf);
-        ifc.ifc_buf = (caddr_t)buf;
+  if (nullptr == dev_name) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("devname can not be NULL", K(ret));
+  } else if (-1 == getifaddrs(&ifa)) {
+    ret = OB_ERR_SYS;
+    LOG_WARN("call getifaddrs fail", K(errno), K(ret));
+  } else {
+    ifa_tmp = ifa;
+    bool has_found = false;
+    while (nullptr != ifa_tmp && !has_found) {
+      if (ifa_tmp->ifa_addr &&
+          ifa_tmp->ifa_addr->sa_family == AF_INET &&
+          0 == strcmp(ifa_tmp->ifa_name, dev_name)) {
+        has_found = true;
+        struct sockaddr_in *in = (struct sockaddr_in *) ifa_tmp->ifa_addr;
+        ret_addr = in->sin_addr.s_addr;
+      } // if end
+      ifa_tmp = ifa_tmp->ifa_next;
+    } // while end
+  }
 
-        if (0 != ioctl(fd, SIOCGIFCONF, (char *)&ifc)) {
-            LOG_WARN("syscall ioctl(SIOCGIFCONF) failed", K(errno), K(fd), KP(dev_name));
-        } else {
-            interface = static_cast<int>(ifc.ifc_len / sizeof(struct ifreq));
-            while (interface-- > 0 && OB_SUCC(ret)) {
-                if (0 != ioctl(fd, SIOCGIFFLAGS, (char *)&buf[interface])) {
-                    continue;
-                }
-                if (!(buf[interface].ifr_flags & IFF_UP)) {
-                    continue;
-                }
-                if (NULL != dev_name && strcmp(dev_name, buf[interface].ifr_name)) {
-                    continue;
-                }
-                if (!(ioctl(fd, SIOCGIFADDR, (char *)&buf[interface]))) {
-                    ret = -1;
-                    ret_addr = ((struct sockaddr_in *) (&buf[interface].ifr_addr))->sin_addr.s_addr;
-                }
-            }
-        }
-        close(fd);
-    }
+  if (nullptr != ifa) {
+    freeifaddrs(ifa);
+  }
 
-    return ret_addr;
+  return ret_addr;
 }
 
 std::string ObNetUtil::addr_to_string(uint64_t ipport)
@@ -113,6 +140,70 @@ uint64_t ObNetUtil::ip_to_addr(uint32_t ip, int port)
     ipport <<= 32;
     ipport |= ip;
     return ipport;
+}
+
+char *ObNetUtil::get_addr_by_hostname(const char *hostname)
+{
+  char *addr = nullptr;
+  hostent *host = gethostbyname(hostname);
+
+  if (nullptr != host) {
+      addr = inet_ntoa(**(in_addr**)host->h_addr_list);
+  }
+
+  return addr;
+}
+
+int ObNetUtil::get_ifname_by_addr(const char *local_ip, char *if_name, uint64_t if_name_len)
+{
+  int ret = OB_SUCCESS;
+  struct in_addr ip;
+  struct in6_addr ip6;
+  int af_type = AF_INET;
+
+  if (1 == inet_pton(AF_INET, local_ip, &ip)) {
+    // do nothing
+  } else if (1 == inet_pton(AF_INET6, local_ip, &ip6)) {
+    af_type = AF_INET6;
+  } else {
+    ret = OB_ERR_SYS;
+    LOG_ERROR("call inet_pton failed, maybe the local_ip is invalid",
+               KCSTRING(local_ip), K(errno), K(ret));
+  }
+
+  if (OB_SUCCESS == ret) {
+    struct ifaddrs *ifa_list = nullptr, *ifa = nullptr;
+    if (-1 == getifaddrs(&ifa_list)) {
+      ret = OB_ERR_SYS;
+      LOG_ERROR("call getifaddrs failed", K(errno), K(ret));
+    } else {
+      bool has_found = false;
+      for (ifa = ifa_list; nullptr != ifa && !has_found; ifa = ifa->ifa_next) {
+        if (nullptr != ifa->ifa_addr &&
+            ((AF_INET == af_type && AF_INET == ifa->ifa_addr->sa_family &&
+                 0 == memcmp(&ip, &(((struct sockaddr_in *)ifa->ifa_addr)->sin_addr), sizeof(ip))) ||
+             (AF_INET6 == af_type && AF_INET6 == ifa->ifa_addr->sa_family &&
+                 0 == memcmp(&ip6, &(((struct sockaddr_in6 *)ifa->ifa_addr)->sin6_addr), sizeof(ip6))))) {
+          has_found = true;
+          if (if_name_len < strlen(ifa->ifa_name) + 1) {
+            ret = OB_BUF_NOT_ENOUGH;
+            _LOG_ERROR("the buffer is not enough, need:%lu, have:%lu, ret:%d",
+                       strlen(ifa->ifa_name) + 1, if_name_len, ret);
+          } else {
+            snprintf(if_name, if_name_len, "%s", ifa->ifa_name);
+          }
+        }
+      } // end for
+      if (!has_found) {
+        ret = OB_SEARCH_NOT_FOUND;
+        LOG_ERROR("can not find ifname by local ip", KCSTRING(local_ip));
+      }
+    }
+    if (nullptr != ifa_list) {
+      freeifaddrs(ifa_list);
+    }
+  }
+  return ret;
 }
 
 }

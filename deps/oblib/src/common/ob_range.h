@@ -15,7 +15,6 @@
 
 #include "lib/ob_define.h"
 #include "lib/utility/utility.h"
-#include "lib/regex/ob_regex.h"
 #include "common/rowkey/ob_rowkey.h"
 #include "common/ob_string_buf.h"
 
@@ -260,7 +259,7 @@ struct ObVersion
   int fixed_length_encode(char *buf, const int64_t buf_len, int64_t &pos) const;
   int fixed_length_decode(const char *buf, const int64_t data_len, int64_t &pos);
   int64_t get_fixed_length_encoded_size() const;
-  TO_YSON_KV(Y_(version));
+  TO_YSON_KV(OB_Y_(version));
   OB_UNIS_VERSION(1);
 };
 
@@ -323,7 +322,10 @@ public:
   TO_STRING_KV(K_(base_version), K_(snapshot_version));
 };
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 class ObNewRange
 {
 

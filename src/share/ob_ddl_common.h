@@ -24,7 +24,12 @@ namespace oceanbase
 namespace obrpc
 {
 class ObSrvRpcProxy;
-class ObAlterTableArg;
+struct ObAlterTableArg;
+struct ObDropDatabaseArg;
+struct ObDropTableArg;
+struct ObDropIndexArg;
+struct ObTruncateTableArg;
+struct ObCreateIndexArg;
 }
 namespace sql
 {
@@ -50,7 +55,6 @@ enum ObDDLType
   DDL_MODIFY_AUTO_INCREMENT = 4,
   DDL_CREATE_INDEX = 5,
   DDL_DROP_INDEX = 6,
-  
   ///< @note Drop schema, and refuse concurrent trans.  
   DDL_DROP_SCHEMA_AVOID_CONCURRENT_TRANS = 500,
   DDL_DROP_DATABASE = 501,
@@ -73,6 +77,9 @@ enum ObDDLType
   DDL_ADD_COLUMN_OFFLINE = 1008, // only add columns
   DDL_COLUMN_REDEFINITION = 1009, // only add/drop columns
   DDL_TABLE_REDEFINITION = 1010,
+  DDL_DIRECT_LOAD = 1011, // load data
+  DDL_DIRECT_LOAD_INSERT = 1012, // insert into select
+
 
   // @note new normal ddl type to be defined here !!!
   DDL_NORMAL_TYPE = 10001,
@@ -111,16 +118,87 @@ enum ObDDLTaskStatus {
   CHECK_CONSTRAINT_VALID = 7,
   SET_CONSTRAINT_VALIDATE = 8,
   MODIFY_AUTOINC = 9,
-  SET_WRITE_ONLY = 10,
+  SET_WRITE_ONLY = 10, // disused, just for compatibility.
   WAIT_TRANS_END_FOR_WRITE_ONLY = 11,
   SET_UNUSABLE = 12,
   WAIT_TRANS_END_FOR_UNUSABLE = 13,
   DROP_SCHEMA = 14,
   CHECK_TABLE_EMPTY = 15,
   WAIT_CHILD_TASK_FINISH = 16,
+<<<<<<< HEAD
+=======
+  REPENDING = 17,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   FAIL = 99,
   SUCCESS = 100
 };
+
+static const char* ddl_task_status_to_str(const ObDDLTaskStatus &task_status) {
+  const char *str = nullptr;
+  switch(task_status) {
+    case share::ObDDLTaskStatus::PREPARE:
+      str = "PREPARE";
+      break;
+    case share::ObDDLTaskStatus::LOCK_TABLE:
+      str = "LOCK_TABLE";
+      break;
+    case share::ObDDLTaskStatus::WAIT_TRANS_END:
+      str = "WAIT_TRANS_END";
+      break;
+    case share::ObDDLTaskStatus::REDEFINITION:
+      str = "REDEFINITION";
+      break;
+    case share::ObDDLTaskStatus::VALIDATE_CHECKSUM:
+      str = "VALIDATE_CHECKSUM";
+      break;
+    case share::ObDDLTaskStatus::COPY_TABLE_DEPENDENT_OBJECTS:
+      str = "COPY_TABLE_DEPENDENT_OBJECTS";
+      break;
+    case share::ObDDLTaskStatus::TAKE_EFFECT:
+      str = "TAKE_EFFECT";
+      break;
+    case share::ObDDLTaskStatus::CHECK_CONSTRAINT_VALID:
+      str = "CHECK_CONSTRAINT_VALID";
+      break;
+    case share::ObDDLTaskStatus::SET_CONSTRAINT_VALIDATE:
+      str = "SET_CONSTRAINT_VALIDATE";
+      break;
+    case share::ObDDLTaskStatus::MODIFY_AUTOINC:
+      str = "MODIFY_AUTOINC";
+      break;
+    case share::ObDDLTaskStatus::SET_WRITE_ONLY:
+      str = "SET_WRITE_ONLY";
+      break;
+    case share::ObDDLTaskStatus::WAIT_TRANS_END_FOR_WRITE_ONLY:
+      str = "WAIT_TRANS_END_FOR_WRITE_ONLY";
+      break;
+    case share::ObDDLTaskStatus::SET_UNUSABLE:
+      str = "SET_UNUSABLE";
+      break;
+    case share::ObDDLTaskStatus::WAIT_TRANS_END_FOR_UNUSABLE:
+      str = "WAIT_TRANS_END_FOR_UNUSABLE";
+      break;
+    case share::ObDDLTaskStatus::DROP_SCHEMA:
+      str = "DROP_SCHEMA";
+      break;
+    case ObDDLTaskStatus::CHECK_TABLE_EMPTY:
+      str = "CHECK_TABLE_EMPTY";
+      break;
+    case ObDDLTaskStatus::WAIT_CHILD_TASK_FINISH:
+      str = "WAIT_CHILD_TASK_FINISH";
+      break;
+    case ObDDLTaskStatus::REPENDING:
+      str = "REPENDING";
+      break;
+    case ObDDLTaskStatus::FAIL:
+      str = "FAIL";
+      break;
+    case ObDDLTaskStatus::SUCCESS:
+      str = "SUCCESS";
+      break;
+  }
+  return str;
+}
 
 static inline bool is_simple_table_long_running_ddl(const ObDDLType type)
 {
@@ -218,6 +296,10 @@ public:
       const int64_t table_id,
       common::ObIArray<common::ObTabletID> &tablet_ids);
 
+  static int get_tablet_count(const uint64_t tenant_id,
+                              const int64_t table_id,
+                              int64_t &tablet_count);
+
   // get all tablets of a table by table_schema
   static int get_tablets(
       const share::schema::ObTableSchema &table_schema,
@@ -229,6 +311,12 @@ public:
       const uint64_t index_table_id,
       const int64_t snapshot_version,
       bool &is_complete);
+
+  static int generate_spatial_index_column_names(const share::schema::ObTableSchema &dest_table_schema,
+                                                 const share::schema::ObTableSchema &source_table_schema,
+                                                 ObArray<ObColumnNameInfo> &insert_column_names,
+                                                 ObArray<ObColumnNameInfo> &column_names,
+                                                 ObArray<int64_t> &select_column_ids);
 
   static int generate_build_replica_sql(
       const uint64_t tenant_id,
@@ -300,6 +388,33 @@ public:
     const common::ObTabletID &tablet_id,
     ObLSLocation &location);
 
+<<<<<<< HEAD
+=======
+  static int check_table_exist(
+     const uint64_t tenant_id,
+     const uint64_t table_id,
+     share::schema::ObSchemaGetterGuard &schema_guard);
+  static int get_ddl_rpc_timeout(const int64_t tablet_count, int64_t &ddl_rpc_timeout_us);
+  static int get_ddl_rpc_timeout(const int64_t tenant_id, const int64_t table_id, int64_t &ddl_rpc_timeout_us);
+  static int get_ddl_tx_timeout(const int64_t tablet_count, int64_t &ddl_tx_timeout_us);
+  static int get_ddl_tx_timeout(const int64_t tenant_id, const int64_t table_id, int64_t &ddl_tx_timeout_us);
+  static void get_ddl_rpc_timeout_for_database(const int64_t tenant_id, const int64_t database_id, int64_t &ddl_rpc_timeout_us);
+  static int64_t get_default_ddl_rpc_timeout();
+  static int64_t get_default_ddl_tx_timeout();
+
+  static int get_data_format_version(
+     const uint64_t tenant_id,
+     const uint64_t task_id,
+     int64_t &data_format_version);
+
+  static int replace_user_tenant_id(const uint64_t tenant_id, obrpc::ObAlterTableArg &alter_table_arg);
+  static int replace_user_tenant_id(const uint64_t tenant_id, obrpc::ObDropDatabaseArg &drop_db_arg);
+  static int replace_user_tenant_id(const uint64_t tenant_id, obrpc::ObDropTableArg &drop_table_arg);
+  static int replace_user_tenant_id(const uint64_t tenant_id, obrpc::ObDropIndexArg &drop_index_arg);
+  static int replace_user_tenant_id(const uint64_t tenant_id, obrpc::ObTruncateTableArg &trucnate_table_arg);
+  static int replace_user_tenant_id(const uint64_t tenant_id, obrpc::ObCreateIndexArg &create_index_arg);
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 private:
   static int generate_column_name_str(
     const common::ObIArray<ObColumnNameInfo> &column_names,
@@ -332,11 +447,24 @@ public:
   static int check_and_wait_old_complement_task(
       const uint64_t tenant_id,
       const uint64_t index_table_id,
+<<<<<<< HEAD
+=======
+      const uint64_t ddl_task_id,
+      const int64_t execution_id,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       const common::ObAddr &inner_sql_exec_addr,
       const common::ObCurTraceId::TraceId &trace_id,
       const int64_t schema_version,
       const int64_t scn,
       bool &need_exec_new_inner_sql);
+<<<<<<< HEAD
+=======
+  static int check_finish_report_checksum(
+      const uint64_t tenant_id,
+      const uint64_t index_table_id,
+      const int64_t execution_id,
+      const uint64_t ddl_task_id);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 private:
 
@@ -344,13 +472,22 @@ private:
       const uint64_t tenant_id,
       const uint64_t index_table_id,
       const int64_t snapshot_version,
+<<<<<<< HEAD
+=======
+      const int64_t execution_id,
+      const uint64_t ddl_task_id,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       bool &is_all_sstable_build_finished);
 
   static int check_task_inner_sql_session_status(
       const common::ObAddr &inner_sql_exec_addr,
       const common::ObCurTraceId::TraceId &trace_id,
       const uint64_t tenant_id,
+<<<<<<< HEAD
       const int64_t schema_version,
+=======
+      const int64_t execution_id,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       const int64_t scn,
       bool &is_old_task_session_exist);
 
@@ -371,7 +508,11 @@ private:
 
   static int update_replica_merge_status(
       const ObTabletID &tablet_id,
+<<<<<<< HEAD
       const int merge_status,
+=======
+      const bool merge_status,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       hash::ObHashMap<ObTabletID, int32_t> &tablets_commited_map);
 
 
@@ -391,6 +532,17 @@ private:
       const ObTabletID &tablet_id,
       hash::ObHashMap<ObAddr, ObArray<ObTabletID>> &ip_tablets_map);
 
+<<<<<<< HEAD
+=======
+  static int check_tablet_checksum_update_status(
+      const uint64_t tenant_id,
+      const uint64_t index_table_id,
+      const uint64_t ddl_task_id,
+      const int64_t execution_id,
+      ObIArray<ObTabletID> &tablet_ids,
+      bool &tablet_checksum_status);
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 
 

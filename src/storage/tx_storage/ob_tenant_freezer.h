@@ -34,14 +34,18 @@ namespace storage
 class ObTenantFreezer;
 class ObTenantTxDataFreezeGuard;
 
+// this is used for tenant freeze, all the freeze task should call the function of this unit.
 class ObTenantFreezer
 {
 friend ObTenantTxDataFreezeGuard;
+friend class ObFreezer;
   const static int64_t TIME_WHEEL_PRECISION = 100_ms;
   const static int64_t SLOW_FREEZE_INTERVAL = 30_s;
   const static int FREEZE_TRIGGER_THREAD_NUM= 1;
+  const static int FREEZE_THREAD_NUM= 5;
   const static int64_t FREEZE_TRIGGER_INTERVAL = 2_s;
   const static int64_t UPDATE_INTERVAL = 100_ms;
+  const static int64_t MAX_FREEZE_TIMEOUT_US = 1800 * 1000 * 1000; // 30 min
   // replay use 1G/s
   const static int64_t REPLAY_RESERVE_MEMSTORE_BYTES = 100 * 1024 * 1024; // 100 MB
   const static int64_t MEMSTORE_USED_CACHE_REFRESH_INTERVAL = 100_ms;
@@ -55,9 +59,21 @@ public:
   int stop();
   void wait();
 
+  // freeze all the checkpoint unit of this tenant.
+  int tenant_freeze();
+
+  // freeze a ls, if the ls is freezing, do nothing and return OB_ENTRY_EXIST.
+  // if there is some process hold the ls lock or a OB_EAGAIN occur, we will retry
+  // until timeout.
+  int ls_freeze(const share::ObLSID &ls_id);
   // freeze a tablet
   int tablet_freeze(const common::ObTabletID &tablet_id,
-                    const bool is_force_freeze=false);
+                    const bool is_force_freeze = false,
+                    const bool is_sync = false);
+  int tablet_freeze(share::ObLSID ls_id,
+                    const common::ObTabletID &tablet_id,
+                    const bool is_force_freeze = false,
+                    const bool is_sync = false);
   // check if this tenant's memstore is out of range, and trigger minor/major freeze.
   int check_and_do_freeze();
 
@@ -124,10 +140,20 @@ public:
   ObServerConfig *get_config() { return config_; }
   bool exist_ls_freezing();
 private:
-  static int ls_freeze_(ObLS *ls);
+  static int ls_freeze_(ObLS *ls,
+                        const bool is_sync = true,
+                        const bool force_freeze = true,
+                        const int64_t abs_timeout_ts = INT64_MAX);
+  static int ls_freeze_all_unit_(ObLS *ls,
+                                 const int64_t abs_timeout_ts = INT64_MAX);
+  static int tablet_freeze_(ObLS *ls,
+                            const common::ObTabletID &tablet_id,
+                            const bool force_tablet_freeze,
+                            const bool is_sync,
+                            const int64_t abs_timeout_ts);
   // freeze all the ls of this tenant.
   // return the first failed code.
-  static int tenant_freeze_();
+  int tenant_freeze_();
   // we can only deal with freeze one by one.
   // set tenant freezing will prevent a new freeze.
   int set_tenant_freezing_();
@@ -172,6 +198,8 @@ private:
   common::ObOccamThreadPool freeze_trigger_pool_;
   common::ObOccamTimer freeze_trigger_timer_;
   common::ObOccamTimerTaskRAIIHandle timer_handle_;
+  common::ObOccamThreadPool freeze_thread_pool_;
+  ObSpinLock freeze_thread_pool_lock_;
   bool exist_ls_freezing_;
   int64_t last_update_ts_;
 };

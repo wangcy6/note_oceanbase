@@ -35,6 +35,8 @@ public:
       is_merge_sort_(false),
       is_sort_local_order_(false),
       is_rollup_hybrid_(false),
+      is_wf_hybrid_(false),
+      wf_hybrid_aggr_status_expr_(NULL),
       sort_keys_(),
       slice_count_(1),
       repartition_type_(OB_REPARTITION_NO_REPARTITION),
@@ -56,7 +58,8 @@ public:
       random_expr_(NULL),
       need_null_aware_shuffle_(false),
       is_old_unblock_mode_(true),
-      sample_type_(NOT_INIT_SAMPLE_TYPE)
+      sample_type_(NOT_INIT_SAMPLE_TYPE),
+      in_server_cnt_(0)
   {
     repartition_table_id_ = 0;
   }
@@ -83,16 +86,17 @@ public:
   inline bool is_merge_sort() const { return is_merge_sort_; }
   inline bool is_sort_local_order() const { return is_sort_local_order_; }
   inline bool is_block_op() const { return is_sort_local_order_; }
-  virtual int32_t get_explain_name_length() const;
   virtual int get_explain_name_internal(char *buf,
                                         const int64_t buf_len,
                                         int64_t &pos);
   virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
+  virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
   virtual int set_exchange_info(const ObExchangeInfo &exch_info);
   const common::ObIArray<ObRawExpr *> &get_repart_keys() const {return repartition_keys_;}
   const common::ObIArray<ObRawExpr *> &get_repart_sub_keys() const {return repartition_sub_keys_;}
   const common::ObIArray<ObRawExpr *> &get_repart_func_exprs() const {return repartition_func_exprs_;}
   const common::ObIArray<ObExchangeInfo::HashExpr> &get_hash_dist_exprs() const {return hash_dist_exprs_;}
+  const common::ObIArray<common::ObObj> *get_popular_values() const {return &popular_values_;}
   const ObRawExpr *get_calc_part_id_expr() { return calc_part_id_expr_; }
   ObRepartitionType get_repartition_type() const {return repartition_type_;}
   int64_t get_repartition_ref_table_id() const {return repartition_ref_table_id_;}
@@ -124,8 +128,8 @@ public:
   virtual int compute_op_ordering() override;
   virtual int compute_op_parallel_and_server_info() override;
   virtual int est_cost() override;
-  virtual int re_est_cost(EstimateCostInfo &param, double &card, double &cost) override;
-  int inner_est_cost(double child_card, double &op_cost);
+  virtual int do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost) override;
+  int inner_est_cost(int64_t parallel, double child_card, double &op_cost);
   const ObIArray<uint64_t> &get_repart_all_tablet_ids() const { return repart_all_tablet_ids_; }
   virtual int compute_sharding_info() override;
   virtual int compute_plan_type() override;
@@ -138,6 +142,20 @@ public:
 
   void set_rollup_hybrid(bool is_rollup_hybrid) { is_rollup_hybrid_ = is_rollup_hybrid; }
   bool is_rollup_hybrid() { return is_rollup_hybrid_; }
+
+  void set_wf_hybrid(bool is_wf_hybrid) { is_wf_hybrid_ = is_wf_hybrid; }
+  bool is_wf_hybrid() { return is_wf_hybrid_; }
+  void set_wf_hybrid_aggr_status_expr(ObRawExpr *wf_hybrid_aggr_status_expr)
+  {
+    wf_hybrid_aggr_status_expr_ = wf_hybrid_aggr_status_expr;
+  }
+  ObRawExpr *get_wf_hybrid_aggr_status_expr() { return wf_hybrid_aggr_status_expr_; }
+
+  common::ObIArray<int64_t> &get_wf_hybrid_pby_exprs_cnt_array()
+  {
+    return wf_hybrid_pby_exprs_cnt_array_;
+  }
+
   log_op_def::ObLogOpType get_px_batch_op_type() { return px_batch_op_type_;}
   common::ObIArray<ObTableLocation> &get_pruning_table_locations() { return table_locations_; }
   common::ObIArray<int64_t> &get_bloom_filter_ids() { return filter_id_array_; }
@@ -155,7 +173,19 @@ public:
 
   void set_random_expr(ObRawExpr *expr) { random_expr_ = expr; }
   ObRawExpr *get_random_expr() const { return random_expr_; }
-  int copy_part_expr_pre(CopyPartExprCtx &ctx) override;
+  virtual int get_plan_item_info(PlanText &plan_text,
+                                ObSqlPlanItem &plan_item) override;
+  int get_plan_special_expr_info(PlanText &plan_text,
+                                 ObSqlPlanItem &plan_item);
+  int get_plan_distribution(PlanText &plan_text,
+                            ObSqlPlanItem &plan_item);
+  int print_annotation_keys(char *buf,
+                            int64_t &buf_len,
+                            int64_t &pos,
+                            ExplainType type,
+                            const ObIArray<ObRawExpr *> &keys);
+  inline void set_in_server_cnt(int64_t in_server_cnt) {  in_server_cnt_ = in_server_cnt;  }
+  inline int64_t get_in_server_cnt() {  return in_server_cnt_;  }
 private:
   int prepare_px_pruning_param(ObLogicalOperator *op, int64_t &count,
       common::ObIArray<const ObDMLStmt *> &stmts, common::ObIArray<int64_t> &drop_expr_idxs);
@@ -174,16 +204,7 @@ private:
       const common::ObIArray<int64_t> &drop_expr_idxs,
       bool &is_need);
 private:
-  virtual int print_my_plan_annotation(char *buf,
-                                       int64_t &buf_len,
-                                       int64_t &pos,
-                                       ExplainType type);
-  virtual int print_plan_head_annotation(char *buf,
-                                         int64_t &buf_len,
-                                         int64_t &pos,
-                                         ExplainType type) override;
-
-  virtual int inner_replace_generated_agg_expr(
+  virtual int inner_replace_op_exprs(
           const common::ObIArray<std::pair<ObRawExpr *, ObRawExpr*>   >&to_replace_exprs) override;
 
 private:
@@ -199,6 +220,9 @@ private:
   bool is_merge_sort_; // true if need merge sort for partition data
   bool is_sort_local_order_; // true if need local order sort
   bool is_rollup_hybrid_;  // for adaptive rollup pushdown
+  bool is_wf_hybrid_;  // for adaptive window function pushdown
+  ObRawExpr *wf_hybrid_aggr_status_expr_;
+  common::ObSEArray<int64_t, 4, common::ModulePageAllocator, true> wf_hybrid_pby_exprs_cnt_array_;
   common::ObSEArray<OrderItem, 4, common::ModulePageAllocator, true> sort_keys_;
 
   int64_t slice_count_;//对于重分发之外的exchange, slice_count均为1
@@ -212,6 +236,7 @@ private:
   common::ObSEArray<ObRawExpr *, 4, common::ModulePageAllocator, true> repartition_func_exprs_;
   ObRawExpr *calc_part_id_expr_;
   common::ObSEArray<ObExchangeInfo::HashExpr, 4, common::ModulePageAllocator, true> hash_dist_exprs_;
+  common::ObSEArray<ObObj, 20, common::ModulePageAllocator, true> popular_values_; // for hybrid hash distr
 
   ObPQDistributeMethod::Type dist_method_;
   ObPQDistributeMethod::Type unmatch_row_dist_method_;
@@ -237,6 +262,7 @@ private:
   // -for pkey range/range
   ObPxSampleType sample_type_;
   // -end pkey range/range
+  int64_t in_server_cnt_; // for producer, need use exchange in server cnt to compute cost
   DISALLOW_COPY_AND_ASSIGN(ObLogExchange);
 };
 } // end of namespace sql

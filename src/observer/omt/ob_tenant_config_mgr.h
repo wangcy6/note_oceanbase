@@ -89,6 +89,7 @@ struct ObTenantID {
     return tenant_id_ == other.tenant_id_;
   }
   uint64_t hash() const { return tenant_id_; }
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   uint64_t tenant_id_;
 };
 using TenantConfigMap = common::__ObConfigContainer<ObTenantID, ObTenantConfig, common::OB_MAX_SERVER_TENANT_CNT>;
@@ -113,6 +114,7 @@ public:
   int refresh_tenants(const common::ObIArray<uint64_t> &tenants);
   int add_tenant_config(uint64_t tenant_id);
   int del_tenant_config(uint64_t tenant_id);
+  int init_tenant_config(const obrpc::ObTenantConfigArg &arg);
 
   ObTenantConfig *get_tenant_config(uint64_t tenant_id) const;
   // lock to guarantee this will not be deleted by calling del_tenant_config.
@@ -130,9 +132,10 @@ public:
   int64_t get_tenant_newest_version(uint64_t tenant_id) const;
   int64_t get_tenant_current_version(uint64_t tenant_id) const;
   void print() const;
-  int dump2file(const char *path = nullptr) const;
+  int dump2file();
 
   void refresh_config_version_map(const common::ObIArray<uint64_t> &tenants);
+  void reset_version_has_refreshed() { version_has_refreshed_ = false; }
   int set_tenant_config_version(uint64_t tenant_id, int64_t version);
   int64_t get_tenant_config_version(uint64_t tenant_id);
   void get_lease_request(share::ObLeaseRequest &lease_request);
@@ -142,7 +145,8 @@ public:
   int got_version(uint64_t tenant_id, int64_t version, const bool remove_repeat = true);
   int update_local(uint64_t tenant_id, int64_t expected_version);
   void notify_tenant_config_changed(uint64_t tenatn_id);
-  int add_extra_config(obrpc::ObTenantConfigArg &arg);
+  int add_config_to_existing_tenant(const char *config_str);
+  int add_extra_config(const obrpc::ObTenantConfigArg &arg);
   int schedule(ObTenantConfig::TenantConfigUpdateTask &task, const int64_t delay);
   int cancel(const ObTenantConfig::TenantConfigUpdateTask &task);
   int wait(const ObTenantConfig::TenantConfigUpdateTask &task);
@@ -160,16 +164,16 @@ public:
     }
     return id;
   }
-
+  // protect config_map_
+  mutable common::DRWLock rwlock_;
   OB_UNIS_VERSION(1);
 
 private:
+  static const int64_t RECYCLE_LATENCY = 30L * 60L * 1000L * 1000L;
   ObTenantConfigMgr();
   bool inited_;
   common::ObAddr self_;
   common::ObMySQLProxy *sql_proxy_;
-  // protect config_map_
-  mutable common::DRWLock rwlock_;
   // 租户配置项的映射
   TenantConfigMap config_map_;
   TenantConfigVersionMap config_version_map_;
@@ -184,7 +188,6 @@ private:
 } // oceanbase
 
 #define OTC_MGR (::oceanbase::omt::ObTenantConfigMgr::get_instance())
-#define TENANT_CONF_UNSAFE(tenant_id) (OTC_MGR.get_tenant_config(tenant_id))
 /*
  * use ObTenantConfigGuard to unlock automatically, otherwise remember to unlock:
  *   ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id));

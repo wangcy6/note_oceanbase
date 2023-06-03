@@ -63,13 +63,43 @@ enum ObLogBaseType
   DAS_ID_LOG_BASE_TYPE = 15,
   //for recovery_ls_service
   RESTORE_SERVICE_LOG_BASE_TYPE = 16,
+
+  RESERVED_SNAPSHOT_LOG_BASE_TYPE = 17,
+
+  MEDIUM_COMPACTION_LOG_BASE_TYPE = 18,
+
+  // for arb garbage collect service, has not been used for now
+  ARB_GARBAGE_COLLECT_SERVICE_LOG_BASE_TYPE = 19,
+  // for data_dictionary_service
+  DATA_DICT_LOG_BASE_TYPE = 20,
+
+  // for arbitration service
+  ARBITRATION_SERVICE_LOG_BASE_TYPE = 21,
+
+  // for NET_STANDBY_TNT_SERVICE
+  NET_STANDBY_TNT_SERVICE_LOG_BASE_TYPE = 22,
+
+  // for endpoint ingress
+  NET_ENDPOINT_INGRESS_LOG_BASE_TYPE = 23,
+
+  HEARTBEAT_SERVICE_LOG_BASE_TYPE = 24,
+
+  // for padding log entry
+  PADDING_LOG_BASE_TYPE = 25,
+
+  // for dup table trans
+  DUP_TABLE_LOG_BASE_TYPE = 26,
+
+  // for obj lock garbage collect service
+  OBJ_LOCK_GARBAGE_COLLECT_SERVICE_LOG_BASE_TYPE = 27,
   // pay attention!!!
   // add log type in log_base_type_to_string
-
   // max value
   MAX_LOG_BASE_TYPE,
 };
 
+// Define the maximum length of ObLogBaseType string
+static constexpr int64_t OB_LOG_BASE_TYPE_STR_MAX_LEN = 128;
 static inline
 int log_base_type_to_string(const ObLogBaseType log_type,
                             char *str,
@@ -110,6 +140,28 @@ int log_base_type_to_string(const ObLogBaseType log_type,
     strncpy(str ,"DAS_ID", str_len);
   } else if (log_type == RESTORE_SERVICE_LOG_BASE_TYPE) {
     strncpy(str ,"RESTORE_SERVICE", str_len);
+  } else if (log_type == RESERVED_SNAPSHOT_LOG_BASE_TYPE) {
+    strncpy(str ,"RESERVED_SNAPSHOT", str_len);
+  } else if (log_type == MEDIUM_COMPACTION_LOG_BASE_TYPE) {
+    strncpy(str ,"MEDIUM_COMPACTION", str_len);
+  } else if (log_type == ARB_GARBAGE_COLLECT_SERVICE_LOG_BASE_TYPE) {
+    strncpy(str ,"ARB_GARBAGE_COLLECTE_SERVICE", str_len);
+  } else if (log_type == DATA_DICT_LOG_BASE_TYPE) {
+    strncpy(str ,"DATA_DICTIONARY_SERVICE", str_len);
+  } else if (log_type == ARBITRATION_SERVICE_LOG_BASE_TYPE) {
+    strncpy(str ,"ARBITRATION_SERVICE", str_len);
+  } else if (log_type == NET_STANDBY_TNT_SERVICE_LOG_BASE_TYPE) {
+    strncpy(str ,"NET_STANDBY_TNT_SERVICE", str_len);
+  } else if (log_type == NET_ENDPOINT_INGRESS_LOG_BASE_TYPE){
+    strncpy(str ,"NET_ENDPOINT_EGRESS", str_len);
+  } else if (log_type == HEARTBEAT_SERVICE_LOG_BASE_TYPE) {
+    strncpy(str ,"HEARTBEAT_SERVICE", str_len);
+  } else if (log_type == PADDING_LOG_BASE_TYPE) {
+    strncpy(str ,"PADDING_LOG_ENTRY", str_len);
+  } else if (log_type == DUP_TABLE_LOG_BASE_TYPE) {
+    strncpy(str ,"DUP_TABLE", str_len);
+  } else if (log_type == OBJ_LOCK_GARBAGE_COLLECT_SERVICE_LOG_BASE_TYPE) {
+    strncpy(str ,"OBJ_LOCK_GARBAGE_COLLECT_SERVICE", str_len);
   } else {
     ret = OB_INVALID_ARGUMENT;
   }

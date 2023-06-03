@@ -351,6 +351,7 @@ private:
   int64_t checkpoint_;
 };
 
+<<<<<<< HEAD
 class ObTransStateLog : public ObTransLog
 {
   OB_UNIS_VERSION(1);
@@ -390,6 +391,8 @@ public:
   bool trx_api_v2_;
 };
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 class ObTransMutatorLogHelper
 {
 public:

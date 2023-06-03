@@ -719,8 +719,14 @@ int ObConflictChecker::build_data_table_range(ObNewRange &lookup_range)
   for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_cnt; ++i) {
     ObObj tmp_obj;
     ObExpr *expr = checker_ctdef_.data_table_rowkey_expr_.at(i);
-    ObDatum &col_datum = expr->locate_expr_datum(eval_ctx_);
-    if (OB_FAIL(col_datum.to_obj(tmp_obj, expr->obj_meta_, expr->obj_datum_map_))) {
+    ObDatum *col_datum = nullptr;
+    if (OB_ISNULL(expr)) {
+      LOG_WARN("expr in rowkey is nullptr", K(ret), K(i));
+    } else if (OB_FAIL(expr->eval(eval_ctx_, col_datum))) {
+      LOG_WARN("failed to evaluate expr in rowkey", K(ret), K(i));
+    } else if (OB_ISNULL(col_datum)) {
+      LOG_WARN("evaluated column datum in rowkey is nullptr", K(ret), K(i));
+    } else if (OB_FAIL(col_datum->to_obj(tmp_obj, expr->obj_meta_, expr->obj_datum_map_))) {
       LOG_WARN("convert datum to obj failed", K(ret));
     }
     // 这里需要做深拷贝
@@ -766,8 +772,7 @@ int ObConflictChecker::get_next_row_from_data_table(DASOpResultIter &result_iter
 {
   int ret = OB_SUCCESS;
   bool got_row = false;
-  const ExprFixedArray &storage_output = checker_ctdef_.das_scan_ctdef_.pd_expr_spec_.access_exprs_;
-
+  const ExprFixedArray &storage_output = checker_ctdef_.table_column_exprs_;
   while (OB_SUCC(ret) && !got_row) {
     das_scan_rtdef_.p_pd_expr_op_->clear_datum_eval_flag();
     if (OB_FAIL(result_iter.get_next_row())) {

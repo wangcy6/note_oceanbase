@@ -288,7 +288,7 @@ int build_md5_str(MD5_CTX *c, char *buf, int64_t size)
 }
 
 ObOssEnvIniter::ObOssEnvIniter()
-  : lock_(),
+  : lock_(common::ObLatchIds::OBJECT_DEVICE_LOCK),
     is_global_inited_(false)
 {
 }
@@ -628,10 +628,10 @@ int ObStorageOssBase::get_oss_file_meta(const ObString &bucket_ob_string,
 void ObStorageOssBase::print_oss_info(aos_status_s *aos_ret)
 {
   if (NULL != aos_ret) {
-    OB_LOG(WARN, "oss info ", K(aos_ret->code), KCSTRING(aos_ret->error_code),
+    OB_LOG_RET(WARN, OB_SUCCESS, "oss info ", K(aos_ret->code), KCSTRING(aos_ret->error_code),
         KCSTRING(aos_ret->error_msg), KCSTRING(aos_ret->req_id), KCSTRING(oss_account_->oss_domain_), KCSTRING(oss_endpoint_), KCSTRING(oss_account_->oss_id_));
   } else {
-    OB_LOG(WARN, "oss info ", KCSTRING(oss_account_->oss_domain_), KCSTRING(oss_endpoint_), KCSTRING(oss_account_->oss_id_));
+    OB_LOG_RET(WARN, OB_SUCCESS, "oss info ", KCSTRING(oss_account_->oss_domain_), KCSTRING(oss_endpoint_), KCSTRING(oss_account_->oss_id_));
   }
 }
 
@@ -692,9 +692,9 @@ int ObStorageOssMultiPartWriter::open(const ObString &uri, void* oss_account)
 
     if(OB_SUCCESS == ret) {
       //alloc memory from aos_pool_
-      if(OB_ISNULL(base_buf_ = static_cast<char *>(allocator_.alloc(BASE_BUFFER_SIZE)))) {
+      if(OB_ISNULL(base_buf_ = static_cast<char *>(allocator_.alloc(OSS_BASE_BUFFER_SIZE)))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
-        OB_LOG(WARN, "fail to alloc memory", K(BASE_BUFFER_SIZE), K(ret));
+        OB_LOG(WARN, "fail to alloc memory", K(OSS_BASE_BUFFER_SIZE), K(ret));
       } else if(0 == MD5_Init(&whole_file_md5_)) {//init MD5_CTX,return 0 for failed
         ret = OB_INIT_MD5_ERROR;
         OB_LOG(WARN, "init MD5_CTX error,uri=%s, ret=%d", to_cstring(uri), ret);
@@ -774,11 +774,11 @@ int ObStorageOssMultiPartWriter::write(const char * buf,const int64_t size)
   }
 
   while (OB_SUCC(ret) && buf_pos != size) {
-    fill_size = std::min(BASE_BUFFER_SIZE - base_buf_pos_, size - buf_pos);
+    fill_size = std::min(OSS_BASE_BUFFER_SIZE - base_buf_pos_, size - buf_pos);
     memcpy(base_buf_ + base_buf_pos_, buf + buf_pos, fill_size);
     base_buf_pos_ += fill_size;
     buf_pos += fill_size;
-    if (base_buf_pos_ == BASE_BUFFER_SIZE) {
+    if (base_buf_pos_ == OSS_BASE_BUFFER_SIZE) {
       if (OB_FAIL(write_single_part())) {
         OB_LOG(WARN, "write file error", K(bucket_), K(object_), K(ret));
       } else {
@@ -974,7 +974,7 @@ int ObStorageOssMultiPartWriter::close()
 
   const int64_t total_cost_time = ObTimeUtility::current_time() - start_time;
   if (total_cost_time > 3 * 1000 * 1000) {
-    OB_LOG(WARN, "oss writer close cost too much time", K(total_cost_time), K(ret));
+    OB_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "oss writer close cost too much time", K(total_cost_time), K(ret));
   }
 
   return ret;
@@ -1207,7 +1207,7 @@ int ObStorageOssUtil::open(void* account)
 void ObStorageOssUtil::close()
 {
   if (!is_opened_) {
-    OB_LOG(WARN, "oss util cannot close before it is opened");
+    OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "oss util cannot close before it is opened");
   } else {
     is_opened_ = false;
     oss_account_ = NULL;
@@ -2001,7 +2001,7 @@ int ObStorageOssAppendWriter::do_write(const char *buf, const int64_t size, cons
       long double speed = (cost_time <= 0) ? 0 :
                                              (long double) size * 1000.0 * 1000.0 / 1024.0 / 1024.0 / cost_time;
       if (cost_time > warn_cost_time) {
-        _OB_LOG(WARN, "oss append one object cost too much time, time:%ld, size:%ld speed:%.2Lf MB/s file_length=%ld, ret=%d",
+        _OB_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "oss append one object cost too much time, time:%ld, size:%ld speed:%.2Lf MB/s file_length=%ld, ret=%d",
             cost_time, size, speed, file_length_, ret);
         print_oss_info(aos_ret);
       } else {

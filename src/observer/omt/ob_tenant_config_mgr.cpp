@@ -20,6 +20,7 @@
 #include "ob_tenant.h"
 #include "share/ob_rpc_struct.h"
 #include "share/inner_table/ob_inner_table_schema_constants.h"
+#include "share/schema/ob_multi_version_schema_service.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -39,14 +40,14 @@ ObTenantConfigGuard::ObTenantConfigGuard(ObTenantConfig *config)
 ObTenantConfigGuard::~ObTenantConfigGuard()
 {
   if (OB_NOT_NULL(config_)) {
-    config_->unlock();
+    config_->unref();
   }
 }
 
 void ObTenantConfigGuard::set_config(ObTenantConfig *config)
 {
   if (OB_NOT_NULL(config_)) {
-    config_->unlock();
+    config_->unref();
   }
   config_ = config;
 }
@@ -89,7 +90,7 @@ int64_t TenantConfigInfo::to_string(char *buf, const int64_t buf_len) const
 }
 
 ObTenantConfigMgr::ObTenantConfigMgr()
-    : inited_(false), self_(), sql_proxy_(nullptr), rwlock_(ObLatchIds::CONFIG_LOCK),
+    : rwlock_(ObLatchIds::CONFIG_LOCK), inited_(false), self_(), sql_proxy_(nullptr),
       config_map_(), config_version_map_(), sys_config_mgr_(nullptr),
       version_has_refreshed_(false), update_tenant_config_cb_()
 {
@@ -175,7 +176,7 @@ void ObTenantConfigMgr::refresh_config_version_map(const ObIArray<uint64_t> &ten
 
 // 背景：每个 server 上需要保存所有租户的 config 信息
 // 当新建租户/删除租户时需要对应维护 config 状态。
-// https://yuque.antfin-inc.com/xiaochu.yh/doc/zf2eqy/
+//
 // IN: 当前活跃租户
 // ACTION: 根据 tenants 信息，决定要添加/删除哪些租户配置项
 int ObTenantConfigMgr::refresh_tenants(const ObIArray<uint64_t> &tenants)
@@ -235,7 +236,7 @@ int ObTenantConfigMgr::refresh_tenants(const ObIArray<uint64_t> &tenants)
   // 删 config
   for (int i = 0; i < del_tenants.count(); ++i) {
     if (OB_FAIL(del_tenant_config(del_tenants.at(i)))) {
-      LOG_WARN("fail add tenant config", K(i), K(del_tenants.at(i)), K(ret));
+      LOG_WARN("fail del tenant config, will try later", K(i), K(del_tenants.at(i)), K(ret));
     } else {
       LOG_INFO("del dropped tenant config succ.", K(i), K(del_tenants.at(i)));
     }
@@ -246,11 +247,33 @@ int ObTenantConfigMgr::refresh_tenants(const ObIArray<uint64_t> &tenants)
   return ret;
 }
 
+// This function will be called in the early stage in bootstrap/create tenant.
+// Meanwhile, related tenant's tables are not readable, so it's safe to call add_extra_config().
+int ObTenantConfigMgr::init_tenant_config(const obrpc::ObTenantConfigArg &arg)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(add_tenant_config(arg.tenant_id_))) {
+    LOG_WARN("fail to add tenant config", KR(ret), K(arg));
+  } else if (OB_FAIL(add_extra_config(arg))) {
+    LOG_WARN("fail to add extra config", KR(ret), K(arg));
+  } else {
+    DRWLock::WRLockGuard guard(rwlock_);
+    ObTenantConfig *config = nullptr;
+    if (OB_FAIL(dump2file())) {
+      LOG_WARN("fail to dump config to file", KR(ret), K(arg));
+    } else if (OB_FAIL(config_map_.get_refactored(ObTenantID(arg.tenant_id_), config))) {
+      LOG_WARN("No tenant config found", K(arg.tenant_id_), K(ret));
+    } else if (OB_FAIL(config->publish_special_config_after_dump())) {
+      LOG_WARN("publish special config after dump failed", K(ret));
+    }
+  }
+  return ret;
+}
+
 int ObTenantConfigMgr::add_tenant_config(uint64_t tenant_id)
 {
   int ret = OB_SUCCESS;
   ObTenantConfig *const *config = nullptr;
-  DRWLock::RDLockGuard lguard(ObConfigManager::get_serialize_lock());
   DRWLock::WRLockGuard guard(rwlock_);
   if (is_virtual_tenant_id(tenant_id)
       || OB_NOT_NULL(config = config_map_.get(ObTenantID(tenant_id)))) {
@@ -260,7 +283,7 @@ int ObTenantConfigMgr::add_tenant_config(uint64_t tenant_id)
     }
   } else {
     ObTenantConfig *new_config = nullptr;
-    new_config = OB_NEW(ObTenantConfig, ObModIds::OMT, tenant_id);
+    new_config = OB_NEW(ObTenantConfig, "TenantConfig", tenant_id);
     if (OB_NOT_NULL(new_config)) {
       if(OB_FAIL(new_config->init(this))) {
         LOG_WARN("new tenant config init failed", K(ret));
@@ -284,21 +307,23 @@ int ObTenantConfigMgr::del_tenant_config(uint64_t tenant_id)
 {
   int ret = OB_SUCCESS;
   ObTenantConfig *config = nullptr;
-  DRWLock::RDLockGuard lguard(ObConfigManager::get_serialize_lock());
   DRWLock::WRLockGuard guard(rwlock_);
   ObTenant *tenant = NULL;
+  bool has_dropped = false;
   if (is_virtual_tenant_id(tenant_id)) {
   } else if (OB_FAIL(config_map_.get_refactored(ObTenantID(tenant_id), config))) {
     LOG_WARN("get tenant config failed", K(tenant_id), K(ret));
-  } else if (OB_SUCC(GCTX.omt_->get_tenant(tenant_id, tenant))) {
-    // https://work.aone.alibaba-inc.com/issue/31717023
-    // 判断租户是否在这台机器上，避免启动时没有刷到租户时删掉了租户配置项
+  } else if (OB_FAIL(GSCHEMASERVICE.check_if_tenant_has_been_dropped(tenant_id, has_dropped))) {
+    LOG_WARN("failed to check tenant has been dropped", K(tenant_id));
+  } else if (!has_dropped && ObTimeUtility::current_time() - config->get_create_timestamp() < RECYCLE_LATENCY) {
     LOG_WARN("tenant still exist, try to delete tenant config later...", K(tenant_id));
   } else {
     static const int DEL_TRY_TIMES = 30;
     static const int64_t TIME_SLICE_PERIOD = 10000;
-    for (int i =  0; i < DEL_TRY_TIMES; ++i) {
-      if (OB_SUCC(config->try_wrlock())) {
+    ret = OB_EAGAIN;
+    for (int i = 0; i < DEL_TRY_TIMES; ++i) {
+      if (config->is_ref_clear()) {
+        ret = OB_SUCCESS;
         break;
       }
       ob_usleep(TIME_SLICE_PERIOD);
@@ -313,23 +338,9 @@ int ObTenantConfigMgr::del_tenant_config(uint64_t tenant_id)
         ob_delete(config);
         LOG_INFO("tenant config deleted", K(tenant_id), K(ret));
       }
-      if (OB_FAIL(ret)) {
-        config->unlock();
-      }
     }
   }
   return ret;
-}
-
-ObTenantConfig *ObTenantConfigMgr::get_tenant_config(uint64_t tenant_id) const
-{
-  int ret = OB_SUCCESS;
-  ObTenantConfig *config = nullptr;
-  DRWLock::RDLockGuard guard(rwlock_);
-  if (OB_FAIL(config_map_.get_refactored(ObTenantID(tenant_id), config))) {
-    LOG_ERROR("failed to get tenant config", K(tenant_id), K(ret));
-  }
-  return config;
 }
 
 ObTenantConfig *ObTenantConfigMgr::get_tenant_config_with_lock(
@@ -358,9 +369,8 @@ ObTenantConfig *ObTenantConfigMgr::get_tenant_config_with_lock(
       LOG_WARN("failed to get tenant config", K(tenant_id), K(ret));
     }
   }
-  if (OB_SUCC(ret) && OB_NOT_NULL(config) && OB_FAIL(config->rdlock())) { // remember to unlock outside
-    config = nullptr;
-    LOG_ERROR("lock tenant config failed", K(tenant_id), K(ret));
+  if (OB_SUCC(ret) && OB_NOT_NULL(config)) {
+    config->ref(); // remember to unref outside
   }
   return config;
 }
@@ -403,11 +413,13 @@ void ObTenantConfigMgr::print() const
   } // for
 }
 
-int ObTenantConfigMgr::dump2file(const char *path) const
+int ObTenantConfigMgr::dump2file()
 {
   int ret = OB_SUCCESS;
-  if (OB_SUCC(sys_config_mgr_->dump2file(path))) {
-    ret = sys_config_mgr_->config_backup();
+  if (OB_FAIL(sys_config_mgr_->dump2file())) {
+    LOG_WARN("failed to dump2file", K(ret));
+  } else if (OB_FAIL(sys_config_mgr_->config_backup())) {
+    LOG_WARN("failed to dump2file backup", K(ret));
   }
   return ret;
 }
@@ -497,6 +509,7 @@ void ObTenantConfigMgr::get_lease_request(share::ObLeaseRequest &lease_request)
   } // for
 }
 
+// for __all_virtual_tenant_parameter_info
 int ObTenantConfigMgr::get_all_tenant_config_info(common::ObArray<TenantConfigInfo> &all_config)
 {
   int ret = OB_SUCCESS;
@@ -508,10 +521,18 @@ int ObTenantConfigMgr::get_all_tenant_config_info(common::ObArray<TenantConfigIn
     for (ObConfigContainer::const_iterator iter = tenant_config->get_container().begin();
          iter != tenant_config->get_container().end(); iter++) {
       TenantConfigInfo config_info(tenant_id);
-      if (OB_FAIL(config_info.set_name(iter->first.str()))) {
+      if (0 == ObString("compatible").case_compare(iter->first.str())
+          && !iter->second->value_updated()) {
+        if (OB_FAIL(config_info.set_value("0.0.0.0"))) {
+          LOG_WARN("set value fail", K(iter->second->str()), K(ret));
+        }
+      } else {
+        if (OB_FAIL(config_info.set_value(iter->second->str()))) {
+          LOG_WARN("set value fail", K(iter->second->str()), K(ret));
+        }
+      }
+      if (FAILEDx(config_info.set_name(iter->first.str()))) {
         LOG_WARN("set name fail", K(iter->first.str()), K(ret));
-      } else if (OB_FAIL(config_info.set_value(iter->second->str()))) {
-        LOG_WARN("set value fail", K(iter->second->str()), K(ret));
       } else if (OB_FAIL(config_info.set_info(iter->second->info()))) {
         LOG_WARN("set info fail", K(iter->second->info()), K(ret));
       } else if (OB_FAIL(config_info.set_section(iter->second->section()))) {
@@ -577,10 +598,8 @@ int ObTenantConfigMgr::update_local(uint64_t tenant_id, int64_t expected_version
         LOG_WARN("read config from __tenant_parameter failed",
                  KR(ret), K(tenant_id), K(exec_tenant_id), K(sql));
       } else {
-        {
-          DRWLock::RDLockGuard guard(rwlock_);
-          ret = config_map_.get_refactored(ObTenantID(tenant_id), config);
-        }
+        DRWLock::WRLockGuard guard(rwlock_);
+        ret = config_map_.get_refactored(ObTenantID(tenant_id), config);
         if (OB_FAIL(ret)) {
           LOG_ERROR("failed to get tenant config", K(tenant_id), K(ret));
         } else {
@@ -597,7 +616,26 @@ void ObTenantConfigMgr::notify_tenant_config_changed(uint64_t tenant_id)
   update_tenant_config_cb_(tenant_id);
 }
 
-int ObTenantConfigMgr::add_extra_config(obrpc::ObTenantConfigArg &arg)
+int ObTenantConfigMgr::add_config_to_existing_tenant(const char *config_str)
+{
+  int ret = OB_SUCCESS;
+  DRWLock::WRLockGuard guard(rwlock_);
+  if (!config_map_.empty() && nullptr != config_str) {
+    TenantConfigMap::const_iterator it = config_map_.begin();
+    for (; it != config_map_.end() && OB_SUCC(ret); ++it) {
+      if (OB_NOT_NULL(it->second)) {
+        int64_t version = ObTimeUtility::current_time();
+        if (OB_FAIL(it->second->add_extra_config(config_str, version))) {
+          LOG_WARN("add tenant extra config failed", "tenant_id", it->second->get_tenant_id(),
+                   "config_str", config_str, KR(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTenantConfigMgr::add_extra_config(const obrpc::ObTenantConfigArg &arg)
 {
   int ret = OB_SUCCESS;
   ObTenantConfig *config = nullptr;
@@ -605,14 +643,14 @@ int ObTenantConfigMgr::add_extra_config(obrpc::ObTenantConfigArg &arg)
     ret = OB_INVALID_ARGUMENT;
     LOG_ERROR("invalid arg", K(ret), K(arg));
   } else {
-    DRWLock::RDLockGuard guard(rwlock_);
+    DRWLock::WRLockGuard guard(rwlock_);
     if (OB_FAIL(config_map_.get_refactored(ObTenantID(arg.tenant_id_), config))) {
       LOG_ERROR("failed to get tenant config", K(arg.tenant_id_), K(ret));
     } else {
       ret = config->add_extra_config(arg.config_str_.ptr());
     }
   }
-  LOG_INFO("add tenant extra config", K(arg));
+  FLOG_INFO("add tenant extra config", K(arg));
   return ret;
 }
 
@@ -661,7 +699,6 @@ int ObTenantConfigMgr::wait(const ObTenantConfig::TenantConfigUpdateTask &task)
 OB_DEF_SERIALIZE(ObTenantConfigMgr)
 {
   int ret = OB_SUCCESS;
-  DRWLock::RDLockGuard guard(rwlock_);
   int64_t expect_data_len = get_serialize_size_();
   int64_t saved_pos = pos;
   TenantConfigMap::const_iterator it = config_map_.begin();
@@ -745,7 +782,6 @@ OB_DEF_DESERIALIZE(ObTenantConfigMgr)
 OB_DEF_SERIALIZE_SIZE(ObTenantConfigMgr)
 {
   int64_t len = 0;
-  DRWLock::RDLockGuard guard(rwlock_);
   TenantConfigMap::const_iterator it = config_map_.begin();
   for (; it != config_map_.end(); ++it) {
     if (OB_NOT_NULL(it->second)) {

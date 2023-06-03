@@ -15,6 +15,7 @@
 #include "lib/utility/ob_tracepoint.h"
 #include "ob_block_manager.h"
 #include "ob_macro_block.h"
+#include "ob_micro_block_hash_index.h"
 #include "observer/ob_server_struct.h"
 #include "share/ob_encryption_util.h"
 #include "share/ob_force_print_log.h"
@@ -126,7 +127,7 @@ int ObDataStoreDesc::cal_row_store_type(const share::schema::ObMergeSchema &merg
 {
   int ret = OB_SUCCESS;
 
-  if (!storage::is_major_merge(merge_type) && !storage::is_buf_minor_merge(merge_type)) { // not major or buf minor
+  if (!storage::is_major_merge_type(merge_type) && !storage::is_meta_major_merge(merge_type)) { // not major or meta merge
     row_store_type_ = FLAT_ROW_STORE;
   } else {
     row_store_type_ = merge_schema.get_row_store_type();
@@ -138,37 +139,6 @@ int ObDataStoreDesc::cal_row_store_type(const share::schema::ObMergeSchema &merg
     }
   }
 
-  return ret;
-}
-
-int ObDataStoreDesc::set_major_working_cluster_version()
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(!is_major_merge() || snapshot_version_ <= 0)) {
-    ret = OB_ERR_UNEXPECTED;
-    STORAGE_LOG(WARN, "Unexpected data store to get major working cluster version",
-                K(ret), K_(merge_type), K_(snapshot_version));
-  } else {
-    ObTenantFreezeInfoMgr::FreezeInfo freeze_info;
-    if (OB_SUCC(MTL_CALL_FREEZE_INFO_MGR(get_freeze_info_by_snapshot_version, snapshot_version_, freeze_info))) {
-      // succ to get freeze info
-    } else if (OB_ENTRY_NOT_EXIST != ret) {
-      STORAGE_LOG(WARN, "Failed to get freeze info", K(ret), K_(snapshot_version), "tenant_id", MTL_ID());
-    } else if (OB_FAIL(MTL_CALL_FREEZE_INFO_MGR(get_latest_freeze_info, freeze_info))) {
-      STORAGE_LOG(WARN, "Failed to get latest freeze info", K(ret));
-    }
-    if (OB_SUCC(ret)) {
-      if (freeze_info.cluster_version < 0) {
-        STORAGE_LOG(ERROR, "Unexpected cluster version of freeze info", K(ret), K(freeze_info));
-        major_working_cluster_version_ = 0;
-      } else {
-        major_working_cluster_version_ = freeze_info.cluster_version;
-      }
-      ObTaskController::get().allow_next_syslog();
-      STORAGE_LOG(INFO, "Succ to get major working cluster version",
-                  K_(major_working_cluster_version), K(freeze_info), K_(snapshot_version));
-    }
-  }
   return ret;
 }
 
@@ -187,7 +157,7 @@ int ObDataStoreDesc::init(
   } else {
     reset();
     const int64_t pct_free = merge_schema.get_pctfree();
-    const bool is_major = storage::is_major_merge(merge_type);
+    const bool is_major = (storage::is_major_merge_type(merge_type) || storage::is_meta_major_merge(merge_type));
     micro_block_size_ = merge_schema.get_block_size();
     macro_block_size_ = OB_SERVER_BLOCK_MGR.get_macro_block_size();
     if (pct_free >= 0 && pct_free <= 50) {
@@ -251,12 +221,28 @@ int ObDataStoreDesc::init(
     }
 
     if (OB_SUCC(ret) && is_major) {
+      uint64_t compat_version = 0;
+      int tmp_ret = OB_SUCCESS;
       if (cluster_version > 0) {
         major_working_cluster_version_ = cluster_version;
+      } else if (OB_TMP_FAIL(GET_MIN_DATA_VERSION(MTL_ID(), compat_version))) {
+        STORAGE_LOG(WARN, "fail to get data version", K(tmp_ret));
       } else {
-        if (OB_FAIL(set_major_working_cluster_version())) {
-          STORAGE_LOG(WARN, "Failed to set major working cluster version", K(ret), K(*this));
-        }
+        major_working_cluster_version_ = compat_version;
+      }
+      STORAGE_LOG(INFO, "success to set major working cluster version", K(tmp_ret), K(merge_type), K(cluster_version), K(major_working_cluster_version_));
+    }
+
+    if (OB_SUCC(ret)) {
+      bool need_build_hash_index = merge_schema.get_table_type() == USER_TABLE
+                                       && !is_major_merge();
+      if (need_build_hash_index
+              && OB_FAIL(ObMicroBlockHashIndexBuilder::need_build_hash_index(merge_schema, need_build_hash_index))) {
+        STORAGE_LOG(WARN, "Failed to judge whether to build hash index", K(ret));
+        need_build_hash_index_for_micro_block_ = false;
+        ret = OB_SUCCESS;
+      } else {
+        need_build_hash_index_for_micro_block_ = need_build_hash_index;
       }
     }
 
@@ -265,8 +251,13 @@ int ObDataStoreDesc::init(
       STORAGE_LOG(WARN, "Failed to reserve column desc array", K(ret));
     } else if (OB_FAIL(merge_schema.get_multi_version_column_descs(col_desc_array_))) {
       STORAGE_LOG(WARN, "Failed to generate multi version column ids", K(ret));
+    } else if (FALSE_IT(fresh_col_meta())) {
     } else if (OB_FAIL(datum_utils_.init(col_desc_array_, schema_rowkey_col_cnt_, lib::is_oracle_mode(), allocator_))) {
       STORAGE_LOG(WARN, "Failed to init datum utils", K(ret));
+    } else if (is_major && major_working_cluster_version_ <= DATA_VERSION_4_0_0_0) {
+      micro_block_size_ = merge_schema.get_block_size();
+    } else {
+      micro_block_size_ = MAX(merge_schema.get_block_size(), MIN_MICRO_BLOCK_SIZE);
     }
   }
   return ret;
@@ -284,7 +275,30 @@ bool ObDataStoreDesc::is_valid() const
          && ls_id_.is_valid()
          && tablet_id_.is_valid()
          && compressor_type_ > ObCompressorType::INVALID_COMPRESSOR
-         && snapshot_version_ > 0;
+         && snapshot_version_ > 0
+         && is_store_type_valid();
+}
+
+bool ObDataStoreDesc::is_store_type_valid() const
+{
+  bool ret = false;
+  bool is_major = storage::is_major_merge_type(merge_type_)
+      || storage::is_meta_major_merge(merge_type_);
+  if (!ObStoreFormat::is_row_store_type_valid(row_store_type_)) {
+    // invalid row store type
+  } else if (is_force_flat_store_type_) {
+    ret = (ObRowStoreType::FLAT_ROW_STORE == row_store_type_ && is_major);
+  } else if (!is_major) {
+    ret = (!ObStoreFormat::is_row_store_type_with_encoding(row_store_type_));
+  } else {
+    ret = true;
+  }
+
+  if (!ret) {
+    STORAGE_LOG(WARN, "invalid row store type",
+        K_(row_store_type), K(is_major), K_(is_force_flat_store_type));
+  }
+  return ret;
 }
 
 void ObDataStoreDesc::reset()
@@ -299,6 +313,7 @@ void ObDataStoreDesc::reset()
   rowkey_column_count_ = 0;
   schema_rowkey_col_cnt_ = 0;
   row_store_type_ = ENCODING_ROW_STORE;
+  need_build_hash_index_for_micro_block_ = false;
   encoder_opt_.reset();
   schema_version_ = 0;
   merge_info_ = NULL;
@@ -315,6 +330,8 @@ void ObDataStoreDesc::reset()
   major_working_cluster_version_ = 0;
   sstable_index_builder_ = nullptr;
   is_ddl_ = false;
+  need_pre_warm_ = false;
+  is_force_flat_store_type_ = false;
   col_desc_array_.reset();
   datum_utils_.reset();
   allocator_.reset();
@@ -332,6 +349,7 @@ int ObDataStoreDesc::assign(const ObDataStoreDesc &desc)
   row_column_count_ = desc.row_column_count_;
   rowkey_column_count_ = desc.rowkey_column_count_;
   row_store_type_ = desc.row_store_type_;
+  need_build_hash_index_for_micro_block_ = desc.need_build_hash_index_for_micro_block_;
   schema_version_ = desc.schema_version_;
   schema_rowkey_col_cnt_ = desc.schema_rowkey_col_cnt_;
   encoder_opt_ = desc.encoder_opt_;
@@ -347,6 +365,8 @@ int ObDataStoreDesc::assign(const ObDataStoreDesc &desc)
   MEMCPY(encrypt_key_, desc.encrypt_key_, sizeof(encrypt_key_));
   major_working_cluster_version_ = desc.major_working_cluster_version_;
   is_ddl_ = desc.is_ddl_;
+  need_pre_warm_ = desc.need_pre_warm_;
+  is_force_flat_store_type_ = desc.is_force_flat_store_type_;
   col_desc_array_.reset();
   datum_utils_.reset();
   sstable_index_builder_ = desc.sstable_index_builder_;
@@ -361,6 +381,15 @@ int ObDataStoreDesc::assign(const ObDataStoreDesc &desc)
   return ret;
 }
 
+void ObDataStoreDesc::fresh_col_meta()
+{
+  for (int64_t i = 0; i < col_desc_array_.count(); i++) {
+    if (col_desc_array_.at(i).col_type_.is_lob_storage()) {
+      col_desc_array_.at(i).col_type_.set_has_lob_header();
+    }
+  }
+}
+
 /**
  * -------------------------------------------------------------------ObMicroBlockCompressor-------------------------------------------------------------------
  */
@@ -368,8 +397,8 @@ ObMicroBlockCompressor::ObMicroBlockCompressor()
   : is_none_(false),
     micro_block_size_(0),
     compressor_(NULL),
-    comp_buf_(0, "MicrBlocComp"),
-    decomp_buf_(0, "MicrBlocDecomp")
+    comp_buf_("MicrBlocComp"),
+    decomp_buf_("MicrBlocDecomp")
 {
 }
 
@@ -474,7 +503,7 @@ int ObMicroBlockCompressor::decompress(const char *in, const int64_t in_size,
  */
 ObMacroBlock::ObMacroBlock()
   : spec_(NULL),
-    data_(0, "MacrBlocData"),
+    data_("MacrBlocData"),
     macro_header_(),
     data_base_offset_(0),
     last_rowkey_(),
@@ -668,7 +697,7 @@ int ObMacroBlock::flush(ObMacroBlockHandle &macro_handle,
 {
   int ret = OB_SUCCESS;
 #ifdef ERRSIM
-  ret = E(EventTable::EN_BAD_BLOCK_ERROR) OB_SUCCESS;
+  ret = OB_E(EventTable::EN_BAD_BLOCK_ERROR) OB_SUCCESS;
   if (OB_CHECKSUM_ERROR == ret) { // obtest will set this code
     STORAGE_LOG(INFO, "ERRSIM bad block: Insert a bad block.");
     macro_header_.fixed_header_.magic_ = 0;
@@ -693,7 +722,6 @@ int ObMacroBlock::flush(ObMacroBlockHandle &macro_handle,
     ObMacroBlockWriteInfo write_info;
     write_info.buffer_ = data_.data();
     write_info.size_ = data_.capacity();
-    write_info.io_desc_.set_category(ObIOCategory::SYS_IO);
     write_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_COMPACT_WRITE);
     if (OB_FAIL(macro_handle.async_write(write_info))) {
       STORAGE_LOG(WARN, "Fail to async write block", K(ret), K(macro_handle));
@@ -823,7 +851,10 @@ int ObMacroBlock::get_macro_block_meta(ObDataMacroBlockMeta &macro_meta)
   macro_meta.val_.row_store_type_ = spec_->row_store_type_;
   macro_meta.val_.schema_version_ = spec_->schema_version_;
   macro_meta.val_.snapshot_version_ = spec_->snapshot_version_;
-  if (OB_NOT_NULL(macro_header_.column_checksum_)) {
+  if (OB_ISNULL(macro_header_.column_checksum_)) {
+  } else if (OB_FAIL(macro_meta.val_.column_checksums_.reserve(macro_meta.val_.column_count_))) {
+    STORAGE_LOG(WARN, "fail to reserve checksum array", K(ret), K(macro_meta));
+  } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < macro_meta.val_.column_count_; ++i) {
       if (OB_FAIL(macro_meta.val_.column_checksums_.push_back(macro_header_.column_checksum_[i]))) {
         STORAGE_LOG(WARN, "fail to push column checksum", K(ret), K(macro_meta));

@@ -14,15 +14,19 @@
 
 #include "rootserver/freeze/ob_zone_merge_manager.h"
 
+#include "share/ob_freeze_info_proxy.h"
 #include "share/ob_zone_merge_table_operator.h"
 #include "share/ob_global_merge_table_operator.h"
+#include "share/ob_tablet_meta_table_compaction_operator.h"
 #include "observer/ob_server_struct.h"
 #include "share/ob_cluster_version.h"
 #include "share/inner_table/ob_inner_table_schema_constants.h"
 #include "share/ob_service_epoch_proxy.h"
+#include "lib/container/ob_array_wrap.h"
 #include "lib/mysqlclient/ob_mysql_proxy.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "rootserver/ob_rs_event_history_table_operator.h"
+#include "rootserver/freeze/ob_major_freeze_util.h"
 
 namespace oceanbase
 {
@@ -33,7 +37,8 @@ using namespace oceanbase::share;
 using namespace oceanbase::palf;
 
 ObZoneMergeManagerBase::ObZoneMergeManagerBase()
-  : lock_(), is_inited_(false), is_loaded_(false),
+  : lock_(ObLatchIds::ZONE_MERGE_MANAGER_READ_LOCK),
+    is_inited_(false), is_loaded_(false),
     tenant_id_(common::OB_INVALID_ID), zone_count_(0),
     zone_merge_infos_(), global_merge_info_(), proxy_(NULL)
 {}
@@ -68,7 +73,8 @@ int ObZoneMergeManagerBase::reload()
       LOG_WARN("not init", KR(ret), K_(tenant_id));
     } else if (OB_FAIL(tmp_merge_infos.init())) {
       LOG_WARN("fail to alloc temp zone merge infos", KR(ret), K_(tenant_id));
-    } else if (OB_FAIL(ObGlobalMergeTableOperator::load_global_merge_info(*proxy_, tenant_id_, global_merge_info))) {
+    } else if (OB_FAIL(ObGlobalMergeTableOperator::load_global_merge_info(*proxy_, tenant_id_,
+                          global_merge_info, true/*print_sql*/))) {
       LOG_WARN("fail to get global merge info", KR(ret), K_(tenant_id));
     } else if (OB_FAIL(ObZoneMergeTableOperator::get_zone_list(*proxy_, tenant_id_, zone_list))) {
       LOG_WARN("fail to get zone list", KR(ret), K_(tenant_id));
@@ -85,7 +91,8 @@ int ObZoneMergeManagerBase::reload()
         ObZoneMergeInfo &info = tmp_merge_infos.ptr()[i];
         info.zone_ = zone_list[i];
         info.tenant_id_ = tenant_id_;
-        if (OB_FAIL(ObZoneMergeTableOperator::load_zone_merge_info(*proxy_, tenant_id_, info))) {
+        if (OB_FAIL(ObZoneMergeTableOperator::load_zone_merge_info(*proxy_, tenant_id_, info,
+                                                                   true/*print_sql*/))) {
           LOG_WARN("fail to reload zone merge info", KR(ret), K_(tenant_id), "zone", zone_list[i]);
         }
       }
@@ -107,7 +114,8 @@ int ObZoneMergeManagerBase::reload()
 
     if (OB_SUCC(ret)) {
       is_loaded_ = true;
-      LOG_INFO("succ to reload zone merge manager", K(zone_list));
+      LOG_INFO("succ to reload zone merge manager", K(zone_list), K_(global_merge_info),
+               "zone_merge_infos", ObArrayWrap<ObZoneMergeInfo>(zone_merge_infos_, zone_count_));
     } else {
       LOG_WARN("fail to reload zone merge manager", KR(ret));
     }
@@ -171,7 +179,7 @@ void ObZoneMergeManagerBase::handle_trans_stat(
   if (trans.is_started()) {
     int tmp_ret = OB_SUCCESS;
     if (OB_TMP_FAIL(trans.end(OB_SUCC(ret)))) {
-      LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret), K(tmp_ret));
+      LOG_WARN_RET(tmp_ret, "trans end failed", "is_commit", OB_SUCCESS == ret, K(tmp_ret));
       ret = OB_SUCC(ret) ? tmp_ret : ret;
     }
   }
@@ -309,6 +317,7 @@ int ObZoneMergeManagerBase::start_zone_merge(
   ObMySQLTransaction trans;
   const int64_t cur_time = ObTimeUtility::current_time();
   const uint64_t meta_tenant_id = gen_meta_tenant_id(tenant_id_);
+  FREEZE_TIME_GUARD;
 
   if (OB_FAIL(check_valid(zone, idx))) {
     LOG_WARN("fail to check valid", KR(ret), K(zone), K_(tenant_id));
@@ -343,6 +352,7 @@ int ObZoneMergeManagerBase::start_zone_merge(
       tmp_info.broadcast_scn_.set_scn(global_merge_info_.global_broadcast_scn(), need_update);
       tmp_info.frozen_scn_.set_scn(global_merge_info_.frozen_scn(), need_update);
 
+      FREEZE_TIME_GUARD;
       if (OB_FAIL(ObZoneMergeTableOperator::update_partial_zone_merge_info(trans, tenant_id_, tmp_info))) {
         LOG_WARN("fail to update partial zone merge info", KR(ret), K_(tenant_id), K(tmp_info));
       }
@@ -372,6 +382,7 @@ int ObZoneMergeManagerBase::finish_zone_merge(
   ObMySQLTransaction trans;
   const int64_t cur_time = ObTimeUtility::current_time();
   const uint64_t meta_tenant_id = gen_meta_tenant_id(tenant_id_);
+  FREEZE_TIME_GUARD;
 
   if (OB_FAIL(check_valid(zone, idx))) {
     LOG_WARN("fail to check valid", KR(ret), K(zone), K_(tenant_id));
@@ -407,6 +418,7 @@ int ObZoneMergeManagerBase::finish_zone_merge(
         tmp_info.all_merged_scn_.set_scn(new_all_merged_scn, true);
       }
 
+      FREEZE_TIME_GUARD;
       if (OB_FAIL(ObZoneMergeTableOperator::update_partial_zone_merge_info(trans, tenant_id_, tmp_info))) {
         LOG_WARN("fail to update partial zone merge info", KR(ret), K_(tenant_id), K(tmp_info));
       }
@@ -465,6 +477,7 @@ int ObZoneMergeManagerBase::set_merge_error(const int64_t error_type, const int6
       is_merge_error = 0;
     }
 
+    FREEZE_TIME_GUARD;
     if (OB_FAIL(check_inner_stat())) {
       LOG_WARN("fail to check inner stat", KR(ret), K_(tenant_id));
     } else if (OB_FAIL(trans.start(proxy_, meta_tenant_id))) {
@@ -479,6 +492,7 @@ int ObZoneMergeManagerBase::set_merge_error(const int64_t error_type, const int6
         tmp_global_info.is_merge_error_.set_val(is_merge_error, true);
         tmp_global_info.error_type_.set_val(error_type, true);
 
+        FREEZE_TIME_GUARD;
         if (OB_FAIL(ObGlobalMergeTableOperator::update_partial_global_merge_info(trans, tenant_id_, 
             tmp_global_info))) {
           LOG_WARN("fail to update partial global merge info", KR(ret), K(tmp_global_info));
@@ -511,6 +525,7 @@ int ObZoneMergeManagerBase::set_zone_merging(
   int64_t idx = OB_INVALID_INDEX;
   ObMySQLTransaction trans;
   const uint64_t meta_tenant_id = gen_meta_tenant_id(tenant_id_);
+  FREEZE_TIME_GUARD;
   if (OB_FAIL(check_valid(zone, idx))) {
     LOG_WARN("fail to check valid", KR(ret), K(zone), K_(tenant_id));
   } else if (OB_FAIL(trans.start(proxy_, meta_tenant_id))) {
@@ -525,6 +540,7 @@ int ObZoneMergeManagerBase::set_zone_merging(
     } else if (is_merging != zone_merge_infos_[idx].is_merging_.get_value()) {
       tmp_info.is_merging_.set_val(is_merging, true);
 
+      FREEZE_TIME_GUARD;
       if (OB_FAIL(ObZoneMergeTableOperator::update_partial_zone_merge_info(trans, tenant_id_, tmp_info))) {
         LOG_WARN("fail to update partial zone merge info", KR(ret), K_(tenant_id), K(tmp_info));
       }
@@ -667,6 +683,7 @@ int ObZoneMergeManagerBase::generate_next_global_broadcast_scn(
     SCN &next_scn)
 {
   int ret = OB_SUCCESS;
+  FREEZE_TIME_GUARD;
   ObMySQLTransaction trans;
   const uint64_t meta_tenant_id = gen_meta_tenant_id(tenant_id_);
   if (OB_FAIL(check_inner_stat())) {
@@ -712,6 +729,7 @@ int ObZoneMergeManagerBase::generate_next_global_broadcast_scn(
         LOG_INFO("next global_broadcast_scn", K_(tenant_id), K(next_scn), K(tmp_global_info));
         
         tmp_global_info.merge_status_.set_val(ObZoneMergeInfo::MERGE_STATUS_MERGING, true);
+        FREEZE_TIME_GUARD;
         if (OB_FAIL(ObGlobalMergeTableOperator::update_partial_global_merge_info(trans, tenant_id_, 
             tmp_global_info))) {
           LOG_WARN("fail to update partial global merge info", KR(ret), K(tmp_global_info));
@@ -760,6 +778,7 @@ int ObZoneMergeManagerBase::try_update_global_last_merged_scn(const int64_t expe
     }
 
     if (OB_SUCC(ret) && need_update) {
+      FREEZE_TIME_GUARD;
       if (OB_FAIL(trans.start(proxy_, meta_tenant_id))) {
         LOG_WARN("fail to start transaction", KR(ret), K_(tenant_id), K(meta_tenant_id));
       } else if (OB_FAIL(check_freeze_service_epoch(trans, expected_epoch))) {
@@ -775,6 +794,7 @@ int ObZoneMergeManagerBase::try_update_global_last_merged_scn(const int64_t expe
           tmp_global_info.last_merged_scn_.set_scn(global_merge_info_.global_broadcast_scn(), true);
           tmp_global_info.merge_status_.set_val(ObZoneMergeInfo::MERGE_STATUS_IDLE, true);
 
+          FREEZE_TIME_GUARD;
           if (OB_FAIL(ObGlobalMergeTableOperator::update_partial_global_merge_info(trans, tenant_id_, 
               tmp_global_info))) {
             LOG_WARN("fail to update partial global merge info", KR(ret), K(tmp_global_info));
@@ -878,6 +898,48 @@ int ObZoneMergeManagerBase::try_update_zone_merge_info(const int64_t expected_ep
     }
   }
   
+  return ret;
+}
+
+int ObZoneMergeManagerBase::adjust_global_merge_info(const int64_t expected_epoch)
+{
+  int ret = OB_SUCCESS;
+  ObSimpleFrozenStatus max_frozen_status;
+  ObFreezeInfoProxy freeze_info_proxy(tenant_id_);
+  SCN min_compaction_scn;
+  SCN max_frozen_scn;
+  // 1. get min{compaction_scn} of all tablets in __all_tablet_meta_table
+  if (OB_FAIL(check_inner_stat())) {
+    LOG_WARN("fail to check inner stat", KR(ret), K_(tenant_id));
+  } else if (OB_FAIL(ObTabletMetaTableCompactionOperator::get_min_compaction_scn(tenant_id_, min_compaction_scn))) {
+    LOG_WARN("fail to get min_compaction_scn", KR(ret), K_(tenant_id));
+  } else if (min_compaction_scn < SCN::base_scn()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected min_compaction_scn", KR(ret), K_(tenant_id), K(min_compaction_scn));
+  } else if (min_compaction_scn == SCN::base_scn()) {
+    // do nothing. no need to adjust global_merge_info
+  } else if (min_compaction_scn > SCN::base_scn()) {
+    // 2. if min{compaction_scn} > 1, get max{frozen_scn} <= min{compaction_scn} from __all_freeze_info
+    // case 1: if min{compaction_scn} is medium_compaction_scn, return the max frozen_scn which is
+    //         smaller than this medium_compaction_scn from __all_freeze_info
+    // case 2: if min{compaction_scn} is major_compaction_scn, return this major_compaction_scn
+    if (OB_FAIL(freeze_info_proxy.get_max_frozen_scn_smaller_or_equal_than(*proxy_,
+                min_compaction_scn, max_frozen_scn))) {
+      LOG_WARN("fail to get max frozen_scn smaller than or equal to min_compaction_scn", KR(ret),
+               K_(tenant_id), K(min_compaction_scn));
+    } else if (max_frozen_scn < SCN::base_scn()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected max_frozen_scn", KR(ret), K_(tenant_id), K(max_frozen_scn));
+    } else if (max_frozen_scn == SCN::base_scn()) {
+      // do nothing. no need to adjust global_merge_info
+    } else if (max_frozen_scn > SCN::base_scn()) {
+      // 3. if max{frozen_scn} > 1, update __all_merge_info and global_merge_info with max{frozen_scn}
+      if (OB_FAIL(inner_adjust_global_merge_info(max_frozen_scn, expected_epoch))) {
+        LOG_WARN("fail to inner adjust global merge info", KR(ret), K_(tenant_id), K(max_frozen_scn));
+      }
+    }
+  }
+  FLOG_INFO("finish to adjust global merge info", K_(tenant_id), K(max_frozen_scn), K_(global_merge_info));
   return ret;
 }
 
@@ -1083,6 +1145,50 @@ int ObZoneMergeManagerBase::handle_zone_merge_info_to_insert(
   return ret;
 }
 
+int ObZoneMergeManagerBase::inner_adjust_global_merge_info(
+    const SCN &frozen_scn,
+    const int64_t expected_epoch)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!frozen_scn.is_valid() || expected_epoch < 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(frozen_scn), K(expected_epoch));
+  } else {
+    // 1. adjust global_merge_info in memory to control the frozen_scn of the next major compaction.
+    // 2. adjust global_merge_info in table for background thread to update report_scn.
+    //
+    // Note that, here not only adjust last_merged_scn, but also adjust global_broadcast_scn and
+    // frozen_scn. So as to avoid error in ObMajorMergeScheduler::do_work(), which works based on
+    // these global_merge_info in memory.
+    ObMySQLTransaction trans;
+    const uint64_t meta_tenant_id = gen_meta_tenant_id(tenant_id_);
+    if (OB_FAIL(trans.start(proxy_, meta_tenant_id))) {
+      LOG_WARN("fail to start transaction", KR(ret), K_(tenant_id), K(meta_tenant_id));
+    } else if (OB_FAIL(check_freeze_service_epoch(trans, expected_epoch))) {
+      LOG_WARN("fail to check freeze_service_epoch", KR(ret), K(expected_epoch));
+    } else {
+      ObGlobalMergeInfo tmp_global_info;
+      if (OB_FAIL(tmp_global_info.assign_value(global_merge_info_))) {
+        LOG_WARN("fail to assign global merge info", KR(ret), K_(global_merge_info));
+      } else {
+        tmp_global_info.frozen_scn_.set_scn(frozen_scn, true);
+        tmp_global_info.global_broadcast_scn_.set_scn(frozen_scn, true);
+        tmp_global_info.last_merged_scn_.set_scn(frozen_scn, true);
+        if (OB_FAIL(ObGlobalMergeTableOperator::update_partial_global_merge_info(trans, tenant_id_, tmp_global_info))) {
+          LOG_WARN("fail to update partial global merge info", KR(ret), K(tmp_global_info));
+        }
+        handle_trans_stat(trans, ret);
+        if (FAILEDx(global_merge_info_.assign_value(tmp_global_info))) {
+          LOG_WARN("fail to assign global_merge_info", KR(ret), K(tmp_global_info), K_(global_merge_info));
+        } else {
+          LOG_INFO("succ to update global_merge_info", K_(tenant_id), K(tmp_global_info), K_(global_merge_info));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 // only used for copying data to/from shadow_
 int ObZoneMergeManagerBase::copy_infos(
     ObZoneMergeManagerBase &dest, 
@@ -1141,7 +1247,7 @@ ObZoneMergeManager::ObZoneMergeMgrGuard::~ObZoneMergeMgrGuard()
   if (OB_UNLIKELY(OB_SUCCESS != ret_)) {
   } else if (OB_UNLIKELY(OB_SUCCESS !=
       (tmp_ret = ObZoneMergeManager::copy_infos(zone_merge_mgr_, shadow_)))) {
-    LOG_WARN("fail to copy from zone_merge_mgr shadow", K(tmp_ret), K_(ret));
+    LOG_WARN_RET(tmp_ret, "fail to copy from zone_merge_mgr shadow", K(tmp_ret), K_(ret));
   }
   if (OB_UNLIKELY(OB_SUCCESS != tmp_ret)) {
     ret_ = tmp_ret;
@@ -1150,7 +1256,7 @@ ObZoneMergeManager::ObZoneMergeMgrGuard::~ObZoneMergeMgrGuard()
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 ObZoneMergeManager::ObZoneMergeManager()
-  : write_lock_(), shadow_()
+  : write_lock_(ObLatchIds::ZONE_MERGE_MANAGER_WRITE_LOCK), shadow_()
 {}
 
 ObZoneMergeManager::~ObZoneMergeManager()
@@ -1397,6 +1503,22 @@ int ObZoneMergeManager::try_update_zone_merge_info(const int64_t expected_epoch)
       *(static_cast<ObZoneMergeManagerBase *> (this)), shadow_, ret);
     if (OB_SUCC(ret)) {
       ret = shadow_.try_update_zone_merge_info(expected_epoch);
+    }
+  }
+  return ret;
+}
+
+int ObZoneMergeManager::adjust_global_merge_info(const int64_t expected_epoch)
+{
+  int ret = OB_SUCCESS;
+  SpinWLockGuard guard(write_lock_);
+  // destruct shadow_copy_guard before return
+  // otherwise the ret_ in shadow_copy_guard will never be returned
+  {
+    ObZoneMergeMgrGuard shadow_guard(lock_,
+      *(static_cast<ObZoneMergeManagerBase *> (this)), shadow_, ret);
+    if (OB_SUCC(ret)) {
+      ret = shadow_.adjust_global_merge_info(expected_epoch);
     }
   }
   return ret;

@@ -87,6 +87,12 @@ int TestLobCommon::create_data_tablet(
     } else if (OB_FAIL(ls->get_tablet_svr()->on_redo_create_tablets(arg, trans_flags))) {
       STORAGE_LOG(WARN, "failed to redo create tablets", K(ret), K(arg));
     } else if (FALSE_IT(trans_flags.scn_ = share::SCN::plus(trans_flags.scn_, 1))) {
+<<<<<<< HEAD
+=======
+    } else if (OB_FAIL(ls->get_tablet_svr()->on_tx_end_create_tablets(arg, trans_flags))) {
+      STORAGE_LOG(WARN, "failed to tx end create tablets", K(ret), K(arg));
+    } else if (FALSE_IT(trans_flags.scn_ = share::SCN::plus(trans_flags.scn_, 1))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     } else if (OB_FAIL(ls->get_tablet_svr()->on_commit_create_tablets(arg, trans_flags))) {
       STORAGE_LOG(WARN, "failed to commit create tablets", K(ret), K(arg));
     }
@@ -332,7 +338,11 @@ int TestLobCommon::build_lob_tablet_arg(
       lib::get_compat_mode(), false/*is_create_bind_hidden_tablets*/))) {
     STORAGE_LOG(WARN, "failed to init tablet info", K(ret), K(tablet_id_array),
         K(data_tablet_id), K(tablet_schema_index_array));
+<<<<<<< HEAD
   } else if (OB_FAIL(arg.init_create_tablet(ls_id, share::SCN::min_scn()))) {
+=======
+  } else if (OB_FAIL(arg.init_create_tablet(ls_id, share::SCN::min_scn(), false/*need_check_tablet_cnt*/))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     STORAGE_LOG(WARN, "failed to init create tablet", K(ret), K(tenant_id), K(ls_id));
   } else if (OB_FAIL(arg.table_schemas_.push_back(table_schema))) {
     STORAGE_LOG(WARN, "failed to push back table schema", K(ret), K(table_schema));

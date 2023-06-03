@@ -133,17 +133,26 @@ public:
     return OB_SUCCESS;
   }
   int set_initial_member_list(const common::ObMemberList &member_list,
-                              const int64_t paxos_replica_num)
+                              const int64_t paxos_replica_num,
+                              const common::GlobalLearnerList &learner_list)
   {
     UNUSED(member_list);
     UNUSED(paxos_replica_num);
+    UNUSED(learner_list);
     return OB_SUCCESS;
   }
   int set_initial_member_list(const common::ObMemberList &member_list,
                               const common::ObMember &arb_replica,
-                              const int64_t paxos_replica_num)
+                              const int64_t paxos_replica_num,
+                              const common::GlobalLearnerList &learner_list)
   {
     UNUSEDx(member_list, arb_replica, paxos_replica_num);
+    UNUSED(learner_list);
+    return OB_SUCCESS;
+  }
+  int get_end_scn(share::SCN &scn) const
+  {
+    UNUSED(scn);
     return OB_SUCCESS;
   }
   int get_end_scn(share::SCN &scn) const
@@ -165,6 +174,13 @@ public:
   {
     UNUSED(member_list);
     UNUSED(paxos_replica_num);
+    return OB_SUCCESS;
+  }
+  int get_paxos_member_list_and_learner_list(common::ObMemberList &member_list,
+                                             int64_t &paxos_replica_num,
+                                             common::GlobalLearnerList &learner_list) const
+  {
+    UNUSEDx(member_list, paxos_replica_num, learner_list);
     return OB_SUCCESS;
   }
   int get_max_lsn(palf::LSN &lsn) const
@@ -210,6 +226,12 @@ public:
   int locate_by_lsn_coarsely(const palf::LSN &lsn, int64_t &result_ts_ns)
   {
     result_ts_ns = result_ts_ns_;
+    return OB_SUCCESS;
+  }
+
+  int get_begin_lsn(LSN &lsn) const
+  {
+    UNUSED(lsn);
     return OB_SUCCESS;
   }
 
@@ -261,6 +283,10 @@ public:
     UNUSEDx(member_list, curr_replica_num, new_replica_num, timeout_us);
     return OB_SUCCESS;
   }
+  int force_set_as_single_replica()
+  {
+    return OB_SUCCESS;
+  }
   int add_member(const common::ObMember &member,
                  const int64_t paxos_replica_num,
                  const int64_t timeout_ns)
@@ -306,45 +332,51 @@ public:
     return ret;
   }
 
-  int switch_learner_to_acceptor(const common::ObMember &learner,
-                                              const int64_t timeout_us)
+  int replace_learner(const common::ObMember &added_learner,
+                      const common::ObMember &removed_learner,
+                      const int64_t timeout_us)
   {
     int ret = OB_SUCCESS;
-    UNUSED(learner);
-    UNUSED(timeout_us);
+    UNUSEDx(added_learner, removed_learner, timeout_us);
+    return ret;
+  }
+
+  int switch_learner_to_acceptor(const common::ObMember &learner,
+                                 const int64_t new_replica_num,
+                                 const int64_t timeout_us)
+  {
+    int ret = OB_SUCCESS;
+    UNUSEDx(learner, new_replica_num, timeout_us);
     return ret;
   }
   int switch_acceptor_to_learner(const common::ObMember &member,
-                                              const int64_t timeout_us)
+                                 const int64_t new_replica_num,
+                                 const int64_t timeout_us)
   {
     int ret = OB_SUCCESS;
-    UNUSED(member);
-    UNUSED(timeout_us);
+    UNUSEDx(member, new_replica_num, timeout_us);
     return ret;
   }
-  int add_arb_member(const common::ObMember &added_member, const int64_t paxos_replica_num, const int64_t timeout_us)
+  int add_arbitration_member(const common::ObMember &added_member, const int64_t timeout_us)
   {
-    UNUSEDx(added_member, paxos_replica_num, timeout_us);
+    UNUSEDx(added_member, timeout_us);
     return OB_SUCCESS;
   }
-  int remove_arb_member(const common::ObMember &removed_member, const int64_t paxos_replica_num, const int64_t timeout_us)
+  int remove_arbitration_member(const common::ObMember &removed_member, const int64_t timeout_us)
   {
-    UNUSEDx(removed_member, paxos_replica_num, timeout_us);
+    UNUSEDx(removed_member, timeout_us);
     return OB_SUCCESS;
   }
-  int replace_arb_member(const common::ObMember &added_member, const common::ObMember &removed_member, const int64_t timeout_us)
+  int degrade_acceptor_to_learner(const palf::LogMemberAckInfoList &degrade_servers,
+                                  const int64_t timeout_us)
   {
-    UNUSEDx(added_member, removed_member, timeout_us);
+    UNUSEDx(degrade_servers, timeout_us);
     return OB_SUCCESS;
   }
-  int degrade_acceptor_to_learner(const common::ObMemberList &member_list, const int64_t timeout_us)
+  int upgrade_learner_to_acceptor(const palf::LogMemberAckInfoList &upgrade_servers,
+                                  const int64_t timeout_us)
   {
-    UNUSEDx(member_list, timeout_us);
-    return OB_SUCCESS;
-  }
-  int upgrade_learner_to_acceptor(const common::ObMemberList &learner_list, const int64_t timeout_us)
-  {
-    UNUSEDx(learner_list, timeout_us);
+    UNUSEDx(upgrade_servers, timeout_us);
     return OB_SUCCESS;
   }
   int is_valid_member(const common::ObAddr &addr, bool &is_valid) const
@@ -405,7 +437,16 @@ public:
     return OB_SUCCESS;
   }
   int enable_vote() { return OB_SUCCESS; }
-  int disable_vote() { return OB_SUCCESS; }
+  int disable_vote(const bool need_check_log_missing)
+  {
+    UNUSED(need_check_log_missing);
+    return OB_SUCCESS;
+  }
+  int get_election_leader(common::ObAddr &addr) const
+  {
+    UNUSED(addr);
+    return OB_SUCCESS;
+  }
   int register_rebuild_cb(palf::PalfRebuildCb *rebuild_cb)
   {
     UNUSED(rebuild_cb);

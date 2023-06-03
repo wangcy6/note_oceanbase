@@ -31,16 +31,17 @@ public:
   ~ObLogSubPlanScan() {};
   int generate_access_exprs();
   virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
+  virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
   virtual int allocate_expr_post(ObAllocExprContext &ctx) override;
   void set_subquery_id(uint64_t subquery_id) { subquery_id_ = subquery_id; }
   inline const uint64_t &get_subquery_id() const { return subquery_id_; }
   inline common::ObString &get_subquery_name() { return subquery_name_; }
   inline const common::ObIArray<ObRawExpr *> &get_access_exprs() const { return access_exprs_; }
   inline common::ObIArray<ObRawExpr *> &get_access_exprs() { return access_exprs_; }
-  virtual int print_my_plan_annotation(char *buf, int64_t &buf_len, int64_t &pos, ExplainType type);
-  virtual int generate_link_sql_post(GenLinkStmtPostContext &link_ctx) override;
-  virtual int re_est_cost(EstimateCostInfo &param, double &card, double &cost) override;
+  virtual int do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost) override;
   virtual int check_output_dependance(ObIArray<ObRawExpr *> &child_output, PPDeps &deps) override;
+  virtual int get_plan_item_info(PlanText &plan_text,
+                                ObSqlPlanItem &plan_item) override;
 private:
   uint64_t subquery_id_;
   common::ObString subquery_name_;

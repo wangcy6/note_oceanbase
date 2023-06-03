@@ -41,7 +41,7 @@ class ObExprTimeBase : public ObFuncExprOperator
 {
 public:
   explicit ObExprTimeBase(common::ObIAllocator &alloc, int32_t date_type, ObExprOperatorType type,
-                          const char *name);
+                          const char *name, ObValidForGeneratedColFlag valid_for_generated_col);
   virtual ~ObExprTimeBase();
   virtual int calc_result_type1(ObExprResType &type,
                                 ObExprResType &type1,
@@ -51,6 +51,7 @@ public:
                       ObExpr &rt_expr) const override;
   static int calc(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum,
                   int32_t type, bool with_date, bool is_dayofmonth = false);
+  virtual int is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const;
 private :
   int32_t dt_type_;
   //disallow copy
@@ -116,8 +117,10 @@ inline int ObExprSecond::calc_result_type1(ObExprResType &type,
   type.set_precision(4);
   type.set_scale(0);
   common::ObObjTypeClass tc1 = ob_obj_type_class(type1.get_type());
-  if ((common::ObEnumSetTC == tc1) || (common::ObFloatTC == tc1) || (common::ObDoubleTC == tc1)) {
+  if ((common::ObEnumSetTC == tc1)) {
     type1.set_calc_type_default_varchar();
+  } else if ((common::ObFloatTC == tc1) || (common::ObDoubleTC == tc1)) {
+    type1.set_calc_type(common::ObNumberType);
   }
   return common::OB_SUCCESS;
 }
@@ -144,8 +147,10 @@ inline int ObExprMicrosecond::calc_result_type1(ObExprResType &type,
   type.set_precision(4);
   type.set_scale(0);
   common::ObObjTypeClass tc1 = ob_obj_type_class(type1.get_type());
-  if ((common::ObEnumSetTC == tc1) || (common::ObFloatTC == tc1) || (common::ObDoubleTC == tc1)) {
+  if ((common::ObEnumSetTC == tc1)) {
     type1.set_calc_type_default_varchar();
+  } else if ((common::ObFloatTC == tc1) || (common::ObDoubleTC == tc1)) {
+    type1.set_calc_type(common::ObNumberType);
   }
   return common::OB_SUCCESS;
 }

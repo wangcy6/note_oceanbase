@@ -14,6 +14,7 @@
 #define OCEANBASE_SHARE_OB_LS_I_LIFE_MANAGER_H_
 
 #include "share/ob_share_util.h"
+#include "share/ob_tenant_switchover_status.h"//ObTenantSwitchoverStatus
 #include "common/ob_timeout_ctx.h"
 #include "share/config/ob_server_config.h"
 #include "lib/mysqlclient/ob_mysql_proxy.h"
@@ -36,6 +37,15 @@ namespace share
 {
 class ObLSID;
 struct ObLSStatusInfo;
+<<<<<<< HEAD
+=======
+/**
+ * @description:
+ *    In order to let switchover switch the accessmode of all LS correctly,
+ *    when creating, deleting, and updating LS status,
+ *    it needs to be mutually exclusive with switchover status of __all_tenant_info
+ */
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 enum ObLSStatus
 {
@@ -67,16 +77,22 @@ public:
   virtual int create_new_ls(const ObLSStatusInfo &ls_info,
                             const SCN &create_scn,
                             const common::ObString &zone_priority,
+                            const share::ObTenantSwitchoverStatus &working_sw_status,
                             ObMySQLTransaction &trans) = 0;
   //drop ls
   virtual int drop_ls(const uint64_t &tenant_id,
                       const share::ObLSID &ls_id,
+                      const ObTenantSwitchoverStatus &working_sw_status,
                       ObMySQLTransaction &trans) = 0;
   //set ls to offline
   virtual int set_ls_offline(const uint64_t &tenant_id,
                       const share::ObLSID &ls_id,
                       const share::ObLSStatus &ls_status,
                       const SCN &drop_scn,
+<<<<<<< HEAD
+=======
+                      const ObTenantSwitchoverStatus &working_sw_status,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                       ObMySQLTransaction &trans) = 0;
   //update ls primary zone
   virtual int update_ls_primary_zone(
@@ -93,17 +109,7 @@ public:
    * */
   static uint64_t get_exec_tenant_id(const uint64_t tenant_id)
   {
-    uint64_t ret_tenant_id = OB_INVALID_TENANT_ID;
-    if (is_sys_tenant(tenant_id)) {
-      ret_tenant_id = tenant_id;
-    } else if (is_meta_tenant(tenant_id)) {
-      // ls of meta tenant in sys tenant
-      ret_tenant_id = OB_SYS_TENANT_ID;
-    } else {
-      // all ls of user tenant in meta tenant
-      ret_tenant_id = gen_meta_tenant_id(tenant_id);
-    }
-    return ret_tenant_id;
+    return get_private_table_exec_tenant_id(tenant_id);
   }
 
 private:

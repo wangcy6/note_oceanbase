@@ -111,8 +111,8 @@ public:
     } else if (OB_FAIL(palf_env_->create(1, handle_))) {
       PALF_LOG(ERROR, "palf_env_ create failed", K(ret));
     }
-
-    EXPECT_EQ(OB_SUCCESS, handle_.set_initial_member_list(member_list, 1));
+    GlobalLearnerList learner_list;
+    EXPECT_EQ(OB_SUCCESS, handle_.set_initial_member_list(member_list, 1, learner_list));
 
     while (true) {
       ObRole role;
@@ -233,5 +233,6 @@ int main(int argc, char **argv)
 
   PALF_LOG(INFO, "palf bench begin");
   ::testing::InitGoogleTest(&argc, argv);
+  oceanbase::ObClusterVersion::get_instance().update_data_version(DATA_CURRENT_VERSION);
   return RUN_ALL_TESTS();
 }

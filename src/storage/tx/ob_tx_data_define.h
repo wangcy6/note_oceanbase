@@ -15,10 +15,13 @@
 
 #include "lib/allocator/ob_slice_alloc.h"
 #include "share/scn.h"
+<<<<<<< HEAD
+=======
+#include "lib/objectpool/ob_server_object_pool.h"
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 #include "storage/tx/ob_committer_define.h"
 #include "storage/tx/ob_trans_define.h"
-#include "storage/ob_i_table.h"
-
+#include "storage/tx_table/ob_tx_data_hash_map.h"
 
 namespace oceanbase
 {
@@ -31,7 +34,6 @@ class ObTxTable;
 class ObTxDataTable;
 class ObTxDataMemtable;
 class ObTxDataMemtableMgr;
-class TxDataHashMapAllocHandle;
 
 // The memory structures associated with tx data are shown below. They are designed for several
 // reasons:
@@ -46,23 +48,28 @@ class TxDataHashMapAllocHandle;
 // 2. Tx data
 // 3. The linked list pointer for sorting, which points to another tx data
 //
-//
-//                                    A Piece of Memory Slice
-//  ------------------------------> +-------------------------+             +----------------+
-//                                  |                         |             |                |
-//       TX_DATA_HASH_NODE_SIZE     |      TxDataHashNode     |             |                |
-//                                  |                         |             |                |
-//  ------------------------------> +-------------------------+             +----------------+
-//                                  |                         |             |                |
-//                                  |                         |             |                |
-//           TX_DATA_SIZE           |         ObTxData        |             |                |
-//                                  |                         |             |                |
-//                                  |                         |             |                |
-//  ------------------------------> +-------------------------+      +----->+----------------|
+///                                    A Piece of Memory Slice
+//                                            ObTxData
+//  ------------------------------> +-------------------------+      +----->+----------------+
 //                                  |                         |      |      |                |
-//    TX_DATA_SORT_LIST_NODE_SIZE   |    TxDataSortListNode   |      |      |                |
-//                                  |         (*next)         |------+      |                |
-//  ------------------------------> +-------------------------+             +----------------+
+//                                  |                         |      |      |                |
+//                                  |      ObTxCommitData     |      |      |                |
+//                                  |                         |      |      |                |
+//                                  |                         |      |      |                |
+//                                  +-------------------------+      |      +----------------+
+//                                  |                         |      |      |                |
+//                                  |       ObTxDataLink      |      |      |                |
+//        TX_DATA_SLICE_SIZE        |     (next_hash_node_)   |------+      |                |
+//                                  |  (next_sort_list_node_) |             |                |
+//                                  |                         |             |                |
+//                                  +-------------------------+             +----------------+
+//                                  |                         |             |                |
+//                                  |     ObUndoStatusList    |             |                |
+//                                  |   (next_undo_status_)   |             |                |
+//                                  |        (node_cnt_)      |             |                |
+//                                  |                         |             |                |
+//  ------------------------------> +-------------------------+             +----------------+/
+//
 //
 // The second kind of slice is an ObUndoStatusNode, which is allocated when the transaction has some
 // undo actions. It is divided into three areas too:
@@ -92,41 +99,13 @@ class TxDataHashMapAllocHandle;
 //  +-------------------------+              +----------------+
 //
 //
-// The third kind of slice is almost identical to the first. It used in tx data sstable cache. The
-// lastest_used_time_stamp is used to clean the tx data sstable cache periodically.
-//
-//                                    A Piece of Memory Slice
-//  ------------------------------> +-------------------------+
-//                                  |                         |
-//       TX_DATA_HASH_NODE_SIZE     |      TxDataHashNode     |
-//                                  |                         |
-//  ------------------------------> +-------------------------+
-//                                  |                         |
-//                                  |                         |
-//           TX_DATA_SIZE           |         ObTxData        |
-//                                  |                         |
-//                                  |                         |
-//  ------------------------------> +-------------------------+
-//                                  |                         |
-//    TX_DATA_SORT_LIST_NODE_SIZE   |  latest_used_time_stamp |
-//                                  |                         |
-//  ------------------------------> +-------------------------+
-//
 
-static const int TX_DATA_HASH_NODE_SIZE = 56;
-static const int TX_DATA_SIZE = 72;
-static const int TX_DATA_SORT_LIST_NODE_SIZE = 8;
-static const int TX_DATA_SLICE_SIZE = 136;
-static const int TX_DATA_UNDO_ACT_MAX_NUM_PER_NODE = (TX_DATA_SLICE_SIZE / 16) - 1;
-static const int TX_DATA_OFFSET_BETWEEN_DATA_AND_SORT_NODE
-  = TX_DATA_SLICE_SIZE - TX_DATA_HASH_NODE_SIZE - TX_DATA_SORT_LIST_NODE_SIZE;
-// Reserve 5KB to store the fields in tx data except undo_status
-static const int OB_MAX_TX_SERIALIZE_SIZE = OB_MAX_USER_ROW_LENGTH - 5120;
+static const int TX_DATA_SLICE_SIZE = 128;
+static const int UNDO_ACTION_SZIE = 16;
+static const int TX_DATA_UNDO_ACT_MAX_NUM_PER_NODE = (TX_DATA_SLICE_SIZE / UNDO_ACTION_SZIE) - 1;
 static const int MAX_TX_DATA_MEMTABLE_CNT = 2;
 
-using TxDataHashNode = common::LinkHashNode<transaction::ObTransID>;
-using TxDataHashValue = common::LinkHashValue<transaction::ObTransID>;
-using TxDataMap = common::ObLinkHashMap<transaction::ObTransID, ObTxData, TxDataHashMapAllocHandle>;
+using TxDataMap = ObTxDataHashMap;
 
 // DONT : Modify this definition
 struct ObUndoStatusNode
@@ -136,13 +115,22 @@ struct ObUndoStatusNode
   transaction::ObUndoAction undo_actions_[TX_DATA_UNDO_ACT_MAX_NUM_PER_NODE];
   DECLARE_TO_STRING;
   ObUndoStatusNode() : size_(0), next_(nullptr) {}
+
+  const ObUndoStatusNode &assign_value(const ObUndoStatusNode &rhs)
+  {
+    size_ = rhs.size_;
+    for (int i = 0; i < size_; i++) {
+      undo_actions_[i] = rhs.undo_actions_[i];
+    }
+    return *this;
+  }
 };
 
-struct ObTxDataSortListNode
+struct ObTxDataLinkNode
 {
-  struct ObTxDataSortListNode* next_;
+  ObTxData* next_;
 
-  ObTxDataSortListNode() : next_(nullptr) {}
+  ObTxDataLinkNode() : next_(nullptr) {}
   void reset() { next_ = nullptr; }
 
   TO_STRING_KV(KP_(next));
@@ -172,7 +160,8 @@ public:
   int deserialize(const char *buf, const int64_t data_len, int64_t &pos, ObSliceAlloc &slice_allocator);
   int64_t get_serialize_size() const;
 
-  bool is_contain(const int64_t seq_no) const;
+  bool is_contain(const int64_t seq_no, int32_t tx_data_state) const;
+  bool is_contain_(const int64_t seq_no) const;
 
   void reset() 
   { 
@@ -212,7 +201,10 @@ public:
   void reset();
   TO_STRING_KV(K_(tx_id),
                K_(state),
+<<<<<<< HEAD
                K_(is_in_tx_data_table),
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                K_(commit_version),
                K_(start_scn),
                K_(end_scn));
@@ -231,6 +223,7 @@ public:
 public:
   transaction::ObTransID tx_id_;
   int32_t state_;
+<<<<<<< HEAD
   bool is_in_tx_data_table_;
   share::SCN commit_version_;
   share::SCN start_scn_;
@@ -238,17 +231,68 @@ public:
 };
 
 class ObTxData : public ObTxCommitData, public TxDataHashValue
+=======
+  share::SCN commit_version_;
+  share::SCN start_scn_;
+  share::SCN end_scn_;
+};
+
+
+class ObTxDataLink
 {
-  friend TxDataHashMapAllocHandle;
+public:
+  ObTxDataLink() : sort_list_node_(), hash_node_() {}
+  // used for mini merge
+  ObTxDataLinkNode sort_list_node_;
+  // used for hash conflict
+  ObTxDataLinkNode hash_node_;
+};
+
+// DONT : Modify this definition
+class ObTxData : public ObTxCommitData, public ObTxDataLink
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
+{
 private:
   const static int64_t UNIS_VERSION = 1;
 public:
-  ObTxData() { reset(); }
+  ObTxData() : ObTxCommitData(), ObTxDataLink(), slice_allocator_(nullptr), ref_cnt_(0), undo_status_list_(), flag_(0) {}
   ObTxData(const ObTxData &rhs);
   ObTxData &operator=(const ObTxData &rhs);
   ObTxData &operator=(const ObTxCommitData &rhs);
+  const ObTxData &assign_without_undo(const ObTxData &rhs);
+
   ~ObTxData() {}
   void reset();
+  OB_INLINE bool contain(const transaction::ObTransID &tx_id) { return tx_id_ == tx_id; }
+
+  int64_t inc_ref()
+  {
+    int64_t ref_cnt = ATOMIC_AAF(&ref_cnt_, 1);
+    return ref_cnt;
+  }
+
+  void dec_ref()
+  {
+#ifdef UNITTEST
+  return;
+#endif
+    if (nullptr == slice_allocator_) {
+      STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid slice allocator", KPC(this));
+      ob_abort();
+    } else if (0 == ATOMIC_SAF(&ref_cnt_, 1)) {
+      if (OB_UNLIKELY(nullptr != undo_status_list_.head_)) {
+        ObUndoStatusNode *node_ptr = undo_status_list_.head_;
+        ObUndoStatusNode *node_to_free = nullptr;
+        while (nullptr != node_ptr) {
+          node_to_free = node_ptr;
+          node_ptr = node_ptr->next_;
+          slice_allocator_->free(node_to_free);
+        }
+      }
+      slice_allocator_->free(this);
+    }
+  }
+
   /**
    * @brief Add a undo action with dynamically memory allocation.
    * See more details in alloc_undo_status_node() function of class ObTxDataTable
@@ -257,7 +301,9 @@ public:
    * @param[in & out] undo_action, the undo action which is waiting to be added. If this undo action contains exsiting undo actions, the existing undo actions will be deleted and this undo action will be modified to contain all the deleted undo actions.
    * @param[in] undo_node, the undo status node can be used to extend undo status list if required, otherwise it will be released
    */
-  int add_undo_action(ObTxTable *tx_table, transaction::ObUndoAction &undo_action, ObUndoStatusNode *undo_node = nullptr);
+  OB_NOINLINE int add_undo_action(ObTxTable *tx_table,
+                                  transaction::ObUndoAction &undo_action,
+                                  ObUndoStatusNode *undo_node = nullptr);
   /**
    * @brief Check if this tx data is valid
    */
@@ -265,10 +311,10 @@ public:
   int serialize(char *buf, const int64_t buf_len, int64_t &pos) const;
   int deserialize(const char *buf, const int64_t data_len, int64_t &pos, ObSliceAlloc &slice_allocator);
   int64_t get_serialize_size() const;
+  int64_t size() const;
 
   void dump_2_text(FILE *fd) const;
   static void print_to_stderr(const ObTxData &tx_data);
-  
 
   DECLARE_TO_STRING;
 
@@ -278,167 +324,148 @@ private:
   int64_t get_serialize_size_() const;
   bool equals_(ObTxData &rhs);
   int merge_undo_actions_(ObTxDataTable *tx_data_table,
-                           ObUndoStatusNode *&node,
-                           transaction::ObUndoAction &undo_action);
+                          ObUndoStatusNode *&node,
+                          transaction::ObUndoAction &undo_action);
 
 public:
-  /**
-   * @brief The latest used time stamp use the same memeory as the sort list node. This function
-   * only used when reading tx data in sstable cache because we need update the time stamp to decide
-   * which tx data should be deleted.
-   *
-   * @param tx_data the pointer of tx data
-   * @return int64_t* the pointer of latest used time stamp
-   */
-  OB_INLINE static int64_t *get_latest_used_ts_by_tx_data(ObTxData *tx_data) {
-    if (nullptr == tx_data) {
-      return nullptr;
-    }
-    char *sort_list_node_char_ptr
-      = reinterpret_cast<char *>(tx_data) + TX_DATA_OFFSET_BETWEEN_DATA_AND_SORT_NODE;
-    int64_t *latest_use_ts
-      = reinterpret_cast<int64_t*>(sort_list_node_char_ptr);
-    return latest_use_ts;
-  }
 
-  OB_INLINE static ObTxDataSortListNode *get_sort_list_node_by_tx_data(ObTxData *tx_data)
-  {
-    if (nullptr == tx_data) {
-      return nullptr;
-    }
-    char *sort_list_node_char_ptr
-      = reinterpret_cast<char *>(tx_data) + TX_DATA_OFFSET_BETWEEN_DATA_AND_SORT_NODE;
-    ObTxDataSortListNode *sort_list_node
-      = reinterpret_cast<ObTxDataSortListNode *>(sort_list_node_char_ptr);
-    return sort_list_node;
-  }
-
-  OB_INLINE static TxDataHashNode *get_hash_node_by_tx_data(ObTxData *tx_data)
-  {
-    if (nullptr == tx_data) {
-      return nullptr;
-    }
-    char *hash_node_char_ptr = reinterpret_cast<char *>(tx_data) - TX_DATA_HASH_NODE_SIZE;
-    TxDataHashNode *hash_node = reinterpret_cast<TxDataHashNode *>(hash_node_char_ptr);
-    return hash_node;
-  }
-
-  OB_INLINE static ObTxData *get_tx_data_by_hash_node(TxDataHashNode *hash_node)
-  {
-    if (nullptr == hash_node) {
-      return nullptr;
-    }
-    char *tx_data_char_ptr = reinterpret_cast<char *>(hash_node) + TX_DATA_HASH_NODE_SIZE;
-    ObTxData *tx_data = reinterpret_cast<ObTxData *>(tx_data_char_ptr);
-    return tx_data;
-  }
-
-  OB_INLINE static ObTxData *get_tx_data_by_sort_list_node(ObTxDataSortListNode *sort_list_node)
+  OB_INLINE static ObTxData *get_tx_data_by_sort_list_node(ObTxDataLinkNode *sort_list_node)
   {
     if (nullptr == sort_list_node) {
       return nullptr;
     }
-    char *tx_data_char_ptr
-      = reinterpret_cast<char *>(sort_list_node) - TX_DATA_OFFSET_BETWEEN_DATA_AND_SORT_NODE;
-    ObTxData *tx_data = reinterpret_cast<ObTxData *>(tx_data_char_ptr);
+    ObTxData *tx_data = static_cast<ObTxData*>(reinterpret_cast<ObTxDataLink*>(sort_list_node));
     return tx_data;
   }
 
 public:
+  ObSliceAlloc *slice_allocator_;
+  int64_t ref_cnt_;
   ObUndoStatusList undo_status_list_;
-};
-
-
-class TxDataHashMapAllocHandle
-{
-  using SliceAllocator = ObSliceAlloc;
-
-public:
-  explicit TxDataHashMapAllocHandle(SliceAllocator *slice_allocator)
-    : slice_allocator_(slice_allocator)
-  {}
-
-  TxDataHashMapAllocHandle(const TxDataHashMapAllocHandle &rhs)
-  {
-    slice_allocator_ = rhs.slice_allocator_;
-  }
-
-  // do nothing
-  ObTxData *alloc_value() { return nullptr; }
-  // do nothing
-  void free_value(ObTxData *tx_data) { UNUSED(tx_data); }
-
-  // construct TxDataHashNode with the memory allocated by slice allocator
-  TxDataHashNode *alloc_node(ObTxData *tx_data);
-
-  // the memory allocated by slice allocator in tx data table is freed in link hash map
-  void free_node(TxDataHashNode *node);
-  void set_slice_allocator(SliceAllocator *slice_allocator) { slice_allocator_ = slice_allocator; }
-
-private:
-  void free_undo_list_(ObUndoStatusNode *node_ptr);
-
-private:
-  SliceAllocator *slice_allocator_;
+  int64_t flag_;
 };
 
 class ObTxDataGuard
 {
 public:
-  ObTxDataGuard() : is_inited_(false), tx_data_(nullptr), tx_data_map_(nullptr) {}
-  virtual ~ObTxDataGuard() { reset(); }
+  ObTxDataGuard() : tx_data_(nullptr) {}
+  ~ObTxDataGuard() { reset(); }
+  ObTxDataGuard &operator=(ObTxDataGuard &rhs) = delete;
+  ObTxDataGuard(const ObTxDataGuard &other) = delete;
 
-  int init(ObTxData *tx_data, TxDataMap *tx_data_map)
+  int init(ObTxData *tx_data)
   {
     int ret = OB_SUCCESS;
-    if (IS_INIT) {
-      reset();
-    }
-    if (OB_ISNULL(tx_data) || OB_ISNULL(tx_data_map)) {
+    reset();
+    if (OB_ISNULL(tx_data)) {
       ret = OB_INVALID_ARGUMENT;
       STORAGE_LOG(WARN, "init ObTxDataGuard with invalid arguments", KR(ret));
+    } else if (tx_data->inc_ref() <= 0) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(ERROR, "unexpected ref cnt on tx data", KR(ret), KP(tx_data), KPC(tx_data));
+      ob_abort();
     } else {
       tx_data_ = tx_data;
-      tx_data_map_ = tx_data_map;
-      is_inited_ = true;
     }
-
     return ret;
   }
 
   void reset()
   {
-    tx_data_map_->revert(tx_data_);
-    tx_data_ = nullptr;
-    tx_data_map_ = nullptr;
-    is_inited_ = false;
+    if (OB_NOT_NULL(tx_data_)) {
+      tx_data_->dec_ref();
+      tx_data_ = nullptr;
+    }
   }
 
-  ObTxData &tx_data() { return *tx_data_; }
+  ObTxData *tx_data() { return tx_data_; }
+  const ObTxData *tx_data() const { return tx_data_; }
+
+  TO_STRING_KV(KPC_(tx_data));
 
 private:
-  bool is_inited_;
   ObTxData *tx_data_;
-  TxDataMap *tx_data_map_;
 };
 
-class ObTxDataMemtableWriteGuard
+class ObTxDataMiniCache
 {
+private:
+  static const int32_t TX_DATA_MINI_LRU_ITEM_CNT = 1 << 2; /* 4 */
+  static const int32_t MINI_LRU_CONCURRENCY_MOD_MASK = TX_DATA_MINI_LRU_ITEM_CNT - 1;
+
+  struct CacheItem {
+    ObTxCommitData tx_data_;
+    bool is_valid_;
+    common::SpinRWLock lock_;
+
+    CacheItem() : tx_data_(), is_valid_(false) {}
+
+    void reset()
+    {
+      tx_data_.reset();
+      is_valid_ = false;
+    }
+
+    TO_STRING_KV(K_(tx_data), K_(is_valid));
+  };
+
 public:
-  ObTxDataMemtableWriteGuard() : size_(0)
+  int get(const transaction::ObTransID tx_id, ObTxCommitData &tx_commit_data)
   {
+    int ret = OB_SUCCESS;
+    int64_t thread_idx = get_itid() & MINI_LRU_CONCURRENCY_MOD_MASK;
+    SpinRLockGuard guard(cache_items_[thread_idx].lock_);
+    if (cache_items_[thread_idx].is_valid_) {
+      if (tx_id == cache_items_[thread_idx].tx_data_.tx_id_) {
+        tx_commit_data = cache_items_[thread_idx].tx_data_;
+      } else {
+        ret = OB_TRANS_CTX_NOT_EXIST;
+      }
+    } else {
+      ret = OB_TRANS_CTX_NOT_EXIST;
+    }
+    return ret;
   }
-  ~ObTxDataMemtableWriteGuard() { reset(); }
 
-  void reset();
+  void set(const ObTxCommitData &tx_commit_data)
+  {
+    int64_t thread_idx = get_itid() & MINI_LRU_CONCURRENCY_MOD_MASK;
+    SpinWLockGuard guard(cache_items_[thread_idx].lock_);
+    if (cache_items_[thread_idx].tx_data_.tx_id_ != tx_commit_data.tx_id_) {
+      cache_items_[thread_idx].tx_data_ = tx_commit_data;
+      cache_items_[thread_idx].is_valid_ = true;
+    }
+  }
 
-  TO_STRING_KV(K(size_), K(handles_[0]), K(handles_[1]));
+  void reset() {
+    for (int i = 0; i < TX_DATA_MINI_LRU_ITEM_CNT; i++) {
+      cache_items_[i].reset();
+    }
+  }
 
-public:
-  int64_t size_;
-  ObTableHandleV2 handles_[MAX_TX_DATA_MEMTABLE_CNT];
+  int64_t to_string(char *buf, const int64_t buf_len) const
+  {
+    int64_t pos = 0;
+    for (int i = 0; i < TX_DATA_MINI_LRU_ITEM_CNT; i++) {
+      J_KV(K(cache_items_[i]));
+    }
+    return pos;
+  }
+
+private:
+  CacheItem cache_items_[TX_DATA_MINI_LRU_ITEM_CNT];
 };
 
+struct ObReadTxDataArg{
+  const transaction::ObTransID tx_id_;
+  const int64_t read_epoch_;
+  ObTxDataMiniCache &tx_data_mini_cache_;
+
+  ObReadTxDataArg(const transaction::ObTransID tx_id, const int64_t read_epoch, ObTxDataMiniCache &mini_cache)
+      : tx_id_(tx_id), read_epoch_(read_epoch), tx_data_mini_cache_(mini_cache) {}
+
+  TO_STRING_KV(K_(tx_id), K_(read_epoch), K_(tx_data_mini_cache));
+};
 
 }  // namespace storage
 

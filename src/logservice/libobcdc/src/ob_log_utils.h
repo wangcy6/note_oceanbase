@@ -25,7 +25,6 @@
 #include "common/object/ob_object.h"          // ObObj
 #include "share/schema/ob_column_schema.h"    // ObColumnSchemaV2
 #include "storage/blocksstable/ob_datum_row.h"// ObRowDml
-#include "ob_log_schema_cache_info.h"         // ColumnSchemaInfo
 #include "share/schema/ob_schema_service.h"   // ObSchemaService
 #include "share/inner_table/ob_inner_table_schema.h"   // OB_ALL_SEQUENCE_VALUE_TID
 #include "ob_cdc_define.h"
@@ -237,6 +236,8 @@ const char *print_compat_mode(const lib::Worker::CompatMode &compat_mode);
 const char *get_ctype_string(int ctype);
 bool is_lob_type(const int ctype);
 bool is_json_type(const int ctype);
+bool is_geometry_type(const int ctype);
+bool is_xml_type(const int ctype);
 int64_t get_non_hidden_column_count(const oceanbase::share::schema::ObTableSchema &table_schema);
 
 double get_delay_sec(const int64_t tstamp);
@@ -290,6 +291,7 @@ private:
 };
 
 void column_cast(common::ObObj &obj, const share::schema::ObColumnSchemaV2 &column_schema);
+class ColumnSchemaInfo;
 void column_cast(common::ObObj &obj, const ColumnSchemaInfo &column_schema_info);
 
 /*
@@ -426,8 +428,12 @@ private:
 ///
 /// @retval OB_SUCCESS          split success
 /// @retval other_error_code    Fail
-int split(char *str, const char *delimiter,
-    const int64_t expect_res_cnt, const char **res, int64_t &res_cnt);
+int split(
+    char *str,
+    const char *delimiter,
+    const int64_t expect_res_cnt,
+    const char **res,
+    int64_t &res_cnt);
 
 int split_int64(const common::ObString &str, const char delimiter, common::ObIArray<int64_t> &ret_array);
 
@@ -560,7 +566,60 @@ struct CDCLSNComparator
 // NOT THREAD_SAFE
 int sort_and_unique_lsn_arr(ObLogLSNArray &lsn_arr);
 
+// sort arr and remove duplicate item in arr
+// 1. Item in array should impl copy-assign
+// 2. comparator should compare Item in array, and should obey rule of std::sort
+template<class ARRAY, class Comparator>
+int sort_and_unique_array(ARRAY &arr, Comparator &comparator)
+{
+  int ret = OB_SUCCESS;
+  ObArray<int64_t> duplicated_item_idx_arr;
+
+  if (arr.count() > 1) {
+    // sort lsn_arr
+    std::sort(arr.begin(), arr.end(), comparator);
+    auto prev = arr.at(0);
+    // get duplicate misslog lsn idx
+    for(int64_t idx = 1; OB_SUCC(ret) && idx < arr.count(); idx++) {
+      auto &cur = arr.at(idx);
+      if (prev == cur) {
+        if (OB_FAIL(duplicated_item_idx_arr.push_back(idx))) {
+          OBLOG_LOG(WARN, "push_back_duplicate_item_arr fail", KR(ret), K(cur), K(prev), K(idx));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        prev = cur;
+      }
+    }
+
+    // remove duplicate misslog lsn
+    for(int64_t idx = duplicated_item_idx_arr.count() - 1; OB_SUCC(ret) && idx >= 0; idx--) {
+      int64_t duplicate_item_idx = duplicated_item_idx_arr[idx];
+      if (OB_UNLIKELY(0 > duplicate_item_idx || duplicate_item_idx > arr.count())) {
+        ret = OB_INVALID_ARGUMENT;
+        OBLOG_LOG(WARN, "invalid duplicate_cur_lsn_idx", KR(ret), K(arr), K(duplicated_item_idx_arr), K(idx), K(duplicate_item_idx));
+      } else if (OB_FAIL(arr.remove(duplicate_item_idx))) {
+        OBLOG_LOG(WARN, "remove_duplicate_item failed", KR(ret), K(arr), K(duplicate_item_idx));
+      } else {
+      }
+    }
+    OBLOG_LOG(DEBUG, "sort_and_unique_array", KR(ret), K(duplicated_item_idx_arr), K(arr));
+  }
+
+  return ret;
+}
+
 typedef int32_t offset_t;
+
+// write specified buf to specified file.
+int write_to_file(const char *file_path, const char *buf, const int64_t buf_len);
+// read content from specified file to buffer
+// NOTE: buf should be allocated by invoker.
+// @retval OB_SIZE_OVERFLOW buf_len is not enough.
+// @retval OB_IO_ERROR      open or read file error.
+// @retval OB_INVALID_CONFIG file_path is not valid or buf is NULL of buf_len <= 0
+// @retval OB_EMPTY_RESULT  nothing exist in file.
+int read_from_file(const char *file_path, char *buf, const int64_t buf_len);
 
 #define RETRY_FUNC_ON_ERROR_WITH_USLEEP_MS(err_no, sleep_ms, stop_flag, var, func, args...) \
   do {\

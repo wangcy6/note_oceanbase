@@ -26,6 +26,7 @@
 #include "storage/blocksstable/ob_sstable.h"
 #include "storage/ddl/ob_tablet_ddl_kv_mgr.h"
 #include "storage/memtable/ob_memtable.h"
+#include "storage/memtable/ob_memtable_util.h"
 #include "storage/meta_mem/ob_meta_obj_struct.h"
 #include "storage/meta_mem/ob_meta_pointer_map.h"
 #include "storage/meta_mem/ob_meta_pointer.h"
@@ -93,6 +94,7 @@ private:
   static const int64_t MAX_TX_DATA_MEMTABLE_CNT_IN_OBJ_POOL = MAX_MEMSTORE_CNT * OB_MINI_MODE_MAX_LS_NUM_PER_TENANT_PER_SERVER;
   static const int64_t MAX_TX_CTX_MEMTABLE_CNT_IN_OBJ_POOL = OB_MINI_MODE_MAX_LS_NUM_PER_TENANT_PER_SERVER;
   static const int64_t MAX_LOCK_MEMTABLE_CNT_IN_OBJ_POOL = OB_MINI_MODE_MAX_LS_NUM_PER_TENANT_PER_SERVER;
+  static const int64_t MAX_DDL_KV_IN_OBJ_POOL = 5000;
 
   static int64_t get_default_tablet_pool_count()
   {
@@ -133,6 +135,9 @@ public:
   int acquire_sstable(ObTableHandleV2 &handle);
   int acquire_sstable(ObTableHandleV2 &handle, common::ObIAllocator &allocator);
 
+  // ddl kv interface
+  int acquire_ddl_kv(ObTableHandleV2 &handle);
+
   // memtable interfaces
   int acquire_memtable(ObTableHandleV2 &handle);
   int acquire_tx_data_memtable(ObTableHandleV2 &handle);
@@ -161,7 +166,8 @@ public:
       const WashTabletPriority &priority,
       const ObTabletMapKey &key,
       common::ObIAllocator &allocator,
-      ObTabletHandle &handle);
+      ObTabletHandle &handle,
+      const bool force_alloc_new = false);
   int get_tablet_addr(const ObTabletMapKey &key, ObMetaDiskAddr &addr);
   int has_tablet(const ObTabletMapKey &key, bool &is_exist);
   int del_tablet(const ObTabletMapKey &key);
@@ -186,7 +192,6 @@ public:
   int get_meta_mem_status(common::ObIArray<ObTenantMetaMemStatus> &info) const;
 
   int get_tablet_pointer_tx_data(const ObTabletMapKey &key, ObTabletTxMultiSourceDataUnit &tx_data);
-  int set_tablet_pointer_tx_data(const ObTabletMapKey &key, const ObTabletTxMultiSourceDataUnit &tx_data);
   int insert_pinned_tablet(const ObTabletMapKey &key);
   int erase_pinned_tablet(const ObTabletMapKey &key);
   int get_tablet_ddl_kv_mgr(const ObTabletMapKey &key, ObDDLKvMgrHandle &ddl_kv_mgr_handle);
@@ -198,9 +203,12 @@ public:
   {
     return &allocator_ == allocator;
   }
+  OB_INLINE int64_t get_total_tablet_cnt() const { return tablet_map_.count(); }
 
   TO_STRING_KV(K_(tenant_id), K_(is_inited));
 private:
+  int64_t cal_adaptive_bucket_num();
+
   typedef ObResourceValueStore<ObMetaPointer<ObTablet>> TabletValueStore;
 
   struct CandidateTabletInfo final
@@ -307,6 +315,11 @@ private:
       const ObITable *table = sstable_handle_.get_table();
       return common::murmurhash(&table, sizeof(table), 0);
     }
+    OB_INLINE int hash(uint64_t &hash_val) const
+    {
+      hash_val = hash();
+      return OB_SUCCESS;
+    }
     TO_STRING_KV(K_(ls_id), K_(table_key), K_(sstable_handle));
   public:
     share::ObLSID ls_id_;
@@ -326,12 +339,13 @@ private:
   static const int64_t MIN_MINOR_SSTABLE_GC_INTERVAL_US = 1 * 1000 * 1000L; // 1s
   static const int64_t REFRESH_CONFIG_INTERVAL_US = 10 * 1000 * 1000L; // 10s
   static const int64_t ONE_ROUND_RECYCLE_COUNT_THRESHOLD = 20000L;
+  static const int64_t BATCH_MEMTABLE_GC_THRESHOLD = 100L;
   static const int64_t DEFAULT_TABLET_WASH_HEAP_COUNT = 16;
   static const int64_t DEFAULT_MINOR_SSTABLE_SET_COUNT = 49999;
   static const int64_t SSTABLE_GC_MAX_TIME = 500; // 500us
   typedef common::ObBinaryHeap<CandidateTabletInfo, HeapCompare, DEFAULT_TABLET_WASH_HEAP_COUNT> Heap;
   typedef common::hash::ObHashSet<MinMinorSSTableInfo, common::hash::NoPthreadDefendMode> SSTableSet;
-  typedef common::hash::ObHashSet<ObTabletMapKey> PinnedTabletSet;
+  typedef common::hash::ObHashSet<ObTabletMapKey, hash::NoPthreadDefendMode> PinnedTabletSet;
 
   class GetWashTabletCandidate final
   {
@@ -401,11 +415,12 @@ private:
       bool &is_wash);
   int64_t calc_wash_tablet_cnt() const;
   void dump_tablet();
-  void dump_pinned_tablet() const;
+  void dump_pinned_tablet();
   void dump_ls(ObLSService &ls_service) const;
   void init_pool_arr();
   void release_memtable(memtable::ObMemtable *memtable);
   void release_sstable(blocksstable::ObSSTable *sstable);
+  void release_ddl_kv(ObDDLKV *ddl_kv);
   void release_tablet(ObTablet *tablet);
   void release_tablet_ddl_kv_mgr(ObTabletDDLKvMgr *ddl_kv_mgr);
   void release_tablet_memtable_mgr(ObTabletMemtableMgr *memtable_mgr);
@@ -419,6 +434,9 @@ private:
       const char *name,
       common::ObIArray<ObTenantMetaMemStatus> &info) const;
   int get_allocator_info(common::ObIArray<ObTenantMetaMemStatus> &info) const;
+  int exist_pinned_tablet(const ObTabletMapKey &key);
+  int push_memtable_into_gc_map_(memtable::ObMemtable *memtable);
+  void batch_gc_memtable_();
 
 private:
   int cmp_ret_;
@@ -429,7 +447,7 @@ private:
   ObBucketLock bucket_lock_;
   TenantMetaAllocator allocator_;
   ObMetaPointerMap<ObTabletMapKey, ObTablet> tablet_map_;
-  common::ObTimer timer_;
+  int tg_id_;
   TableGCTask table_gc_task_;
   MinMinorSSTableGCTask min_minor_sstable_gc_task_;
   RefreshConfigTask refresh_config_task_;
@@ -437,10 +455,14 @@ private:
   common::ObSpinLock gc_queue_lock_;
   SSTableSet last_min_minor_sstable_set_;
   common::SpinRWLock sstable_set_lock_;
+  ObBucketLock pin_set_lock_;
   PinnedTabletSet pinned_tablet_set_; // tablets which are in multi source data transaction procedure
+
+  common::hash::ObHashMap<share::ObLSID, memtable::ObMemtableSet*> gc_memtable_map_;
 
   ObTenantMetaObjPool<memtable::ObMemtable> memtable_pool_;
   ObTenantMetaObjPool<blocksstable::ObSSTable> sstable_pool_;
+  ObTenantMetaObjPool<ObDDLKV> ddl_kv_pool_;
   ObTenantMetaObjPool<ObTablet> tablet_pool_;
   ObTenantMetaObjPool<ObTabletDDLKvMgr> tablet_ddl_kv_mgr_pool_;
   ObTenantMetaObjPool<ObTabletMemtableMgr> tablet_memtable_mgr_pool_;

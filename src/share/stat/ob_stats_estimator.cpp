@@ -14,14 +14,16 @@
 #include "ob_stats_estimator.h"
 #include "share/stat/ob_dbms_stats_utils.h"
 #include "observer/ob_inner_sql_connection_pool.h"
+#include "sql/optimizer/ob_opt_selectivity.h"
 
 namespace oceanbase
 {
 namespace common
 {
 
-ObStatsEstimator::ObStatsEstimator(ObExecContext &ctx) :
+ObStatsEstimator::ObStatsEstimator(ObExecContext &ctx, ObIAllocator &allocator) :
   ctx_(ctx),
+  allocator_(allocator),
   db_name_(),
   from_table_(),
   partition_hint_(),
@@ -32,7 +34,8 @@ ObStatsEstimator::ObStatsEstimator(ObExecContext &ctx) :
   group_by_string_(),
   where_string_(),
   stat_items_(),
-  results_()
+  results_(),
+  sample_value_(100.0)
 {}
 
 int ObStatsEstimator::gen_select_filed()
@@ -112,6 +115,27 @@ int ObStatsEstimator::fill_sample_info(common::ObIAllocator &alloc,
         LOG_TRACE("succeed to add sample string", K(buf), K(real_len));
       }
     }
+  }
+  return ret;
+}
+
+int ObStatsEstimator::fill_sample_info(common::ObIAllocator &alloc,
+                                       const ObAnalyzeSampleInfo &sample_info)
+{
+  int ret = OB_SUCCESS;
+  if (!sample_info.is_sample_ || sample_info.sample_type_ == SampleType::RowSample) {
+  } else if (OB_UNLIKELY(sample_info.sample_value_ < 0.000001 || sample_info.sample_value_ > 100.0)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected error", K(ret), K(sample_info));
+  } else if (sample_info.sample_value_ == 100.0) {
+    //do nothing
+  } else if (OB_FAIL(fill_sample_info(alloc,
+                                      sample_info.sample_value_,
+                                      sample_info.is_block_sample_,
+                                      sample_hint_))) {
+    LOG_WARN("failed to fill sample info", K(ret));
+  } else {
+    sample_value_ = sample_info.sample_value_;
   }
   return ret;
 }
@@ -230,7 +254,7 @@ int ObStatsEstimator::fill_partition_info(ObIAllocator &allocator,
     const ObString &part_name = part_info.part_name_;
     const char *fmt_str = lib::is_oracle_mode() ? "PARTITION (\"%.*s\")" : "PARTITION (`%.*s`)";
     char *buf = NULL;
-    const int32_t len = strlen(fmt_str) + part_name.length();
+    const int64_t len = strlen(fmt_str) + part_name.length();
     int32_t real_len = -1;
     if (OB_ISNULL(buf = static_cast<char *>(allocator.alloc(len)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -268,7 +292,7 @@ int ObStatsEstimator::fill_group_by_info(ObIAllocator &allocator,
     LOG_WARN("get unexpected type", K(extra.type_), K(ret));
   }
   if (OB_SUCC(ret)) {
-    const int32_t len = strlen(fmt_str) +
+    const int64_t len = strlen(fmt_str) +
                         (param.is_index_stat_ ? param.data_table_name_.length() : param.tab_name_.length()) +
                         type_str.length();
     int32_t real_len = -1;
@@ -305,30 +329,38 @@ int ObStatsEstimator::do_estimate(uint64_t tenant_id,
   int ret = OB_SUCCESS;
   common::ObOracleSqlProxy oracle_proxy; // TODO, check the usage, is there any postprocess
   ObCommonSqlProxy *sql_proxy = ctx_.get_sql_proxy();
-  if (OB_ISNULL(sql_proxy) || OB_ISNULL(ctx_.get_my_session()) ||
-      OB_UNLIKELY(dst_opt_stats.empty() || raw_sql.empty())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected empty", K(ret), K(sql_proxy), K(dst_opt_stats.empty()),
-                                     K(ctx_.get_my_session()), K(raw_sql.empty()));
-  } else if (lib::is_oracle_mode()) {
-    if (OB_FAIL(oracle_proxy.init(ctx_.get_sql_proxy()->get_pool()))) {
-      LOG_WARN("failed to init oracle proxy", K(ret));
-    } else {
-      sql_proxy = &oracle_proxy;
+  ObArenaAllocator tmp_alloc("OptStatGather", OB_MALLOC_NORMAL_BLOCK_SIZE, tenant_id);
+  sql::ObSQLSessionInfo::StmtSavedValue *session_value = NULL;
+  void *ptr = NULL;
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  if (OB_ISNULL(ptr = tmp_alloc.alloc(sizeof(sql::ObSQLSessionInfo::StmtSavedValue)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("failed to alloc memory for saved session value", K(ret));
+  } else {
+    session_value = new(ptr)sql::ObSQLSessionInfo::StmtSavedValue();
+    if (OB_ISNULL(sql_proxy) || OB_ISNULL(session) ||
+        OB_UNLIKELY(dst_opt_stats.empty() || raw_sql.empty())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected empty", K(ret), K(sql_proxy), K(dst_opt_stats.empty()),
+                                       K(session), K(raw_sql.empty()));
+    } else if (OB_FAIL(session->save_session(*session_value))) {
+      LOG_WARN("failed to save session", K(ret));
+    } else if (lib::is_oracle_mode()) {
+      if (OB_FAIL(oracle_proxy.init(ctx_.get_sql_proxy()->get_pool()))) {
+        LOG_WARN("failed to init oracle proxy", K(ret));
+      } else {
+        sql_proxy = &oracle_proxy;
+      }
     }
   }
   if (OB_SUCC(ret)) {
     observer::ObInnerSQLConnectionPool *pool =
                             static_cast<observer::ObInnerSQLConnectionPool*>(sql_proxy->get_pool());
     sqlclient::ObISQLConnection *conn = NULL;
-    bool is_inner = ctx_.get_my_session()->is_inner();
-    ObSQLSessionInfo::SessionType session_type = ctx_.get_my_session()->get_session_type();
-    ctx_.get_my_session()->set_inner_session();
+    session->set_inner_session();
     SMART_VAR(ObMySQLProxy::MySQLResult, proxy_result) {
       sqlclient::ObMySQLResult *client_result = NULL;
-      if (lib::is_oracle_mode() && OB_FAIL(pool->acquire(ctx_.get_my_session(), conn, true))) {
-        LOG_WARN("failed to acquire inner connection", K(ret));
-      } else if (lib::is_mysql_mode() && OB_FAIL(pool->acquire(tenant_id, conn, sql_proxy))) {
+      if (OB_FAIL(pool->acquire(session, conn, lib::is_oracle_mode()))) {
         LOG_WARN("failed to acquire inner connection", K(ret));
       } else if (OB_ISNULL(conn)) {
         ret = OB_ERR_UNEXPECTED;
@@ -345,14 +377,14 @@ int ObStatsEstimator::do_estimate(uint64_t tenant_id,
             ObObj val;
             if (OB_FAIL(client_result->get_obj(i, tmp))) {
               LOG_WARN("failed to get object", K(ret));
-            } else if (OB_FAIL(ob_write_obj(ctx_.get_allocator(), tmp, val))) {
+            } else if (OB_FAIL(ob_write_obj(allocator_, tmp, val))) {
               LOG_WARN("failed to write object", K(ret));
             } else if (OB_FAIL(add_result(val))) {
               LOG_WARN("failed to add result", K(ret));
             }
           }
           if (OB_SUCC(ret)) {
-            if (OB_FAIL(decode())) {
+            if (OB_FAIL(decode(allocator_))) {
               LOG_WARN("failed to decode results", K(ret));
             } else if (copy_type == COPY_ALL_STAT &&
                        OB_FAIL(copy_opt_stat(src_opt_stat, dst_opt_stats))) {
@@ -377,18 +409,16 @@ int ObStatsEstimator::do_estimate(uint64_t tenant_id,
         ret = COVER_SUCC(tmp_ret);
       }
     }
-    //reset session type
-    if (is_inner) {
-      ctx_.get_my_session()->set_session_type(session_type);
-    } else {
-      ctx_.get_my_session()->set_user_session();
-      ctx_.get_my_session()->set_session_type(session_type);
+    int tmp_ret = OB_SUCCESS;
+    if (session_value != NULL && OB_SUCCESS != (tmp_ret = session->restore_session(*session_value))) {
+      LOG_WARN("failed to restore session", K(tmp_ret));
+      ret = COVER_SUCC(tmp_ret);
     }
   }
   return ret;
 }
 
-int ObStatsEstimator::decode()
+int ObStatsEstimator::decode(ObIAllocator &allocator)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(stat_items_.count() != results_.count())) {
@@ -396,7 +426,7 @@ int ObStatsEstimator::decode()
     LOG_WARN("size does not match", K(ret), K(stat_items_.count()), K(results_.count()));
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < stat_items_.count(); ++i) {
-    if (OB_FAIL(stat_items_.at(i)->decode(results_.at(i)))) {
+    if (OB_FAIL(stat_items_.at(i)->decode(results_.at(i), allocator))) {
       LOG_WARN("failed to decode statistic result", K(ret));
     }
   }
@@ -421,9 +451,14 @@ int ObStatsEstimator::copy_opt_stat(ObOptStat &src_opt_stat,
         LOG_WARN("get unexpected null", K(ret), K(dst_opt_stats.at(i).table_stat_));
       } else if (dst_opt_stats.at(i).table_stat_->get_partition_id() == partition_id) {
         find_it = true;
-        dst_opt_stats.at(i).table_stat_->set_row_count(tmp_tab_stat->get_row_count());
+        int64_t row_cnt = tmp_tab_stat->get_row_count();
+        if (sample_value_ >= 0.000001 && sample_value_ < 100.0) {
+          row_cnt = static_cast<int64_t>(row_cnt * 100 / sample_value_);
+        }
+        dst_opt_stats.at(i).table_stat_->set_row_count(row_cnt);
         dst_opt_stats.at(i).table_stat_->set_avg_row_size(tmp_tab_stat->get_avg_row_size());
-        if (OB_FAIL(copy_col_stats(tmp_col_stats, dst_opt_stats.at(i).column_stats_))) {
+        dst_opt_stats.at(i).table_stat_->set_sample_size(tmp_tab_stat->get_row_count());
+        if (OB_FAIL(copy_col_stats(tmp_tab_stat->get_row_count(), row_cnt, tmp_col_stats, dst_opt_stats.at(i).column_stats_))) {
           LOG_WARN("failed to copy col stat", K(ret));
         } else {/*do nothing*/}
       } else {/*do nothing*/}
@@ -436,7 +471,9 @@ int ObStatsEstimator::copy_opt_stat(ObOptStat &src_opt_stat,
   return ret;
 }
 
-int ObStatsEstimator::copy_col_stats(ObIArray<ObOptColumnStat *> &src_col_stats,
+int ObStatsEstimator::copy_col_stats(const int64_t cur_row_cnt,
+                                     const int64_t total_row_cnt,
+                                     ObIArray<ObOptColumnStat *> &src_col_stats,
                                      ObIArray<ObOptColumnStat *> &dst_col_stats)
 {
   int ret = OB_SUCCESS;
@@ -449,11 +486,19 @@ int ObStatsEstimator::copy_col_stats(ObIArray<ObOptColumnStat *> &src_col_stats,
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected error", K(ret), K(dst_col_stats.at(i)));
       } else {
+        int64_t num_not_null = src_col_stats.at(i)->get_num_not_null();
+        int64_t num_null = src_col_stats.at(i)->get_num_null();
+        int64_t num_distinct = src_col_stats.at(i)->get_num_distinct();
+        if (sample_value_ >= 0.000001 && sample_value_ < 100.0) {
+          num_distinct = ObOptSelectivity::scale_distinct(total_row_cnt, cur_row_cnt, num_distinct);
+          num_not_null = static_cast<int64_t>(num_not_null * 100 / sample_value_);
+          num_null = static_cast<int64_t>(num_null * 100 / sample_value_);
+        }
         dst_col_stats.at(i)->set_max_value(src_col_stats.at(i)->get_max_value());
         dst_col_stats.at(i)->set_min_value(src_col_stats.at(i)->get_min_value());
-        dst_col_stats.at(i)->set_num_not_null(src_col_stats.at(i)->get_num_not_null());
-        dst_col_stats.at(i)->set_num_null(src_col_stats.at(i)->get_num_null());
-        dst_col_stats.at(i)->set_num_distinct(src_col_stats.at(i)->get_num_distinct());
+        dst_col_stats.at(i)->set_num_not_null(num_not_null);
+        dst_col_stats.at(i)->set_num_null(num_null);
+        dst_col_stats.at(i)->set_num_distinct(num_distinct);
         dst_col_stats.at(i)->set_avg_len(src_col_stats.at(i)->get_avg_len());
         if (OB_ISNULL(dst_col_stats.at(i)->get_llc_bitmap()) ||
             OB_ISNULL(src_col_stats.at(i)->get_llc_bitmap()) ||
@@ -471,12 +516,11 @@ int ObStatsEstimator::copy_col_stats(ObIArray<ObOptColumnStat *> &src_col_stats,
           dst_col_stats.at(i)->set_llc_bitmap_size(src_col_stats.at(i)->get_llc_bitmap_size());
           ObHistogram &src_hist = src_col_stats.at(i)->get_histogram();
           dst_col_stats.at(i)->get_histogram().set_type(src_hist.get_type());
-          dst_col_stats.at(i)->get_histogram().set_sample_size(src_hist.get_sample_size());
-          dst_col_stats.at(i)->get_histogram().set_bucket_cnt(src_hist.get_bucket_cnt());
+          dst_col_stats.at(i)->get_histogram().set_sample_size(src_col_stats.at(i)->get_num_not_null());
           dst_col_stats.at(i)->get_histogram().set_density(src_hist.get_density());
-          if (OB_FAIL(append(dst_col_stats.at(i)->get_histogram().get_buckets(),
-                             src_hist.get_buckets()))) {
-            LOG_WARN("failed to append", K(ret));
+          dst_col_stats.at(i)->get_histogram().set_bucket_cnt(src_hist.get_bucket_cnt());
+          if (OB_FAIL(dst_col_stats.at(i)->get_histogram().get_buckets().assign(src_hist.get_buckets()))) {
+            LOG_WARN("failed to assign buckets", K(ret));
           } else {
             LOG_TRACE("Succeed to copy col stat", K(*dst_col_stats.at(i)), K(*src_col_stats.at(i)));
           }
@@ -532,9 +576,8 @@ int ObStatsEstimator::copy_hybrid_hist_stat(ObOptStat &src_opt_stat,
                                                        src_hist.get_pop_frequency(),
                                                        dst_col_stat->get_num_distinct(),
                                                        src_hist.get_pop_count());
-            if (OB_FAIL(append(dst_col_stat->get_histogram().get_buckets(),
-                               src_hist.get_buckets()))) {
-              LOG_WARN("failed to append", K(ret));
+            if (OB_FAIL(dst_col_stat->get_histogram().get_buckets().assign(src_hist.get_buckets()))) {
+              LOG_WARN("failed to assign buckets", K(ret));
             } else {
               LOG_TRACE("Succeed to copy histogram", K(*dst_col_stat), K(i), K(j));
             }

@@ -88,19 +88,45 @@ int ObDbmsInfo::deep_copy_field_columns(ObIAllocator& allocator,
   return ret;
 }
 
+int ObDbmsInfo::deep_copy_field_columns(ObIAllocator& allocator,
+                                        const common::ColumnsFieldArray src_fields,
+                                        common::ColumnsFieldArray &dst_fields)
+{
+  int ret = OB_SUCCESS;
+  dst_fields.reset();
+  dst_fields.set_allocator(&allocator);
+  if (src_fields.count() <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("src fields is null.", K(ret), K(src_fields.count()));
+  } else if (OB_FAIL(dst_fields.reserve(src_fields.count()))) {
+    LOG_WARN("fail to reserve column fields",
+             K(ret), K(dst_fields.count()), K(src_fields.count()));
+  } else {
+    for (int64_t i = 0 ; OB_SUCC(ret) && i < src_fields.count(); ++i) {
+      ObField tmp_field;
+      if (OB_FAIL(tmp_field.deep_copy(src_fields.at(i), &allocator))) {
+        LOG_WARN("deep copy field failed", K(ret));
+      } else if (OB_FAIL(dst_fields.push_back(tmp_field))) {
+        LOG_WARN("push back field param failed", K(ret));
+      } else { }
+    }
+  }
+  return ret;
+}
+
 int ObDbmsInfo::init_params(int64_t param_count)
 {
   int ret = OB_SUCCESS;
   ObIAllocator *alloc = NULL;
-  OV (OB_NOT_NULL(entity_), OB_NOT_INIT, stmt_id_, param_count);
+  OV (OB_NOT_NULL(entity_), OB_NOT_INIT, ps_sql_, param_count);
   OX (alloc = &entity_->get_arena_allocator());
   CK (OB_NOT_NULL(alloc));
   OX (param_names_.reset());
   OX (param_names_.set_allocator(alloc));
-  OZ (param_names_.init(param_count), stmt_id_, param_count);
+  OZ (param_names_.init(param_count), ps_sql_, param_count);
   OX (bind_params_.reset());
   OX (bind_params_.set_allocator(alloc));
-  OZ (bind_params_.init(param_count), stmt_id_, param_count);
+  OZ (bind_params_.init(param_count), ps_sql_, param_count);
   OX (exec_params_.~Ob2DArray());
   OX (new (&exec_params_) ParamStore(ObWrapperAllocator(alloc)));
   return ret;
@@ -129,7 +155,7 @@ const ObObjParam *ObDbmsInfo::get_bind_param(const ObString &param_name) const
         }
       } else { /*do nothing*/ }
     } else {
-      LOG_ERROR("BUG!!!: param name is not start with colon", K(param_name));
+      LOG_ERROR_RET(OB_ERR_UNEXPECTED, "BUG!!!: param name is not start with colon", K(param_name));
     }
   }
   return param_value;
@@ -149,8 +175,17 @@ int ObDbmsInfo::set_bind_param(const ObString &param_name, const ObObjParam&para
     }
 
     if (OB_INVALID_INDEX != idx) {
-      OZ (ob_write_obj(alloc, param_value, bind_params_.at(idx).param_value_),
-          param_name, param_value);
+      if (param_value.is_pl_extend()
+              && param_value.get_ext() != 0
+              && param_value.get_meta().get_extend_type() != PL_REF_CURSOR_TYPE) {
+        if (bind_params_.at(idx).param_value_.get_ext() != 0) {
+          OZ (ObUserDefinedType::destruct_obj(bind_params_.at(idx).param_value_));
+        }
+        OZ (ObUserDefinedType::deep_copy_obj(alloc, param_value, bind_params_.at(idx).param_value_));
+      } else {
+        OZ (ob_write_obj(alloc, param_value, bind_params_.at(idx).param_value_),
+            param_name, param_value);
+      }
       OX (bind_params_.at(idx).param_value_.set_accuracy(param_value.get_accuracy()));
       OX (bind_params_.at(idx).param_value_.set_param_meta());
     } else {
@@ -158,7 +193,13 @@ int ObDbmsInfo::set_bind_param(const ObString &param_name, const ObObjParam&para
       ObObj clone_value;
       BindParam clone_param;
       OZ (ob_write_string(alloc, param_name, clone_name), param_name, param_value);
-      OZ (ob_write_obj(alloc, param_value, clone_value), param_name, param_value);
+      if (param_value.is_pl_extend()
+              && param_value.get_ext() != 0
+              && param_value.get_meta().get_extend_type() != PL_REF_CURSOR_TYPE) {
+        OZ (ObUserDefinedType::deep_copy_obj(alloc, param_value, clone_value));
+      } else {
+        OZ (ob_write_obj(alloc, param_value, clone_value), param_name, param_value);
+      }
       OX (clone_param = BindParam(clone_name, clone_value));
       OX (clone_param.param_value_.set_accuracy(param_value.get_accuracy()));
       OX (clone_param.param_value_.set_param_meta());
@@ -181,12 +222,12 @@ int ObDbmsInfo::add_param_name(ObString &clone_name)
     ObIAllocator *alloc = NULL;
     int64_t param_cnt = param_names_.count();
     CK (into_cnt <= param_cnt);
-    OV (OB_NOT_NULL(entity_), OB_NOT_INIT, stmt_id_, param_cnt);
+    OV (OB_NOT_NULL(entity_), OB_NOT_INIT, ps_sql_, param_cnt);
     OX (alloc = &entity_->get_arena_allocator());
     CK (OB_NOT_NULL(alloc));
     OX (into_names_.reset());
     OX (into_names_.set_allocator(alloc));
-    OZ (into_names_.init(into_cnt), stmt_id_, into_cnt);
+    OZ (into_names_.init(into_cnt), ps_sql_, into_cnt);
     for (int64_t i = param_cnt - into_cnt; OB_SUCC(ret) && i < param_cnt; ++i) {
       OZ (into_names_.push_back(param_names_.at(i)));
     }
@@ -253,6 +294,7 @@ int ObDbmsCursorInfo::parse(const ObString &sql_stmt, ObSQLSessionInfo &session)
   OZ (prepare_entity(session), sql_stmt);
   OV (OB_NOT_NULL(get_dbms_entity()), OB_ALLOCATE_MEMORY_FAILED, sql_stmt);
   OV (OB_NOT_NULL(get_cursor_entity()), OB_ALLOCATE_MEMORY_FAILED, sql_stmt);
+  OX (set_spi_cursor(NULL));
   if (OB_SUCC(ret)) {
     ObIAllocator &alloc = get_dbms_entity()->get_arena_allocator();
     ObParser parser(alloc, session.get_sql_mode(), session.get_local_collation_connection());
@@ -261,16 +303,17 @@ int ObDbmsCursorInfo::parse(const ObString &sql_stmt, ObSQLSessionInfo &session)
     char **param_names = NULL;
     ObString clone_name;
     // 解析语句
-    OZ (parser.parse(sql_stmt, parse_result, DBMS_SQL_MODE), sql_stmt);
+    if (OB_FAIL(parser.parse(sql_stmt, parse_result, DBMS_SQL_MODE))) {
+      LOG_WARN("failed to parse sql_stmt", K(sql_stmt), K(ret));
+      int64_t error_offset =
+          parse_result.start_col_ > 0 ? (parse_result.start_col_ - 1) : 0;
+      session.get_warnings_buffer().set_error_line_column(0, error_offset);
+    }
     OZ (ObResolverUtils::resolve_stmt_type(parse_result, stmt_type_), sql_stmt);
     // cann't execute multi select stmt
-    if (OB_FAIL(ret)) {
-    } else if (ObStmt::is_ddl_stmt(stmt_type_, true)) {
-      ret = OB_NO_STMT_PARSE;
-      LOG_WARN("dbms_cursor need parse a select stmt.", K(ret));
-    } else if (ObStmt::is_select_stmt(stmt_type_) 
-                && !parser.is_pl_stmt(sql_stmt) 
-                && !parser.is_single_stmt(sql_stmt)) {
+    if (OB_SUCC(ret)
+          && !parser.is_pl_stmt(sql_stmt)
+          && !parser.is_single_stmt(sql_stmt)) {
       ret = OB_ERR_CMD_NOT_PROPERLY_ENDED;
       LOG_WARN("execute immdeidate only support one stmt", K(ret));
     }
@@ -289,6 +332,30 @@ int ObDbmsCursorInfo::parse(const ObString &sql_stmt, ObSQLSessionInfo &session)
     OZ (ob_write_string(alloc, sql_stmt, sql_stmt_, true), sql_stmt);
   }
   return ret;
+}
+
+int64_t ObDbmsCursorInfo::get_dbms_id()
+{
+  int64_t id = -1;
+  if (0 == (get_id() & CANDIDATE_CURSOR_ID)) {
+    // ps cursor id
+    id = get_id();
+  } else {
+    id = get_id() - CANDIDATE_CURSOR_ID;
+  }
+  return id;
+}
+
+int64_t ObDbmsCursorInfo::convert_to_dbms_cursor_id(int64_t id)
+{
+  int64_t new_id = -1;
+  if (1 == (id & CANDIDATE_CURSOR_ID)) {
+    // ps cursor id
+    new_id = id;
+  } else {
+    new_id = id + CANDIDATE_CURSOR_ID;
+  }
+  return new_id;
 }
 
 

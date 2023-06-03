@@ -4,7 +4,7 @@ include(cmake/Utils.cmake)
 include(cmake/Env.cmake)
 
 project("OceanBase_CE"
-  VERSION 4.1.0.0
+  VERSION 4.2.0.0
   DESCRIPTION "OceanBase distributed database system"
   HOMEPAGE_URL "https://open.oceanbase.com/"
   LANGUAGES CXX C ASM)
@@ -40,6 +40,11 @@ endif()
 if(ENABLE_LATCH_DIAGNOSE)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DENABLE_LATCH_DIAGNOSE")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DENABLE_LATCH_DIAGNOSE")
+endif()
+
+if(ENABLE_500_FALLBACK)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DENABLE_500_FALLBACK")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DENABLE_500_FALLBACK")
 endif()
 
 if(ENABLE_SMART_VAR_CHECK)

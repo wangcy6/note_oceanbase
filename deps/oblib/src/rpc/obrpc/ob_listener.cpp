@@ -24,6 +24,11 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 
+#define ussl_log(level, errcode, format, ...) _OB_LOG_RET(level, errcode, "[ussl] " format, ##__VA_ARGS__)
+extern "C" {
+#include "ussl-hook.h"
+};
+
 using namespace oceanbase::common;
 using namespace oceanbase::obrpc;
 using namespace oceanbase::common::serialization;
@@ -59,34 +64,38 @@ int ObListener::listen_create(int port) {
   int no_block_flag = 1;
 
   memset(&sin, 0, sizeof(sin));
+  socklen_t ob_listener_gid_len = sizeof(OB_LISTENER_GID);
 
   if (port <= 0) {
     ret = OB_INVALID_ARGUMENT;
-    RPC_LOG(ERROR, "invalid param", K(port));
+    RPC_LOG(ERROR, "invalid port", K(ret), K(port));
   } else if ((fd = socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, 0)) < 0) {
-    ret = OB_ERR_UNEXPECTED;
-    RPC_LOG(ERROR, "create socket failed!", K(errno));
+    ret = OB_SERVER_LISTEN_ERROR;
+    RPC_LOG(ERROR, "create socket failed!", K(ret), K(fd), K(port), K(errno));
   } else if (ioctl(fd, FIONBIO, &no_block_flag) < 0) {
-    ret = OB_ERR_UNEXPECTED;
-    RPC_LOG(ERROR, "set non block failed!", K(errno));
+    ret = OB_SERVER_LISTEN_ERROR;
+    RPC_LOG(ERROR, "set non block failed!", K(ret), K(fd), K(port), K(errno));
   } else if (ob_listener_set_tcp_opt(fd, TCP_DEFER_ACCEPT, 1) < 0) {
-    ret = OB_ERR_UNEXPECTED;
-    RPC_LOG(ERROR, "set tcp defer accept failed!", K(errno));
+    ret = OB_SERVER_LISTEN_ERROR;
+    RPC_LOG(ERROR, "set tcp defer accept failed!", K(ret), K(fd), K(port), K(errno));
   } else if (ob_listener_set_opt(fd, SO_REUSEADDR, 1) < 0) {
-    ret = OB_ERR_UNEXPECTED;
-    RPC_LOG(ERROR, "set reuse_addr fail!", K(errno));
+    ret = OB_SERVER_LISTEN_ERROR;
+    RPC_LOG(ERROR, "set reuse_addr fail!", K(ret), K(fd), K(port), K(errno));
   }
 #ifdef SO_REUSEPORT
   else if (ob_listener_set_opt(fd, SO_REUSEPORT, 1) < 0) {
-    ret = OB_ERR_UNEXPECTED;
-    RPC_LOG(ERROR, "set reuse port fail!", K(errno));
+    ret = OB_SERVER_LISTEN_ERROR;
+    RPC_LOG(ERROR, "set reuse port fail!", K(fd), K(port), K(errno));
   }
 #endif
-  else if (bind(fd, (sockaddr*)make_unix_sockaddr(&sin, 0, port), sizeof(sin)) < 0) {
-    ret = OB_ERR_UNEXPECTED;
+  else if (ussl_setsockopt(fd, SOL_OB_SOCKET, SO_OB_SET_SERVER_GID, &OB_LISTENER_GID, ob_listener_gid_len) < 0) {
+    ret = OB_SERVER_LISTEN_ERROR;
+    RPC_LOG(ERROR, "set ObListener gid failed", K(OB_LISTENER_GID));
+  } else if (bind(fd, (sockaddr*)make_unix_sockaddr(&sin, 0, port), sizeof(sin)) < 0) {
+    ret = OB_SERVER_LISTEN_ERROR;
     RPC_LOG(ERROR, "bind failed!", K(errno));
-  } else if (listen(fd, 1024) < 0) {
-    ret = OB_ERR_UNEXPECTED;
+  } else if (ussl_listen(fd, 1024) < 0) {
+    ret = OB_SERVER_LISTEN_ERROR;
     RPC_LOG(ERROR, "listen failed", K(errno));
   }
 
@@ -187,7 +196,7 @@ static int read_client_magic(int fd, uint64_t &client_magic, uint8_t &index)
 {
   int ret = OB_SUCCESS;
   const int64_t recv_buf_len = 1 * 1024;
-  int rcv_byte = 0;
+  int64_t rcv_byte = 0;
   uint64_t header_magic = 0;
   int64_t pos = 0;
   uint16_t msg_body_len = 0;
@@ -197,8 +206,12 @@ static int read_client_magic(int fd, uint64_t &client_magic, uint8_t &index)
   while ((rcv_byte = recv(fd, (char *) recv_buf, sizeof(recv_buf), MSG_PEEK)) < 0 && EINTR == errno);
 
   if (rcv_byte < 0) {
-    ret = OB_IO_ERROR;
-    RPC_LOG(ERROR, "recv bytes is less than 0!", K(errno));
+    RPC_LOG(WARN, "recv bytes is less than 0!", K(errno));
+    if (EAGAIN == errno || EWOULDBLOCK == errno) {
+      ret = OB_EAGAIN;
+    } else {
+      ret = OB_IO_ERROR;
+    }
   } else if (0 == rcv_byte) {
     RPC_LOG(INFO, "peer closed connection!");
     ret = OB_IO_ERROR;
@@ -234,8 +247,7 @@ static int connection_redispatch(int conn_fd, io_threads_pipefd_pool_t *ths_fd_p
 {
   int ret = OB_SUCCESS;
   int wrfd = -1;
-  int count = ths_fd_pool->count;
-  int write_bytes = 0;
+  int64_t write_bytes = 0;
 
   if (OB_ISNULL(ths_fd_pool)) {
     RPC_LOG(ERROR, "ths_fd_pool is NULL");
@@ -244,6 +256,7 @@ static int connection_redispatch(int conn_fd, io_threads_pipefd_pool_t *ths_fd_p
     RPC_LOG(ERROR, "conn_fd invalid", K(conn_fd));
     ret = OB_INVALID_ARGUMENT;
   } else {
+    int count = ths_fd_pool->count;
     wrfd = ths_fd_pool->pipefd[index % count];
     RPC_LOG(INFO, "dipatch", K(conn_fd), K(count), K(index), K(wrfd));
     while ((write_bytes = write(wrfd, &conn_fd, sizeof(conn_fd))) < 0 && errno == EINTR);
@@ -300,7 +313,7 @@ void ObListener::do_work()
     struct epoll_event conn_ev;
 
     while(!has_set_stop()) {
-      int cnt = epoll_wait(epoll_fd, events, MAXEPOLLSIZE, 1000);
+      int cnt = ob_epoll_wait(epoll_fd, events, MAXEPOLLSIZE, 1000);
       for (int i = 0; i < cnt; i++) {
         int accept_fd = events[i].data.fd;
         uint64_t client_magic = 0;
@@ -308,7 +321,7 @@ void ObListener::do_work()
         io_threads_pipefd_pool_t *pipefd_pool = NULL;
 
         if (accept_fd == listen_fd_) {
-          int conn_fd = accept(listen_fd_, NULL, NULL);
+          int conn_fd = ussl_accept(listen_fd_, NULL, NULL);
           if (conn_fd < 0) {
             RPC_LOG(ERROR, "accept failed!", K(errno));
           } else {
@@ -365,6 +378,42 @@ void ObListener::do_work()
   return;
 }
 
+int ObListener::do_one_event(int accept_fd) {
+  int err = 0;
+  int tmp_ret = OB_SUCCESS;
+  uint64_t client_magic = 0;
+  uint8_t index = 0;
+  io_threads_pipefd_pool_t *pipefd_pool = NULL;
+
+  if (OB_TMP_FAIL(read_client_magic(accept_fd, client_magic, index))) {
+    index = compatible_balance_assign(pipefd_pool);
+    trace_connection_info(accept_fd);
+    if (OB_TMP_FAIL(connection_redispatch(accept_fd, pipefd_pool, index))) {
+      close(accept_fd);
+    }
+    pipefd_pool = NULL;
+  } else {
+    for (int i = 0; i < MAX_PROTOCOL_TYPE_SIZE; i++) {
+      if (io_wrpipefd_map_[i].used && io_wrpipefd_map_[i].magic == client_magic) {
+        pipefd_pool = &(io_wrpipefd_map_[i].ioth_wrpipefd_pool);
+      }
+    }
+
+    trace_connection_info(accept_fd);
+
+    if (OB_ISNULL(pipefd_pool)) { /* high_prio_rpc_eio exist or not is decided by configuration */
+      index = compatible_balance_assign(pipefd_pool);
+    } else {
+      RPC_LOG(INFO, "dispatch to", K(client_magic), K(index));
+    }
+    if(OB_TMP_FAIL(connection_redispatch(accept_fd, pipefd_pool, index))) {
+      close(accept_fd);
+    }
+    pipefd_pool = NULL;
+  }
+  return err;
+}
+
  uint8_t ObListener::compatible_balance_assign(io_threads_pipefd_pool_t  * &pipefd_pool)
  {
    static uint8_t ioth_index_inc = 0;
@@ -384,3 +433,7 @@ void ObListener::do_work()
 
    return ioth_index;
  }
+
+ extern "C" {
+   #include "ussl-hook.c"
+ };

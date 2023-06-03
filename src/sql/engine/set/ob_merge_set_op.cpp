@@ -13,6 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/set/ob_merge_set_op.h"
+#include "sql/engine/ob_exec_context.h"
 
 namespace oceanbase
 {
@@ -30,11 +31,12 @@ OB_SERIALIZE_MEMBER((ObMergeSetSpec, ObSetSpec));
 ObMergeSetOp::ObMergeSetOp(ObExecContext &exec_ctx, const ObOpSpec &spec, ObOpInput *input)
   : ObOperator(exec_ctx, spec, input),
     alloc_(ObModIds::OB_SQL_MERGE_GROUPBY,
-      OB_MALLOC_NORMAL_BLOCK_SIZE, OB_SERVER_TENANT_ID, ObCtxIds::WORK_AREA),
+      OB_MALLOC_NORMAL_BLOCK_SIZE, exec_ctx.get_my_session()->get_effective_tenant_id(), ObCtxIds::WORK_AREA),
     last_row_(alloc_),
     cmp_(),
     need_skip_init_row_(false),
-    last_row_idx_(-1)
+    last_row_idx_(-1),
+    use_last_row_(false)
 {}
 
 int ObMergeSetOp::inner_open()
@@ -183,8 +185,9 @@ int ObMergeSetOp::Compare::operator()(
     int64_t idx = sort_collations_->at(i).field_idx_;
     if (OB_FAIL(r.at(idx)->eval(eval_ctx, r_datum))) {
       LOG_WARN("failed to get expr value", K(ret), K(i));
+    } else if (OB_FAIL(cmp_funcs_->at(i).cmp_func_(lcells[idx], *r_datum, cmp))) {
+      LOG_WARN("failed to compare", K(ret), K(i));
     } else {
-      cmp = cmp_funcs_->at(i).cmp_func_(lcells[idx], *r_datum);
       if (0 != cmp) {
         cmp = sort_collations_->at(i).is_ascending_ ? cmp : -cmp;
         break;
@@ -209,8 +212,9 @@ int ObMergeSetOp::Compare::operator()(
     if (OB_FAIL(l.at(idx)->eval(eval_ctx, l_datum))) {
       LOG_WARN("failed to get expr value", K(ret), K(i));
     } else if (OB_FAIL(r.at(idx)->eval(eval_ctx, r_datum))) {
+    } else if (OB_FAIL(cmp_funcs_->at(i).cmp_func_(*l_datum, *r_datum, cmp))) {
+      LOG_WARN("failed to compare", K(ret), K(i));
     } else {
-      cmp = cmp_funcs_->at(i).cmp_func_(*l_datum, *r_datum);
       LOG_DEBUG("debug compare merge set op", K(EXPR2STR(eval_ctx, *l.at(idx))),
         K(EXPR2STR(eval_ctx, *r.at(idx))), K(cmp));
       if (0 != cmp) {
@@ -242,12 +246,11 @@ int ObMergeSetOp::Compare::operator() (const common::ObIArray<ObExpr*> &l,
     } else if (FALSE_IT(batch_info_guard.set_batch_idx(r_idx))) {
     } else if (OB_FAIL(r.at(idx)->eval(eval_ctx, r_datum))) {
       LOG_WARN("failed to get expr value", K(ret), K(i));
-    } else {
-      cmp = cmp_funcs_->at(i).cmp_func_(*l_datum, *r_datum);
-      if (0 != cmp) {
-        cmp = sort_collations_->at(i).is_ascending_ ? cmp : -cmp;
-        break;
-      }
+    } else if (OB_FAIL(cmp_funcs_->at(i).cmp_func_(*l_datum, *r_datum, cmp))) {
+      LOG_WARN("failed to compare", K(ret), K(i));
+    } else if (0 != cmp) {
+      cmp = sort_collations_->at(i).is_ascending_ ? cmp : -cmp;
+      break;
     }
   }
   return ret;
@@ -271,12 +274,11 @@ int ObMergeSetOp::Compare::operator() (const ObChunkDatumStore::StoredRow &l,
     l_datum = &l_cells[idx];
     batch_info_guard.set_batch_idx(r_idx);
     if (OB_FAIL(r.at(idx)->eval(eval_ctx, r_datum))) {
-    } else {
-      cmp = cmp_funcs_->at(i).cmp_func_(*l_datum, *r_datum);
-      if (0 != cmp) {
-        cmp = sort_collations_->at(i).is_ascending_ ? cmp : -cmp;
-        break;
-      }
+    } else if (OB_FAIL(cmp_funcs_->at(i).cmp_func_(*l_datum, *r_datum, cmp))) {
+      LOG_WARN("failed to compare", K(ret), K(i));
+    } else if (0 != cmp) {
+      cmp = sort_collations_->at(i).is_ascending_ ? cmp : -cmp;
+      break;
     }
   }
   return ret;
@@ -364,11 +366,15 @@ int ObMergeSetOp::locate_next_left_inside(ObOperator &child_op,
       }
       if (curr_idx == row_brs.size_) {
         ret = OB_ITER_END;
-      } else if (OB_NOT_NULL(last_row_.store_row_)
+      } else if (OB_UNLIKELY(use_last_row_ && nullptr == last_row_.store_row_)
+                || OB_LIKELY(!use_last_row_ && last_idx < 0)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get wrong last idx", K(ret), K(use_last_row_), KP(last_row_.store_row_), K(last_idx));
+      } else if (use_last_row_
                 && OB_FAIL(cmp_(*last_row_.store_row_, child_op.get_spec().output_,
                                 curr_idx, eval_ctx_, cmp))) {
         LOG_WARN("failed to compare row", K(ret));
-      } else if (nullptr == last_row_.store_row_
+      } else if (!use_last_row_
                  && OB_FAIL(cmp_(child_op.get_spec().output_, child_op.get_spec().output_,
                                  last_idx, curr_idx, eval_ctx_, cmp))) {
         LOG_WARN("failed to compare row", K(ret));

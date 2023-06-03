@@ -28,12 +28,13 @@ namespace sql
     {}
     virtual ~ObUpdateLogPlan() {}
 
-    virtual int generate_raw_plan() override;
-
     const ObUpdateStmt *get_stmt() const override
     { return reinterpret_cast<const ObUpdateStmt*>(stmt_); }
 
     int perform_vector_assign_expr_replacement(ObUpdateStmt *stmt);
+
+  protected:
+    virtual int generate_normal_raw_plan() override;
 
   private:
     int candi_allocate_update();
@@ -47,7 +48,7 @@ namespace sql
                                ObConstRawExpr *lock_row_flag_expr,
                                bool is_multi_part_dml);
 
-    int replace_alias_ref_expr(ObRawExpr *&expr);
+    int replace_alias_ref_expr(ObRawExpr *&expr, bool &replace_happened);
     int extract_assignment_subqueries(ObIArray<ObRawExpr*> &normal_query_refs,
                                       ObIArray<ObRawExpr*> &alias_query_refs);
     int extract_assignment_subqueries(ObRawExpr *expr,

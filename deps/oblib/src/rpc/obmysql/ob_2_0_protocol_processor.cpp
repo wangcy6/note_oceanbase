@@ -261,21 +261,15 @@ int Ob20ProtocolProcessor::decode_extra_info(const Ob20ProtocolHeader &hdr,
           LOG_WARN("fail to deserialize extra info", K(ret));
         } else {
           LOG_TRACE("extra info", K(key), K(value));
-          if (0 == key.get_string().case_compare(ObString("ob_trace_info"))) {
-            extra_info.exist_trace_info_ = true;
-            if (!value.is_varchar()) {
-              ret = OB_INVALID_ARGUMENT;
-              LOG_WARN("invalid extra info value type", K(ret), K(key), K(value));
-            } else {
-              extra_info.trace_info_ = value.get_string();
-            }
-          } else if (0 == key.get_string().case_compare(ObString("sess_inf"))) {
+
+          if (0 == key.get_string().case_compare(ObString("sess_inf"))) {
             if (!value.is_varchar()) {
               ret = OB_INVALID_ARGUMENT;
               LOG_WARN("invalid extra info value type", K(ret), K(key), K(value));
             } else {
               extra_info.sync_sess_info_ = value.get_string();
-              LOG_DEBUG("receive extra_info", KPHEX(extra_info.sync_sess_info_.ptr(),extra_info.sync_sess_info_.length()));
+              LOG_DEBUG("receive extra_info", KPHEX(extra_info.sync_sess_info_.ptr(),
+                                              extra_info.sync_sess_info_.length()));
             }
           } else if (0 == key.get_string().case_compare(ObString("full_trc"))) {
             if (!value.is_varchar()) {
@@ -283,6 +277,21 @@ int Ob20ProtocolProcessor::decode_extra_info(const Ob20ProtocolHeader &hdr,
               LOG_WARN("invalid extra info value type", K(ret), K(key), K(value));
             } else {
               extra_info.full_link_trace_ = value.get_string();
+            }
+          } else if (0 == key.get_string().case_compare(ObString("ob_trace_info"))) {
+            extra_info.exist_trace_info_ = true;
+            if (!value.is_varchar()) {
+              ret = OB_INVALID_ARGUMENT;
+              LOG_WARN("invalid extra info value type", K(ret), K(key), K(value));
+            } else {
+              extra_info.trace_info_ = value.get_string();
+            }
+          } else if (0 == key.get_string().case_compare(ObString("sess_ver"))) {
+            if (!value.is_varchar()) {
+              ret = OB_INVALID_ARGUMENT;
+              LOG_WARN("invalid extra info value type", K(ret), K(key), K(value));
+            } else {
+              extra_info.sess_info_veri_ = value.get_string();
             }
           } else {
             // do nothing
@@ -346,13 +355,17 @@ int Ob20ProtocolProcessor::decode_new_extra_info(const Ob20ProtocolHeader &hdr,
 int Ob20ProtocolProcessor::do_splice(ObSMConnection& conn, ObICSMemPool& pool, void*& pkt, bool& need_decode_more)
 {
   INIT_SUCC(ret);
-  if (OB_FAIL(process_ob20_packet(conn.proto20_pkt_context_, conn.mysql_pkt_context_, pool, pkt, need_decode_more))) {
+  if (OB_FAIL(process_ob20_packet(conn.proto20_pkt_context_, conn.mysql_pkt_context_,
+                                    conn.pkt_rec_wrapper_, pool, pkt, need_decode_more))) {
     LOG_ERROR("fail to process_ob20_packet", K(ret));
   }
   return ret;
 }
 
-inline int Ob20ProtocolProcessor::process_ob20_packet(ObProto20PktContext& context, ObMysqlPktContext &mysql_pkt_context, ObICSMemPool& pool,
+inline int Ob20ProtocolProcessor::process_ob20_packet(ObProto20PktContext& context,
+                                                      ObMysqlPktContext &mysql_pkt_context,
+                                                      obmysql::ObPacketRecordWrapper &pkt_rec_wrapper,
+                                                      ObICSMemPool& pool,
                                                       void *&ipacket, bool &need_decode_more)
 {
   INIT_SUCC(ret);
@@ -382,6 +395,9 @@ inline int Ob20ProtocolProcessor::process_ob20_packet(ObProto20PktContext& conte
   if (OB_SUCC(ret)) {
     uint32_t mysql_data_size = pkt20->get_mysql_packet_len();
     char *mysql_data_start = const_cast<char *>(pkt20->get_cdata());
+    if (pkt_rec_wrapper.enable_proto_dia()) {
+      pkt_rec_wrapper.record_recieve_mysql_pkt_fragment(mysql_data_size);
+    }
     if (mysql_data_size == 0) {
       // waitting for a not empty packet
       need_decode_more = true;
@@ -390,7 +406,19 @@ inline int Ob20ProtocolProcessor::process_ob20_packet(ObProto20PktContext& conte
                         mysql_data_size, ipacket, need_decode_more))) {
       LOG_ERROR("fail to process fragment mysql packet", KP(mysql_data_start),
                 K(mysql_data_size), K(need_decode_more), K(ret));
-    } 
+    } else if (!context.extra_info_.exist_extra_info()
+        && pkt20->get_extra_info().exist_extra_info()) {
+      char* tmp_buffer = NULL;
+      int64_t total_len = pkt20->get_extra_info().get_total_len();
+      if (OB_ISNULL(tmp_buffer = reinterpret_cast<char *>(context.arena_.alloc(total_len)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("no memory available", "alloc_size", total_len, K(ret));
+      } else if (OB_FAIL(context.extra_info_.assign(pkt20->get_extra_info(), tmp_buffer, total_len))) {
+        LOG_ERROR("failed to deep copy extra info", K(ret));
+      }
+    } else {
+      // do nothing
+    }
 
     if (OB_FAIL(ret)) {
       // do nothing
@@ -407,11 +435,26 @@ inline int Ob20ProtocolProcessor::process_ob20_packet(ObProto20PktContext& conte
         // If a request is divided into multiple MySQL packages, each MySQL package will also set the re-routing flag
         ObMySQLRawPacket *input_packet = reinterpret_cast<ObMySQLRawPacket *>(ipacket);
         input_packet->set_can_reroute_pkt(pkt20->get_flags().is_proxy_reroute());
-        input_packet->set_extra_info(pkt20->get_extra_info());
+        input_packet->set_is_weak_read(pkt20->get_flags().is_weak_read());
+        // need test proxy_switch_route flag.
+        input_packet->set_proxy_switch_route(pkt20->get_flags().proxy_switch_route());
+        const int64_t t_len = context.extra_info_.get_total_len();
+        char *t_buffer = NULL;
+        if (OB_ISNULL(t_buffer = reinterpret_cast<char *>(pool.alloc(t_len)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_ERROR("no memory available", "alloc_size", t_len, K(ret));
+        } else if (OB_FAIL(input_packet->extra_info_.assign(context.extra_info_, t_buffer, t_len))) {
+          LOG_ERROR("failed to assign extra info", K(ret));
+        }
+
+        input_packet->set_txn_free_route(pkt20->get_flags().txn_free_route());
         context.reset();
         // set again for sending response
         context.proto20_last_pkt_seq_ = pkt20->get_seq();
         context.proto20_last_request_id_ = pkt20->get_request_id();
+        if (pkt_rec_wrapper.enable_proto_dia()) {
+          pkt_rec_wrapper.record_recieve_obp20_packet(*pkt20, *input_packet);
+        }
       }
     }
   }

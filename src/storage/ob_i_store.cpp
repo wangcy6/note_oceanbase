@@ -74,6 +74,10 @@ void ObStoreCtx::reset()
   table_version_ = INT64_MAX;
   timeout_ = -1;
   mvcc_acc_ctx_.reset();
+<<<<<<< HEAD
+=======
+  tablet_stat_.reset();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   replay_log_scn_.set_max();
 }
 
@@ -86,7 +90,7 @@ int ObStoreCtx::init_for_read(const ObLSID &ls_id,
   ObLSService *ls_svr = MTL(ObLSService*);
   ObLSHandle ls_handle;
   if (OB_FAIL(ls_svr->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))) {
-    STORAGE_LOG(ERROR, "get_ls from ls service fail.", K(ret), K(*ls_svr));
+    STORAGE_LOG(WARN, "get_ls from ls service fail.", K(ret), K(*ls_svr));
   } else {
     ret = init_for_read(ls_handle, timeout, tx_lock_timeout, snapshot_version);
   }
@@ -133,6 +137,7 @@ void ObStoreRowLockState::reset()
   trans_version_ = SCN::min_scn();
   lock_trans_id_.reset();
   lock_data_sequence_ = 0;
+  lock_dml_flag_ = blocksstable::ObDmlFlag::DF_NOT_EXIST;
   is_delayed_cleanout_ = false;
   mvcc_row_ = NULL;
 }
@@ -296,7 +301,7 @@ int ObLockRowChecker::check_lock_row_valid(
   if (OB_UNLIKELY(row.get_column_count() < rowkey_cnt)) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "row count is less than rowkey count", K(row), K(rowkey_cnt));
-  } else {
+  } else if (row.is_uncommitted_row() || is_memtable_iter_row_check) {
     bool pure_empty_row = true;
     for (int i = rowkey_cnt; pure_empty_row && i < row.get_column_count(); ++i) {
       if (!row.storage_datums_[i].is_nop()) { // not nop value
@@ -317,27 +322,29 @@ int ObLockRowChecker::check_lock_row_valid(
   return ret;
 }
 
-const char * ObMergeTypeStr[] = {
-    "MINI_MINOR_MERGE",
-    "BUF_MINOR_MERGE",
-    "HISTORY_MINI_MINOR_MERGE",
-    "MINI_MERGE",
-    "MAJOR_MERGE",
-    "MINOR_MERGE",
-    "DDL_KV_MERGE",
-    "BACKFILL_TX_MERGE"
-};
-
-const char *merge_type_to_str(const ObMergeType &merge_type)
+int ObLockRowChecker::check_lock_row_valid(
+  const blocksstable::ObDatumRow &row,
+  const ObTableReadInfo &read_info)
 {
-  STATIC_ASSERT(static_cast<int64_t>(MERGE_TYPE_MAX) == ARRAYSIZEOF(ObMergeTypeStr), "merge type str len is mismatch");
-  const char *str = "";
-  if (merge_type >= MERGE_TYPE_MAX || merge_type < MINI_MINOR_MERGE) {
-    str = "invalid_merge_type";
-  } else {
-    str = ObMergeTypeStr[merge_type];
+  int ret = OB_SUCCESS;
+  int64_t rowkey_read_cnt = MIN(read_info.get_seq_read_column_count(), read_info.get_rowkey_count());
+  if (OB_UNLIKELY(!read_info.is_valid() || row.get_column_count() < rowkey_read_cnt)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(read_info), K(row));
+  } else if (row.is_uncommitted_row()) {
+    const common::ObIArray<int32_t> &col_index = read_info.get_columns_index();
+    for (int i = rowkey_read_cnt; i < row.get_column_count(); ++i) {
+      if (col_index.at(i) < read_info.get_rowkey_count()) {
+        // not checking rowkey col
+      } else if (!row.storage_datums_[i].is_nop()) { // not nop value
+        ret = OB_ERR_UNEXPECTED;
+        STORAGE_LOG(WARN, "uncommitted lock row have normal cells", K(ret), K(row),
+          K(rowkey_read_cnt), K(read_info));
+        break;
+      }
+    }
   }
-  return str;
+  return ret;
 }
 
 }

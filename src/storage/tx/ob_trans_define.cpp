@@ -56,9 +56,8 @@ OB_SERIALIZE_MEMBER(ObTransID, tx_id_);
 OB_SERIALIZE_MEMBER(ObStartTransParam, access_mode_, type_, isolation_, consistency_type_,
                     cluster_version_, is_inner_trans_, read_snapshot_type_);
 OB_SERIALIZE_MEMBER(ObElrTransInfo, trans_id_, commit_version_, result_);
-OB_SERIALIZE_MEMBER(MonotonicTs, mts_);
 OB_SERIALIZE_MEMBER(ObLSLogInfo, id_, offset_);
-
+OB_SERIALIZE_MEMBER(ObStateInfo, ls_id_, state_, version_, snapshot_version_);
 OB_SERIALIZE_MEMBER(ObTransDesc, a_);
 
 // class ObStartTransParam
@@ -611,6 +610,19 @@ int ObCoreLocalPartitionAuditInfo::init(int64_t array_len)
   return ret;
 }
 
+bool ObStateInfo::need_update(const ObStateInfo &state_info)
+{
+  bool need_update = true;
+  if (ObTxState::PRE_COMMIT <= state_ && state_ <= ObTxState::CLEAR) {
+    need_update = false;
+  } else if (snapshot_version_ > state_info.snapshot_version_) {
+    need_update = false;
+  } else if (state_info.state_ < state_) {
+    need_update = false;
+  }
+  return need_update;
+}
+
 void ObAddrLogId::reset()
 {
   addr_.reset();
@@ -1006,6 +1018,8 @@ void ObTxExecInfo::reset()
   prepare_log_info_arr_.reset();
   xid_.reset();
   need_checksum_ = true;
+  tablet_modify_record_.reset();
+  is_sub2pc_ = false;
 }
 
 void ObTxExecInfo::destroy()
@@ -1043,7 +1057,9 @@ OB_SERIALIZE_MEMBER(ObTxExecInfo,
 //                    touched_pkeys_,
                     prepare_log_info_arr_,
                     xid_,
-                    need_checksum_);
+                    need_checksum_,
+                    tablet_modify_record_,
+                    is_sub2pc_);
 
 bool ObMulSourceDataNotifyArg::is_redo_submitted() const { return redo_submitted_; }
 

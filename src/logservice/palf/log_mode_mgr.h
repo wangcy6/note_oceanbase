@@ -56,13 +56,16 @@ public:
   virtual void destroy();
   virtual void reset_status();
   virtual int get_access_mode(AccessMode &access_mode) const;
+  virtual int get_mode_version(int64_t &mode_version) const;
   virtual int get_access_mode(int64_t &mode_version, AccessMode &access_mode) const;
   virtual int get_ref_scn(int64_t &mode_version, share::SCN &ref_scn) const;
   bool can_append() const;
   bool can_raw_write() const;
+  bool can_receive_log() const;
   bool is_in_pending_state() const;
   bool can_do_paxos_accept() const;
   virtual bool is_state_changed() const;
+  virtual bool need_skip_log_barrier() const;
   virtual LogModeMeta get_accepted_mode_meta() const;
   virtual LogModeMeta get_last_submit_mode_meta() const;
   virtual int reconfirm_mode_meta();
@@ -79,9 +82,14 @@ public:
                                      bool &has_accepted);
   virtual int receive_mode_meta(const common::ObAddr &server,
                                 const int64_t proposal_id,
+                                const bool is_applied_mode_meta,
                                 const LogModeMeta &mode_meta);
-  virtual int after_flush_mode_meta(const LogModeMeta &mode_meta);
+  virtual int after_flush_mode_meta(const bool is_applied_mode_meta, const LogModeMeta &mode_meta);
   virtual int ack_mode_meta(const common::ObAddr &server, const int64_t proposal_id);
+  virtual int submit_fetch_mode_meta_resp(const common::ObAddr &server,
+                                          const int64_t msg_proposal_id,
+                                          const int64_t accepted_mode_pid);
+  int leader_do_loop_work();
   TO_STRING_KV(K_(palf_id), K_(self), K_(applied_mode_meta), K_(accepted_mode_meta),
       K_(last_submit_mode_meta), "state", state2str_(state_), K_(new_proposal_id), K_(local_max_lsn),
       K_(local_max_log_pid), K_(max_majority_accepted_pid), K_(max_majority_lsn),
@@ -98,10 +106,15 @@ private:
                     const share::SCN &ref_scn,
                     const bool is_reconfirm);
   int submit_prepare_req_(const bool need_inc_pid, const bool need_send_and_handle_prepare);
-  int submit_accept_req_(const int64_t proposal_id, const LogModeMeta &mode_meta);
+  int submit_accept_req_(const int64_t proposal_id,
+                         const bool is_applied_mode_meta,
+                         const LogModeMeta &mode_meta);
   int receive_mode_meta_(const common::ObAddr &server,
                          const int64_t proposal_id,
+                         const bool is_applied_mode_meta,
                          const LogModeMeta &mode_meta);
+  int set_resend_mode_meta_list_();
+  int resend_applied_mode_meta_();
 
 private:
   static const int64_t PREPARE_RETRY_INTERVAL_US = 2 * 1000 * 1000;   // 2s
@@ -150,6 +163,7 @@ private:
   int64_t local_max_log_pid_;
   int64_t max_majority_accepted_pid_;
   LSN max_majority_lsn_;
+  ResendConfigLogList resend_mode_meta_list_;
   mutable int64_t wait_committed_log_slide_warn_ts_;
   // =========access_mode changing state============
   LogStateMgr *state_mgr_;

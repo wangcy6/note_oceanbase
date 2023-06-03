@@ -40,6 +40,7 @@ class ObOpSpec;
 class ObOperator;
 class ObOpInput;
 class ObTaskInfo;
+class ObExecFeedbackNode;
 
 struct ObPhyOpSeriCtx
 {
@@ -103,7 +104,7 @@ public:
   common::ObIArray<common::ObObjParam>& get_one_batch_params(int64_t idx) {
     return params_.at(idx);
   }
-  int get_param_idx(int64_t idx) {
+  int64_t get_param_idx(int64_t idx) {
     return param_idxs_.at(idx);
   }
   int append_batch_rescan_param(const common::ObIArray<int64_t> &param_idxs,
@@ -260,9 +261,12 @@ public:
   int create_operator(ObExecContext &exec_ctx, ObOperator *&op) const;
   int create_op_input(ObExecContext &exec_ctx) const;
   // 将算子注册到 datahub，用于并行计算场景
-  // https://yuque.antfin-inc.com/ob/sql/cnr75l
+  //
   virtual int register_to_datahub(ObExecContext &exec_ctx) const
     { UNUSED(exec_ctx); return common::OB_SUCCESS; }
+  // register init channel msg to sqc_ctx, used for px
+  virtual int register_init_channel_msg(ObExecContext &ctx)
+    { UNUSED(ctx); return common::OB_SUCCESS; }
 
   uint32_t get_child_cnt() const { return child_cnt_; }
   ObOpSpec **get_children() const { return children_; }
@@ -321,6 +325,7 @@ private:
   // assign spec ptr to ObOpKitStore
   int assign_spec_ptr_recursive(ObExecContext &exec_ctx) const;
   int link_sql_plan_monitor_node_recursive(ObExecContext &exec_ctx, ObMonitorNode *&pre_node) const;
+  int create_exec_feedback_node_recursive(ObExecContext &exec_ctx) const;
   // Data members are accessed in ObOperator class, exposed for convenience.
 public:
   // Operator type, serializing externally.
@@ -498,7 +503,8 @@ public:
   virtual int drain_exch();
 
   void set_pushdown_param_null(const common::ObIArray<ObDynamicParamSetter> &rescan_params);
-
+  void set_feedback_node_idx(int64_t idx)
+  { fb_node_idx_ = idx; }
 protected:
   int init_skip_vector();
   // Execute filter
@@ -516,7 +522,7 @@ protected:
   // try open operator
   int try_open() { return opened_ ? common::OB_SUCCESS : open(); }
 
-  void do_clear_datum_eval_flag();
+  virtual void do_clear_datum_eval_flag();
   void clear_batch_end_flag() { brs_.end_ = false; }
   inline void reset_batchrows()
   {
@@ -562,6 +568,9 @@ private:
   int submit_op_monitor_node();
   bool match_rt_monitor_condition(int64_t rows);
   int check_stack_once();
+  int output_expr_sanity_check();
+  int output_expr_sanity_check_batch();
+  int setup_op_feedback_info();
 protected:
   const ObOpSpec &spec_;
   ObExecContext &ctx_;
@@ -593,6 +602,9 @@ protected:
   bool need_init_before_get_row_;
   // gv$sql_plan_monitor
   ObMonitorNode op_monitor_info_;
+  // exec feedback info
+  int64_t fb_node_idx_;
+
   ObIOEventObserver io_event_observer_;
   // batch rows struct for get_next_row result.
   ObBatchRows brs_;
@@ -601,21 +613,28 @@ protected:
 
   inline void begin_cpu_time_counting()
   {
-    // begin with current operator
-    ObActiveSessionGuard::get_stat().plan_line_id_ = spec_.id_;
     cpu_begin_time_ = rdtsc();
   }
   inline void end_cpu_time_counting()
   {
     total_time_ += (rdtsc() - cpu_begin_time_);
+  }
+  inline void begin_ash_line_id_reg()
+  {
+    // begin with current operator
+    ObActiveSessionGuard::get_stat().plan_line_id_ = static_cast<int32_t>(spec_.id_);//TODO(xiaochu.yh): fix uint64 to int32
+  }
+  inline void end_ash_line_id_reg()
+  {
     // move back to parent operator
+    // known issue: when switch from batch to row in same op,
+    // we shift line id to parent op un-intently. but we tolerate this inaccuracy
     if (OB_LIKELY(spec_.get_parent())) {
-      common::ObActiveSessionGuard::get_stat().plan_line_id_ = spec_.get_parent()->id_;
+      common::ObActiveSessionGuard::get_stat().plan_line_id_ = static_cast<int32_t>(spec_.get_parent()->id_);//TODO(xiaochu.yh): fix uint64 to int32
     } else {
       common::ObActiveSessionGuard::get_stat().plan_line_id_ = -1;
     }
   }
-
   uint64_t cpu_begin_time_; // start of counting cpu time
   uint64_t total_time_; //  total time cost on this op, including io & cpu time
 protected:

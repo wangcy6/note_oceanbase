@@ -53,6 +53,7 @@ public:
   virtual bool need_assign_when_equal() const { return false; }
   virtual bool is_valid() const;
   virtual int64_t hash() const;
+  virtual int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   virtual bool operator==(const ObLSLocationUpdateTask &other) const;
   virtual bool operator!=(const ObLSLocationUpdateTask &other) const;
   virtual bool compare_without_version(const ObLSLocationUpdateTask &other) const;
@@ -99,6 +100,7 @@ public:
   virtual bool need_assign_when_equal() const { return false; }
   virtual bool is_valid() const;
   virtual int64_t hash() const;
+  virtual int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   virtual bool operator==(const ObTabletLSUpdateTask &other) const;
   virtual bool operator!=(const ObTabletLSUpdateTask &other) const;
   virtual bool compare_without_version(const ObTabletLSUpdateTask &other) const;
@@ -121,6 +123,16 @@ class ObLSLocationTimerTask : public common::ObTimerTask
 public:
   explicit ObLSLocationTimerTask(ObLSLocationService &ls_loc_service);
   virtual ~ObLSLocationTimerTask() {}
+  virtual void runTimerTask() override;
+private:
+  ObLSLocationService &ls_loc_service_;
+};
+
+class ObLSLocationByRpcTimerTask : public common::ObTimerTask
+{
+public:
+  explicit ObLSLocationByRpcTimerTask(ObLSLocationService &ls_loc_service);
+  virtual ~ObLSLocationByRpcTimerTask() {}
   virtual void runTimerTask() override;
 private:
   ObLSLocationService &ls_loc_service_;
@@ -163,6 +175,7 @@ public:
   virtual bool need_assign_when_equal() const { return false; }
   virtual bool is_valid() const;
   virtual int64_t hash() const;
+  virtual int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   virtual bool operator==(const ObVTableLocUpdateTask &other) const;
   virtual bool operator!=(const ObVTableLocUpdateTask &other) const;
   virtual bool compare_without_version(const ObVTableLocUpdateTask &other) const;

@@ -345,6 +345,15 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigMemoryLimitChecker);
 };
 
+class ObConfigTenantMemoryChecker
+  : public ObConfigChecker
+{
+public:
+  ObConfigTenantMemoryChecker() {}
+  virtual ~ObConfigTenantMemoryChecker() {};
+  bool check(const ObConfigItem &t) const;
+};
+
 class ObConfigUpgradeStageChecker : public ObConfigChecker
 {
 public:
@@ -486,6 +495,18 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigEnableDefensiveChecker);
 };
 
+class ObConfigRuntimeFilterChecker
+  : public ObConfigChecker
+{
+public:
+  ObConfigRuntimeFilterChecker() {}
+  virtual ~ObConfigRuntimeFilterChecker() {}
+  bool check(const ObConfigItem &t) const;
+  static int64_t get_runtime_filter_type(const char *str, int64_t len);
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObConfigRuntimeFilterChecker);
+};
+
 // config item container
 class ObConfigStringKey
 {
@@ -495,6 +516,7 @@ public:
   explicit ObConfigStringKey(const ObString &string);
   virtual ~ObConfigStringKey() {}
   uint64_t hash() const;
+  inline int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
 
   // case unsensitive
   bool operator == (const ObConfigStringKey &str) const
@@ -557,8 +579,7 @@ class ObConfigCapacityParser
 public:
   ObConfigCapacityParser() {}
   virtual ~ObConfigCapacityParser() {}
-  static int64_t get(const char *str, bool &valid);
-
+  static int64_t get(const char *str, bool &valid, bool check_unit = true);
 private:
   enum CAP_UNIT
   {
@@ -616,6 +637,28 @@ struct ObConfigBoolParser
   static bool get(const char *str, bool &valid);
 };
 
+class ObRpcClientAuthMethodChecker
+  : public ObConfigChecker
+{
+public:
+  ObRpcClientAuthMethodChecker() {}
+  virtual ~ObRpcClientAuthMethodChecker() {}
+  bool check(const ObConfigItem &t) const;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObRpcClientAuthMethodChecker);
+};
+
+class ObRpcServerAuthMethodChecker
+  : public ObConfigChecker
+{
+public:
+  ObRpcServerAuthMethodChecker() {}
+  virtual ~ObRpcServerAuthMethodChecker() {}
+  bool check(const ObConfigItem &t) const;
+  bool is_valid_server_auth_method(const ObString &str) const;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObRpcServerAuthMethodChecker);
+};
 
 typedef __ObConfigContainer<ObConfigStringKey,
                             ObConfigItem, OB_MAX_CONFIG_NUMBER> ObConfigContainer;

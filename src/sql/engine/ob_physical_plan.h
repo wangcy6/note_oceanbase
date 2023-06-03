@@ -30,6 +30,7 @@
 #include "sql/monitor/ob_security_audit_utils.h"
 #include "storage/tx/ob_clog_encrypt_info.h"
 #include "storage/tx/ob_trans_define.h"
+#include "sql/monitor/ob_plan_info_manager.h"
 
 namespace oceanbase
 {
@@ -51,11 +52,13 @@ class ObTablePartitionInfo;
 class ObPhyOperatorMonnitorInfo;
 struct ObAuditRecordData;
 class ObOpSpec;
+class ObEvolutionPlan;
 
 //class ObPhysicalPlan: public common::ObDLinkBase<ObPhysicalPlan>
 typedef common::ObFixedArray<common::ObFixedArray<int64_t, common::ObIAllocator>, common::ObIAllocator> PhyRowParamMap;
 typedef common::ObFixedArray<ObTableLocation, common::ObIAllocator> TableLocationFixedArray;
 typedef common::ObFixedArray<ObPlanPwjConstraint, common::ObIAllocator> PlanPwjConstraintArray;
+typedef common::ObFixedArray<ObDupTabConstraint, common::ObIAllocator> DupTabReplicaArray;
 typedef common::ObFixedArray<transaction::ObEncryptMetaCache, common::ObIAllocator> EncryptMetaCacheArray;
 
 //2.2.5版本之后已废弃
@@ -183,6 +186,7 @@ public:
   int assign_worker_map(common::hash::ObHashMap<ObAddr, int64_t> &worker_map,
                         const common::hash::ObHashMap<ObAddr, int64_t> &c);
   const char* get_sql_id() const { return stat_.sql_id_.ptr(); }
+  const ObString& get_sql_id_string() const { return stat_.sql_id_; }
   uint32_t get_next_phy_operator_id() { return next_phy_operator_id_++; }
   uint32_t get_next_phy_operator_id() const { return next_phy_operator_id_; }
   void set_next_phy_operator_id(uint32_t next_operator_id)
@@ -319,11 +323,13 @@ public:
     is_batched_multi_stmt_ = is_batched_multi_stmt;}
   inline bool get_is_batched_multi_stmt() const { return is_batched_multi_stmt_; }
   inline void set_use_pdml(bool value) { use_pdml_ = value; }
-  inline bool is_use_pdml() { return use_pdml_; }
+  inline bool is_use_pdml() const { return use_pdml_; }
   inline void set_use_temp_table(bool value) { use_temp_table_ = value; }
   inline bool is_use_temp_table() const { return use_temp_table_; }
   inline void set_has_link_table(bool value) { has_link_table_ = value; }
   inline bool has_link_table() const { return has_link_table_; }
+  inline void set_has_link_sfd(bool value) { has_link_sfd_ = value; }
+  inline bool has_link_sfd() const { return has_link_sfd_; }
   void set_batch_size(const int64_t v) { batch_size_ = v; }
   int64_t get_batch_size() const { return batch_size_; }
   bool is_vectorized() const { return batch_size_ > 0; }
@@ -335,6 +341,26 @@ public:
   inline int64_t get_ddl_execution_id() const { return ddl_execution_id_; }
   inline void set_ddl_task_id(const int64_t ddl_task_id) { ddl_task_id_ = ddl_task_id; }
   inline int64_t get_ddl_task_id() const { return ddl_task_id_; }
+  inline void set_enable_append(const bool enable_append) { enable_append_ = enable_append; }
+  inline bool get_enable_append() const { return enable_append_; }
+  inline void set_append_table_id(const uint64_t append_table_id) { append_table_id_ = append_table_id; }
+  inline uint64_t get_append_table_id() const { return append_table_id_; }
+  void set_record_plan_info(bool v) { need_record_plan_info_ = v; }
+  bool need_record_plan_info() const { return need_record_plan_info_; }
+  const common::ObString &get_rule_name() const { return stat_.rule_name_; }
+  inline void set_is_rewrite_sql(bool v) { stat_.is_rewrite_sql_ = v; }
+  inline bool is_rewrite_sql() const { return stat_.is_rewrite_sql_; }
+  inline void set_rule_version(int64_t version) { stat_.rule_version_ = version; }
+  inline int64_t get_rule_version() const { return stat_.rule_version_; }
+  inline void set_is_enable_udr(const bool v) { stat_.enable_udr_ = v; }
+  inline bool is_enable_udr() const { return stat_.enable_udr_; }
+  inline int set_rule_name(const common::ObString &rule_name)
+  {
+    return ob_write_string(allocator_, rule_name, stat_.rule_name_);
+  }
+  inline int64_t get_plan_error_cnt() { return stat_.evolution_stat_.error_cnt_; }
+  inline void update_plan_error_cnt() { ATOMIC_INC(&(stat_.evolution_stat_.error_cnt_)); }
+
 public:
   int inc_concurrent_num();
   void dec_concurrent_num();
@@ -362,10 +388,17 @@ public:
   const ObIArray<ObPlanPwjConstraint>& get_strict_constraints() const { return strict_constrinats_; }
   ObIArray<ObPlanPwjConstraint>& get_non_strict_constraints() { return non_strict_constrinats_; }
   const ObIArray<ObPlanPwjConstraint>& get_non_strict_constraints() const { return non_strict_constrinats_; }
-
+  ObIArray<ObDupTabConstraint> &get_dup_table_replica_constraints() {
+    return dup_table_replica_cons_;
+  }
+  const ObIArray<ObDupTabConstraint> &get_dup_table_replica_constraints() const {
+    return dup_table_replica_cons_;
+  }
   int set_location_constraints(const ObIArray<LocationConstraint> &base_constraints,
                                const ObIArray<ObPwjConstraint *> &strict_constraints,
-                               const ObIArray<ObPwjConstraint *> &non_strict_constraints);
+                               const ObIArray<ObPwjConstraint *> &non_strict_constraints,
+                               const ObIArray<ObDupTabConstraint> &dup_table_replica_cons);
+  bool has_same_location_constraints(const ObPhysicalPlan &r) const;
 
   ObIArray<transaction::ObEncryptMetaCache>& get_encrypt_meta_array()
   { return encrypt_meta_array_; }
@@ -411,6 +444,13 @@ public:
   inline const ObExprFrameInfo &get_expr_frame_info() const { return expr_frame_info_; }
 
   const ObOpSpec *get_root_op_spec() const { return root_op_spec_; }
+  inline bool is_link_dml_plan() {
+    bool is_link_dml = false;
+    if (NULL != get_root_op_spec()) {
+      is_link_dml = oceanbase::sql::ObPhyOperatorType::PHY_LINK_DML == get_root_op_spec()->type_;
+    }
+    return is_link_dml;
+  }
   void set_root_op_spec(ObOpSpec *spec) { root_op_spec_ = spec; is_new_engine_ = true; }
   inline bool need_consistent_snapshot() const { return need_consistent_snapshot_; }
   inline void set_need_consistent_snapshot(bool need_snapshot)
@@ -428,6 +468,21 @@ public:
   bool has_instead_of_trigger() const { return has_instead_of_trigger_; }
   virtual int update_cache_obj_stat(ObILibCacheCtx &ctx);
   void calc_whether_need_trans();
+  inline uint64_t get_min_cluster_version() const { return min_cluster_version_; }
+  inline void set_min_cluster_version(uint64_t curr_cluster_version)
+  {
+    if (curr_cluster_version > min_cluster_version_) {
+      min_cluster_version_ = curr_cluster_version;
+    }
+  }
+
+  int set_logical_plan(ObLogicalPlanRawData &logical_plan);
+  inline ObLogicalPlanRawData& get_logical_plan() { return logical_plan_; }
+  inline const ObLogicalPlanRawData& get_logical_plan()const { return logical_plan_; }
+  int set_feedback_info(ObExecContext &ctx);
+
+  void set_enable_px_fast_reclaim(bool value) { is_enable_px_fast_reclaim_ = value; }
+  bool is_enable_px_fast_reclaim() const { return is_enable_px_fast_reclaim_; }
 public:
   static const int64_t MAX_PRINTABLE_SIZE = 2 * 1024 * 1024;
 private:
@@ -492,7 +547,7 @@ private:
   int16_t regexp_op_count_;
   // for like expression's optimization
   int16_t like_op_count_;
-  // for px fast path https://yuque.antfin-inc.com/ob/sql/xzrw9m
+  // for px fast path
   int16_t px_exchange_out_op_count_;
   bool is_sfu_;
   //if the stmt  contains user variable assignment
@@ -536,6 +591,9 @@ private:
   // 每个分组是一个array，保存了对应基表在base_table_constraints_中的偏移
   // 如果t1, t2需要满足非严格约束，则对于分区裁剪后t1的每一个分区，都要求有一个t2的分区与其在相同的物理机器上
   PlanPwjConstraintArray non_strict_constrinats_;
+  // constraint for duplicate table to choose replica
+  // dist plan will use this as (dup_tab_pos, advisor_tab_pos) pos is position in base constraint
+  DupTabReplicaArray dup_table_replica_cons_;
 
 public:
   ObExprFrameInfo expr_frame_info_;
@@ -546,6 +604,8 @@ public:
   //@todo: yuchen.wyc add a temporary member to mark whether
   //the DML statement needs to be executed through get_next_row
   bool need_drive_dml_query_;
+  int64_t tx_id_; //for dblink recover xa tx
+  int64_t tm_sessid_; //for dblink get connection attached on tm session
 private:
   bool is_returning_; //是否设置了returning
 
@@ -576,6 +636,7 @@ public:
   bool use_pdml_; //is parallel dml plan
   bool use_temp_table_;
   bool has_link_table_;
+  bool has_link_sfd_;
   bool need_serial_exec_;//mark if need serial execute?
   bool temp_sql_can_prepare_;
   bool is_need_trans_;
@@ -589,6 +650,13 @@ public:
   //parallel encoding of output_expr in advance to speed up packet response
   bool is_packed_;
   bool has_instead_of_trigger_; // mask if has instead of trigger on view
+  uint64_t min_cluster_version_; // record min cluster version in code gen
+  bool need_record_plan_info_;
+  bool enable_append_; // for APPEND hint
+  uint64_t append_table_id_;
+  ObLogicalPlanRawData logical_plan_;
+  // for detecor manager
+  bool is_enable_px_fast_reclaim_;
 };
 
 inline void ObPhysicalPlan::set_affected_last_insert_id(bool affected_last_insert_id)

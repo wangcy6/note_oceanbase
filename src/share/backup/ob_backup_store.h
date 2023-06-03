@@ -28,6 +28,7 @@ struct ObBackupDestType final
   {
     DEST_TYPE_BACKUP_DATA = 0,
     DEST_TYPE_ARCHIVE_LOG,
+    DEST_TYPE_BACKUP_KEY,
     DEST_TYPE_MAX
   };
   static const char *get_str(const TYPE &type);
@@ -66,7 +67,7 @@ public:
   {
     return ObCompressorType::NONE_COMPRESSOR;
   }
-  bool operator ==(const ObBackupFormatDesc &desc) const;
+  bool is_format_equal(const ObBackupFormatDesc &desc) const;
 
   TO_STRING_KV(K_(cluster_name), K_(tenant_name), K_(path), K_(cluster_id), 
     K_(tenant_id), K_(incarnation), K_(dest_id), K_(dest_type));
@@ -110,7 +111,6 @@ public:
   bool is_init() const;
   const ObBackupDest &get_backup_dest() const;
   const ObBackupStorageInfo *get_storage_info() const;
-  int get_root_path(ObBackupPathString &root_path) const;
 
   // oss://backup_dest/format
   int get_format_file_path(ObBackupPathString &path) const;

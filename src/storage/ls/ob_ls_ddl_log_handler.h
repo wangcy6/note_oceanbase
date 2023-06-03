@@ -29,7 +29,7 @@ class ObLSDDLLogHandler : public logservice::ObIReplaySubHandler,
                           public logservice::ObICheckpointSubHandler
 {
 public:
-  ObLSDDLLogHandler() : is_inited_(false), is_online_(false), ls_(nullptr) {}
+  ObLSDDLLogHandler() : is_inited_(false), is_online_(false), ls_(nullptr), last_rec_scn_() {}
   ~ObLSDDLLogHandler() { reset(); }
 
 public:
@@ -57,7 +57,10 @@ public:
   share::SCN get_rec_scn() override final;
 private:
   int replay_ddl_redo_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
+<<<<<<< HEAD
   int replay_ddl_prepare_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int replay_ddl_commit_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
   int replay_ddl_tablet_schema_version_change_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
   int replay_ddl_start_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
@@ -67,6 +70,7 @@ private:
   ObLS *ls_;
   common::TCRWLock online_lock_;
   ObDDLRedoLogReplayer ddl_log_replayer_;
+  share::SCN last_rec_scn_;
 };
 
 } // storage

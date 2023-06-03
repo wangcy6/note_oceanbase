@@ -132,7 +132,7 @@ int ObMPStmtPrepare::multiple_query_check(ObSQLSessionInfo &session,
           // 进入本分支，说明在multi_query中的某条query parse失败，如果不是语法错，则进入该分支
           // 如果当前query_count 为1， 则不断连接;如果大于1，
           // 则需要在发错误包之后断连接，防止客户端一直在等接下来的回包
-          // 这个改动是为了解决https://aone.alibaba-inc.com/project/81079/issue/8834973
+          // 这个改动是为了解决
           ret = parse_stat.fail_ret_;
           need_response_error = true;
         }
@@ -194,9 +194,6 @@ int ObMPStmtPrepare::process()
       ret = OB_ERR_SESSION_INTERRUPTED;
       LOG_WARN("session has been killed", K(session.get_session_state()), K_(sql),
                K(session.get_sessid()), "proxy_sessid", session.get_proxy_sessid(), K(ret));
-    } else if (OB_UNLIKELY(packet_len > session.get_max_packet_size())) {
-      ret = OB_ERR_NET_PACKET_TOO_LARGE;
-      LOG_WARN("packet too large than allowd for the session", K_(sql), K(ret));
     } else if (OB_FAIL(session.get_query_timeout(query_timeout))) {
       LOG_WARN("fail to get query timeout", K_(sql), K(ret));
     } else if (OB_FAIL(gctx_.schema_service_->get_tenant_received_broadcast_version(
@@ -209,11 +206,14 @@ int ObMPStmtPrepare::process()
                && OB_FAIL(session.update_sys_variable(SYS_VAR_OB_TRACE_INFO,
                                                       pkt.get_trace_info()))) {
       LOG_WARN("fail to update trace info", K(ret));
-    } else if (pkt.get_extra_info().exist_sync_sess_info()
-               && OB_FAIL(ObMPUtils::sync_session_info(session,
-                                pkt.get_extra_info().get_sync_sess_info()))) {
-      LOG_WARN("fail to update sess info", K(ret));
-    } else if (OB_FAIL(ObMPUtils::init_flt_info(pkt.get_extra_info(), session,
+    } else if (FALSE_IT(session.set_txn_free_route(pkt.txn_free_route()))) {
+    } else if (OB_FAIL(process_extra_info(session, pkt, need_response_error))) {
+      LOG_WARN("fail get process extra info", K(ret));
+    } else if (FALSE_IT(session.post_sync_session_info())) {
+    } else if (OB_UNLIKELY(packet_len > session.get_max_packet_size())) {
+      ret = OB_ERR_NET_PACKET_TOO_LARGE;
+      LOG_WARN("packet too large than allowd for the session", K_(sql), K(ret));
+    } else if (OB_FAIL(sql::ObFLTUtils::init_flt_info(pkt.get_extra_info(), session,
                             conn->proxy_cap_flags_.is_full_link_trace_support()))) {
       LOG_WARN("failed to init flt extra info", K(ret));
     } else {
@@ -232,6 +232,7 @@ int ObMPStmtPrepare::process()
 
       bool has_more = false;
       bool force_sync_resp = false;
+      need_disconnect = false;
       need_response_error = false;
       if (OB_FAIL(multiple_query_check(session, sql_, force_sync_resp, need_response_error))) {
         need_disconnect = OB_NOT_SUPPORTED == ret ? false : true; 
@@ -257,12 +258,14 @@ int ObMPStmtPrepare::process()
         FLT_END_TRACE();
     }
 
-    if (!OB_SUCC(ret) && need_response_error && is_conn_valid()) {
-      send_error_packet(ret, NULL);
+    if (OB_FAIL(ret) && is_conn_valid()) {
+      if (need_response_error) {
+        send_error_packet(ret, NULL);
+      }
       if (need_disconnect) {
         force_disconnect();
+        LOG_WARN("disconnect connection when process query", K(ret));
       }
-      LOG_WARN("disconnect connection when process query", K(ret));
     }
 
     session.set_last_trace_id(ObCurTraceId::get_trace_id());
@@ -280,13 +283,12 @@ int ObMPStmtPrepare::process_prepare_stmt(const ObMultiStmtItem &multi_stmt_item
 {
   int ret = OB_SUCCESS;
   bool need_response_error = true;
-  bool use_sess_trace = false;
   int64_t tenant_version = 0;
   int64_t sys_version = 0;
   setup_wb(session);
 
   ObSessionStatEstGuard stat_est_guard(get_conn()->tenant_->id(), session.get_sessid());
-  if (OB_FAIL(init_process_var(ctx_, multi_stmt_item, session, use_sess_trace))) {
+  if (OB_FAIL(init_process_var(ctx_, multi_stmt_item, session))) {
     LOG_WARN("init process var faield.", K(ret), K(multi_stmt_item));
   } else {
     const bool enable_trace_log = lib::is_trace_log_enabled();
@@ -339,7 +341,8 @@ int ObMPStmtPrepare::process_prepare_stmt(const ObMultiStmtItem &multi_stmt_item
   //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
   int tmp_ret = OB_SUCCESS;
   //清空WARNING BUFFER
-  tmp_ret = do_after_process(session, use_sess_trace, ctx_, async_resp_used);
+  tmp_ret = do_after_process(session, ctx_, async_resp_used);
+  tmp_ret = record_flt_trace(session);
   // need_response_error这个变量保证仅在
   // do { do_process } while(retry) 之前出错才会
   // 走到send_error_packet逻辑
@@ -360,7 +363,7 @@ int ObMPStmtPrepare::check_and_refresh_schema(uint64_t login_tenant_id,
 
   if (login_tenant_id != effective_tenant_id) {
     // do nothing
-    // https://aone.alibaba-inc.com/issue/18698167
+    //
   } else if (OB_ISNULL(gctx_.schema_service_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("null schema service", K(ret), K(gctx_));
@@ -396,6 +399,7 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
   bool is_diagnostics_stmt = false;
   bool need_response_error = true;
   const ObString &sql = ctx_.multi_stmt_item_.get_sql();
+  ObPsStmtId inner_stmt_id = OB_INVALID_ID;
 
   /* !!!
    * 注意req_timeinfo_guard一定要放在result前面
@@ -408,7 +412,7 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
     {
       ObMaxWaitGuard max_wait_guard(enable_perf_event ? &audit_record.exec_record_.max_wait_event_ : NULL, di);
       ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
-      if (enable_sql_audit) {
+      if (enable_perf_event) {
         audit_record.exec_record_.record_start(di);
       }
       result.set_has_more_result(has_more_result);
@@ -441,11 +445,14 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
           LOG_WARN("run stmt_query failed, check if need retry",
                    K(ret), K(cli_ret), K(retry_ctrl_.need_retry()), K(sql));
           ret = cli_ret;
+        } else if (common::OB_INVALID_ID != result.get_statement_id()
+                   && OB_FAIL(session.get_inner_ps_stmt_id(result.get_statement_id(), inner_stmt_id))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("ps : get inner stmt id fail.", K(ret), K(result.get_statement_id()));
         } else {
           //监控项统计开始
-          if (enable_perf_event) {
-            exec_start_timestamp_ = ObTimeUtility::current_time();
-          }
+          exec_start_timestamp_ = ObTimeUtility::current_time();
+
           // 本分支内如果出错，全部会在response_result内部处理妥当
           // 无需再额外处理回复错误包
           need_response_error = false;
@@ -466,20 +473,24 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
                       plan_ctx->get_timeout_timestamp());
             }
           }
+          //监控项统计结束
+          exec_end_timestamp_ = ObTimeUtility::current_time();
+
+          // some statistics must be recorded for plan stat, even though sql audit disabled
+          bool first_record = (1 == audit_record.try_cnt_);
+          ObExecStatUtils::record_exec_timestamp(*this, first_record, audit_record.exec_timestamp_);
+          audit_record.exec_timestamp_.update_stage_time();
+
           if (enable_perf_event) {
-            exec_end_timestamp_ = ObTimeUtility::current_time();
-            if (lib::is_diagnose_info_enabled() && !THIS_THWORKER.need_retry()) {
+            audit_record.exec_record_.record_end(di);
+            audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
+            audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
+            audit_record.update_event_stage_state();
+            if (!THIS_THWORKER.need_retry()) {
               const int64_t time_cost = exec_end_timestamp_ - get_receive_timestamp();
               EVENT_INC(SQL_PS_PREPARE_COUNT);
               EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
             }
-          }
-          if (enable_sql_audit) {
-            audit_record.exec_record_.record_end(di);
-            bool first_record = (1 == audit_record.try_cnt_);
-            ObExecStatUtils::record_exec_timestamp(*this,
-                first_record,
-                audit_record.exec_timestamp_);
           }
         }
       }
@@ -524,34 +535,18 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
         }
       }
     }
-    //set read_only
-    if (OB_SUCC(ret)) {
-      if (session.get_in_transaction()) {
-        if (ObStmt::is_write_stmt(result.get_stmt_type(), result.has_global_variable())) {
-          session.set_has_exec_write_stmt(true);
-        }
-      } else {
-        session.set_has_exec_write_stmt(false);
-      }
-    }
     if (enable_sql_audit) {
       audit_record.status_ = ret;
       audit_record.client_addr_ = session.get_peer_addr();
       audit_record.user_client_addr_ = session.get_user_client_addr();
       audit_record.user_group_ = THIS_WORKER.get_group_id();
-      audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
-      audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
       audit_record.ps_stmt_id_ = result.get_statement_id();
-      audit_record.update_stage_stat();
-      bool need_retry = (THIS_THWORKER.need_retry()
-                         || RETRY_TYPE_NONE != retry_ctrl_.get_retry_type());
-      if (NULL != result.get_exec_context().get_sql_ctx()) {
-        ObSQLUtils::handle_audit_record(need_retry, EXECUTE_PS_PREPARE, session,
-          result.get_exec_context().get_sql_ctx()->is_sensitive_);
-      } else {
-        ObSQLUtils::handle_audit_record(need_retry, EXECUTE_PS_PREPARE, session);
-      }
+      audit_record.ps_inner_stmt_id_ = inner_stmt_id;
+      audit_record.is_perf_event_closed_ = !lib::is_diagnose_info_enabled();
     }
+    bool need_retry = (THIS_THWORKER.need_retry()
+                       || RETRY_TYPE_NONE != retry_ctrl_.get_retry_type());
+    ObSQLUtils::handle_audit_record(need_retry, EXECUTE_PS_PREPARE, session, ctx_.is_sensitive_);
   }
 
   // reset thread waring buffer in sync mode
@@ -578,11 +573,6 @@ int ObMPStmtPrepare::response_result(
     LOG_WARN("send param packet failed", K(ret));
   } else if (OB_FAIL(send_column_packet(session, result))) {
     LOG_WARN("send column packet failed", K(ret));
-  } else if (need_send_extra_ok_packet()) {
-    ObOKPParam ok_param;
-    if (OB_FAIL(send_ok_packet(session, ok_param))) {
-      LOG_WARN("fail to send ok packet", K(ret));
-    }
   }
   return ret;
 }
@@ -591,18 +581,33 @@ int ObMPStmtPrepare::send_prepare_packet(const ObMySQLResultSet &result)
 {
   int ret = OB_SUCCESS;
   OMPKPrepare prepare_packet;
-  prepare_packet.set_statement_id(static_cast<uint32_t>(result.get_statement_id()));
-  prepare_packet.set_column_num(static_cast<uint16_t>(result.get_field_cnt()));
-  prepare_packet.set_warning_count(static_cast<uint16_t>(result.get_warning_count()));
-  if (OB_ISNULL(result.get_param_fields())) {
+  const ParamsFieldIArray *params = result.get_param_fields();
+  const ColumnsFieldIArray *columns = result.get_field_columns();
+  if (OB_ISNULL(params) || OB_ISNULL(columns)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), K(result.get_param_fields()));
+    LOG_WARN("invalid argument", K(ret), K(columns), K(params));
   } else {
-    prepare_packet.set_param_num(
-      static_cast<uint16_t>(result.get_param_fields()->count()));
+    prepare_packet.set_statement_id(static_cast<uint32_t>(result.get_statement_id()));
+    prepare_packet.set_column_num(static_cast<uint16_t>(result.get_field_cnt()));
+    prepare_packet.set_warning_count(static_cast<uint16_t>(result.get_warning_count()));
+    if (OB_ISNULL(result.get_param_fields())) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid argument", K(ret), K(result.get_param_fields()));
+    } else {
+      prepare_packet.set_param_num(
+        static_cast<uint16_t>(result.get_param_fields()->count()));
+    }
   }
+
   if (OB_SUCC(ret) && OB_FAIL(response_packet(prepare_packet, const_cast<ObSQLSessionInfo *>(&result.get_session())))) {
     LOG_WARN("response packet failed", K(ret));
+  }
+
+  if (OB_SUCC(ret) && need_send_extra_ok_packet() && columns->count() == 0 && params->count() == 0) {
+    ObOKPParam ok_param;
+    if (OB_FAIL(send_ok_packet(*(const_cast<ObSQLSessionInfo *>(&result.get_session())), ok_param))) {
+      LOG_WARN("fail to send ok packet", K(ret));
+    }
   }
   return ret;
 }
@@ -633,8 +638,17 @@ int ObMPStmtPrepare::send_column_packet(const ObSQLSessionInfo &session,
     if (OB_SUCC(ret)) {
       if (OB_FAIL(packet_sender_.update_last_pkt_pos())) {
         LOG_WARN("failed to update last packet pos", K(ret));
-      } else if (OB_FAIL(send_eof_packet(session, result))) {
-        LOG_WARN("send eof field failed", K(ret));
+      } else {
+        if (need_send_extra_ok_packet()) {
+          ObOKPParam ok_param;
+          if (OB_FAIL(send_eof_packet(session, result, &ok_param))) {
+            LOG_WARN("send eof field failed", K(ret));
+          }
+        } else {
+          if (OB_FAIL(send_eof_packet(session, result))) {
+            LOG_WARN("send eof field failed", K(ret));
+          }
+        }
       }
     }
   }
@@ -646,9 +660,10 @@ int ObMPStmtPrepare::send_param_packet(const ObSQLSessionInfo &session,
 {
   int ret = OB_SUCCESS;
   const ParamsFieldIArray *params = result.get_param_fields();
-  if (OB_ISNULL(params)) {
+  const ColumnsFieldIArray *columns = result.get_field_columns();
+  if (OB_ISNULL(params) || OB_ISNULL(columns)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), K(params));
+    LOG_WARN("invalid argument", K(ret), K(columns), K(params));
   } else if (params->count() > 0) {
     ObMySQLField field;
     ret = result.next_param(field);
@@ -665,8 +680,15 @@ int ObMPStmtPrepare::send_param_packet(const ObSQLSessionInfo &session,
       ret = OB_SUCCESS;
     }
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(send_eof_packet(session, result))) {
-        LOG_WARN("send eof field failed", K(ret));
+      if (need_send_extra_ok_packet() && columns->count() == 0) {
+        ObOKPParam ok_param;
+        if (OB_FAIL(send_eof_packet(session, result, &ok_param))) {
+          LOG_WARN("send eof field failed", K(ret));
+        }
+      } else {
+        if (OB_FAIL(send_eof_packet(session, result))) {
+          LOG_WARN("send eof field failed", K(ret));
+        }
       }
     }
   }

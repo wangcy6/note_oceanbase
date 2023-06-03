@@ -18,6 +18,7 @@
 #include "lib/mysqlclient/ob_mysql_statement.h"
 #include "lib/mysqlclient/ob_server_connection_pool.h"
 #include "lib/mysqlclient/ob_mysql_connection_pool.h"
+#include "lib/mysqlclient/ob_dblink_error_trans.h"
 
 namespace oceanbase
 {
@@ -88,53 +89,74 @@ int ObMySQLStatement::execute_update(int64_t &affected_rows)
 {
   int ret = OB_SUCCESS;
   int tmp_ret = 0;
+  const int CR_SERVER_LOST = 2013;
   if (OB_ISNULL(conn_) || OB_ISNULL(stmt_) || OB_ISNULL(sql_str_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("invalid mysql stmt", K_(conn), KP_(stmt), KP_(sql_str), K(ret));
+  } else if (OB_UNLIKELY(!conn_->usable())) {
+    ret = -CR_SERVER_LOST;
+    conn_->set_last_error(ret);
+    LOG_WARN("conn already failed, should not execute query again!", K(conn_));
   } else {
     int64_t begin = ObTimeUtility::current_monotonic_raw_time();
     if (0 != (tmp_ret = mysql_real_query(stmt_, sql_str_, STRLEN(sql_str_)))) {
       ret = -mysql_errno(stmt_);
-      LOG_WARN("fail to query server","server", stmt_->host, "port", stmt_->port,
-               "err_msg", mysql_error(stmt_), K(tmp_ret), K(ret));
+      LOG_WARN("fail to query server", "sessid",  conn_->get_sessid(), "server", stmt_->host, "port", stmt_->port,
+               "err_msg", mysql_error(stmt_), K(tmp_ret), K(ret), K(sql_str_));
       if (OB_NOT_MASTER == tmp_ret) {
         // conn -> server pool -> connection pool
         conn_->get_root()->get_root()->signal_refresh(); // refresh server pool immediately
+      }
+      if (OB_INVALID_ID != conn_->get_dblink_id()) {
+        TRANSLATE_CLIENT_ERR(ret, mysql_error(stmt_));
+      }
+      if (is_need_disconnect_error(ret)) {
+        conn_->set_usable(false);
       }
     } else {
       affected_rows = mysql_affected_rows(stmt_);
     }
     int64_t end = ObTimeUtility::current_monotonic_raw_time();
-    LOG_TRACE("execute stat", "excute time(us)", (end - begin), "SQL:", sql_str_);
+    LOG_TRACE("execute stat", "excute time(us)", (end - begin), "SQL:", sql_str_, K(ret));
   }
   return ret;
 }
 
 
-ObMySQLResult *ObMySQLStatement::execute_query()
+ObMySQLResult *ObMySQLStatement::execute_query(bool enable_use_result)
 {
   ObMySQLResult *result = NULL;
   int ret = OB_SUCCESS;
+  const int CR_SERVER_LOST = 2013;
   if (OB_ISNULL(conn_) || OB_ISNULL(stmt_) || OB_ISNULL(sql_str_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("invalid mysql stmt", K_(conn), K_(stmt), KP_(sql_str), K(ret));
+  } else if (OB_UNLIKELY(!conn_->usable())) {
+    ret = -CR_SERVER_LOST;
+    conn_->set_last_error(ret);
+    LOG_WARN("conn already failed, should not execute query again", K(conn_));
   } else {
     int64_t begin = ObTimeUtility::current_monotonic_raw_time();
     if (0 != mysql_real_query(stmt_, sql_str_, STRLEN(sql_str_))) {
       ret = -mysql_errno(stmt_);
       const int ER_LOCK_WAIT_TIMEOUT = -1205;
       if (ER_LOCK_WAIT_TIMEOUT == ret) {
-        LOG_INFO("fail to query server", "host", stmt_->host, "port", stmt_->port,
+        LOG_INFO("fail to query server", "sessid", conn_->get_sessid(), "host", stmt_->host, "port", stmt_->port,
                "err_msg", mysql_error(stmt_), K(ret), K(sql_str_));
       } else {
-        LOG_WARN("fail to query server", "host", stmt_->host, "port", stmt_->port,
+        LOG_WARN("fail to query server", "host", stmt_->host, "port", stmt_->port, K(conn_->get_sessid()),
                "err_msg", mysql_error(stmt_), K(ret), K(STRLEN(sql_str_)), K(sql_str_));
       }
       if (OB_SUCCESS == ret) {
         ret = OB_ERR_SQL_CLIENT;
         LOG_WARN("can not get errno", K(ret));
+      } else if (OB_INVALID_ID != conn_->get_dblink_id()) {
+        TRANSLATE_CLIENT_ERR(ret, mysql_error(stmt_));
       }
-    } else if (OB_FAIL(result_.init())) {
+      if (is_need_disconnect_error(ret)) {
+        conn_->set_usable(false);
+      }
+    } else if (OB_FAIL(result_.init(enable_use_result))) {
       LOG_WARN("fail to init sql result", K(ret));
     } else {
       result = &result_;
@@ -145,6 +167,50 @@ ObMySQLResult *ObMySQLStatement::execute_query()
   }
   return result;
 }
+
+bool ObMySQLStatement::is_need_disconnect_error(int ret)
+{
+  bool need_disconnect = false;
+
+  constexpr int CR_UNKNOWN_ERROR = 2000;
+  constexpr int CR_SOCKET_CREATE_ERROR = 2001;
+  constexpr int CR_CONNECTION_ERROR = 2002;
+  constexpr int CR_CONN_HOST_ERROR = 2003;
+  constexpr int CR_IPSOCK_ERROR = 2004;
+  constexpr int CR_UNKNOWN_HOST = 2005;
+  constexpr int CR_SERVER_GONE_ERROR = 2006;
+  constexpr int CR_WRONG_HOST_INFO = 2009;
+  constexpr int CR_LOCALHOST_CONNECTION = 2010;
+  constexpr int CR_TCP_CONNECTION = 2011;
+  constexpr int CR_SERVER_HANDSHAKE_ERR = 2012;
+  constexpr int CR_SERVER_LOST = 2013;
+  constexpr int CR_COMMANDS_OUT_OF_SYNC = 2014;
+  int obclient_connection_errnos[] = {
+    CR_UNKNOWN_ERROR,
+    CR_SOCKET_CREATE_ERROR,
+    CR_CONNECTION_ERROR,
+    CR_CONN_HOST_ERROR,
+    CR_IPSOCK_ERROR,
+    CR_UNKNOWN_HOST,
+    CR_SERVER_GONE_ERROR,
+    CR_WRONG_HOST_INFO,
+    CR_LOCALHOST_CONNECTION,
+    CR_TCP_CONNECTION,
+    CR_SERVER_HANDSHAKE_ERR,
+    CR_SERVER_LOST,
+    CR_COMMANDS_OUT_OF_SYNC
+  };
+
+  ret = abs(ret);
+  for (int64_t i = 0; i < sizeof(obclient_connection_errnos) / sizeof(int); ++i) {
+    if (ret == obclient_connection_errnos[i]) {
+      need_disconnect = true;// need disconnect when there is a connection error
+      break;
+    }
+  }
+  return need_disconnect;
+}
+
 } // end namespace sqlclient
 } // end namespace common
 } // end namespace oceanbase

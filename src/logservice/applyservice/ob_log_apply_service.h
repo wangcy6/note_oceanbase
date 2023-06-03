@@ -65,8 +65,16 @@ struct LSApplyStat
 
 struct ApplyDiagnoseInfo
 {
+<<<<<<< HEAD
+=======
+  ApplyDiagnoseInfo() { reset(); }
+  ~ApplyDiagnoseInfo() { reset(); }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   share::SCN max_applied_scn_;
   TO_STRING_KV(K(max_applied_scn_));
+  void reset() {
+    max_applied_scn_.reset();
+  }
 };
 
 class ObApplyFsCb : public palf::PalfFSCb
@@ -172,7 +180,11 @@ public:
   int unregister_file_size_cb();
   void close_palf_handle();
   //最大连续回调位点
+<<<<<<< HEAD
   int get_min_unapplied_scn(share::SCN &scn);
+=======
+  int get_max_applied_scn(share::SCN &scn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int stat(LSApplyStat &stat) const;
   int handle_drop_cb();
   int diagnose(ApplyDiagnoseInfo &diagnose_info);
@@ -281,7 +293,11 @@ public:
                     palf::LSN &end_lsn);
   int switch_to_leader(const share::ObLSID &id, const int64_t proposal_id);
   int switch_to_follower(const share::ObLSID &id);
+<<<<<<< HEAD
   int get_min_unapplied_scn(const share::ObLSID &id, share::SCN &scn);
+=======
+  int get_max_applied_scn(const share::ObLSID &id, share::SCN &scn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int push_task(ObApplyServiceTask *task);
   int wait_append_sync(const share::ObLSID &ls_id);
   int stat_for_each(const common::ObFunction<int (const ObApplyStatus &)> &func);

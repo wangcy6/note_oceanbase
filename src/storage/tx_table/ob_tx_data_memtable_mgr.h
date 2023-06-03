@@ -25,6 +25,52 @@ namespace storage
 {
 class TxDataMemtableMgrFreezeGuard;
 
+class ObTxDataMemtableWriteGuard
+{
+public:
+  ObTxDataMemtableWriteGuard() : size_(0)
+  {
+  }
+  ~ObTxDataMemtableWriteGuard() { reset(); }
+
+  int push_back_table(memtable::ObIMemtable *i_memtable, ObTenantMetaMemMgr *t3m, const ObITable::TableType table_type)
+  {
+    int ret = OB_SUCCESS;
+    ObTxDataMemtable *tx_data_memtable = nullptr;
+    if (OB_FAIL(handles_[size_].set_table(static_cast<ObITable *const>(i_memtable), t3m, table_type))) {
+      STORAGE_LOG(WARN, "set i memtable to handle failed", KR(ret), KP(i_memtable), KP(t3m), K(table_type));
+    } else if (OB_FAIL(handles_[size_].get_tx_data_memtable(tx_data_memtable))) {
+      STORAGE_LOG(ERROR, "get tx data memtable from memtable handle failed", KR(ret), K(handles_[size_]));
+    } else if (OB_ISNULL(tx_data_memtable)) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(ERROR, "tx data memtable is unexpected nullptr", K(ret), KPC(tx_data_memtable));
+    } else {
+      tx_data_memtable->inc_write_ref();
+      size_++;
+    }
+    return ret;
+  }
+
+  void reset()
+  {
+    for (int i = 0; i < MAX_TX_DATA_MEMTABLE_CNT; i++) {
+      if (handles_[i].is_valid()) {
+        ObTxDataMemtable *tx_data_memtable = nullptr;
+        handles_[i].get_tx_data_memtable(tx_data_memtable);
+        tx_data_memtable->dec_write_ref();
+      }
+      handles_[i].reset();
+    }
+    size_ = 0;
+  }
+
+  TO_STRING_KV(K(size_), K(handles_[0]), K(handles_[1]));
+
+public:
+  int64_t size_;
+  ObTableHandleV2 handles_[MAX_TX_DATA_MEMTABLE_CNT];
+};
+
 class ObTxDataMemtableMgr : public ObIMemtableMgr, public checkpoint::ObCommonCheckpoint
 {
 friend TxDataMemtableMgrFreezeGuard;
@@ -37,7 +83,8 @@ private:
 
 public:  // ObTxDataMemtableMgr
   ObTxDataMemtableMgr()
-    : is_freezing_(false),
+    : ObIMemtableMgr(LockType::OB_SPIN_RWLOCK, &lock_def_),
+      is_freezing_(false),
       ls_id_(0),
       tx_data_table_(nullptr),
       ls_tablet_svr_(nullptr),
@@ -120,9 +167,20 @@ protected:
                                      const bool force);
 
 private:  // ObTxDataMemtableMgr
+<<<<<<< HEAD
   int create_memtable_(const share::SCN clog_checkpoint_scn, const int64_t schema_version);
 
   int freeze_();
+=======
+  int create_memtable_(const share::SCN clog_checkpoint_scn,
+                       const int64_t schema_version,
+                       const int64_t buckets_cnt);
+
+  int freeze_();
+  int calc_new_memtable_buckets_cnt_(const double load_factory,
+                                     const int64_t old_buckests_cnt,
+                                     int64_t &new_buckest_cnt);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   int get_all_memtables_(ObTableHdlArray &handles);
 
@@ -136,6 +194,7 @@ private:  // ObTxDataMemtableMgr
   ObTxDataTable *tx_data_table_;
   ObLSTabletService *ls_tablet_svr_;
   SliceAllocator *slice_allocator_;
+  common::SpinRWLock lock_def_;
 };
 
 class TxDataMemtableMgrFreezeGuard

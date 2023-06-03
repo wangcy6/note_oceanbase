@@ -67,24 +67,35 @@ int ObRemoteBaseExecuteP<T>::base_before_process(int64_t tenant_schema_version,
   int64_t tenant_local_version = -1;
   int64_t sys_local_version = -1;
   int64_t query_timeout = 0;
+  uint64_t tenant_id = 0;
+
   if (OB_ISNULL(gctx_.schema_service_) || OB_ISNULL(gctx_.sql_engine_)
       || OB_ISNULL(gctx_.executor_rpc_) || OB_ISNULL(session_info)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("schema service or sql engine is NULL", K(ret),
               K(gctx_.schema_service_), K(gctx_.sql_engine_));
+  } else if (GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_1_0_0 &&
+      (tenant_schema_version == OB_INVALID_VERSION || sys_schema_version == OB_INVALID_VERSION)) {
+    // For 4.1 and later versions, it is not allowed to pass schema_version as -1
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid tenant_schema_version and sys_schema_version", K(ret),
+        K(tenant_schema_version), K(sys_schema_version));
+  } else if (FALSE_IT(tenant_id = session_info->get_effective_tenant_id())) {
+    // record tanent_id
+  } else if (tenant_id == 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid tanent_id", K(ret));
   } else if (FALSE_IT(THIS_WORKER.set_compatibility_mode(
       ORACLE_MODE == session_info->get_compatibility_mode() ?
           lib::Worker::CompatMode::ORACLE : lib::Worker::CompatMode::MYSQL))) {
     //设置RPC work线程的租户兼容模式
-  } else if (OB_FAIL(gctx_.schema_service_->get_tenant_refreshed_schema_version(
-      session_info->get_effective_tenant_id(), tenant_local_version))) {
+  } else if (OB_FAIL(gctx_.schema_service_->get_tenant_refreshed_schema_version(tenant_id, tenant_local_version))) {
     if (OB_ENTRY_NOT_EXIST == ret) {
       // 本地schema可能还没刷出来
       tenant_local_version = OB_INVALID_VERSION;
       ret = OB_SUCCESS;
     } else {
-      LOG_WARN("fail to get tenant refreshed schema version", K(ret),
-               K(session_info->get_effective_tenant_id()));
+      LOG_WARN("fail to get tenant refreshed schema version", K(ret), K(tenant_id));
     }
   } else if (OB_FAIL(gctx_.schema_service_->get_tenant_refreshed_schema_version(
       OB_SYS_TENANT_ID, sys_local_version))) {
@@ -101,90 +112,78 @@ int ObRemoteBaseExecuteP<T>::base_before_process(int64_t tenant_schema_version,
     }
   }
 
-  if (OB_SUCC(ret) && tenant_schema_version != tenant_local_version) {
-    // 获取schema_guard (tenant_local_version, sys_schema_version)
+  if (OB_SUCC(ret)) {
+    // First fetch the latest local schema_guard
     if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(
-            session_info->get_effective_tenant_id(),
-            schema_guard_))) {
-      LOG_WARN("fail to get schema guard", K(ret),K(tenant_local_version), K(sys_local_version),
-          K(tenant_schema_version), K(sys_schema_version));
-    }
-
-    if (OB_FAIL(ret)) {
-      // do nothing
-    } else if (OB_SUCC(sql::ObSQLUtils::check_table_version(table_version_equal,
-        dependency_tables, schema_guard_))) {
-      // 检查table version返回成功
-      if (!table_version_equal) {
-        // tenant_schema_version > tenant_local_version 刷新schema，使用指定的schema版本获取guard
-        // tenant_schema_version < tenant_local_version 本地超前，用task指定的schema版本获取guard
-        if (tenant_schema_version > tenant_local_version) {
-          // 本地schema version落后。此时需要刷新
-          if (OB_FAIL(gctx_.schema_service_->async_refresh_schema(
-                  session_info->get_effective_tenant_id(), tenant_schema_version))) {
-            LOG_WARN("fail to push back effective_tenant_id", K(ret),
-                     K(session_info->get_effective_tenant_id()),
-                     K(tenant_schema_version), K(tenant_local_version));
-          }
-        }
-      }
-    } else {
-      // check table version失败, 忽略错误，继续向下
-      // 无论本地schema版本超前还是落后于，都使用task指定的schema version
-      ret = OB_SUCCESS;
-      LOG_INFO("fail to check table_schema_version", K(ret));
-      if (tenant_schema_version > tenant_local_version) {
-        // 本地落后于task指定的schema version，刷新本地的schema
-        if (OB_FAIL(gctx_.schema_service_->async_refresh_schema(
-                session_info->get_effective_tenant_id(), tenant_schema_version))) {
-          LOG_WARN("fail to push back effective_tenant_id", K(ret),
-                   K(session_info->get_effective_tenant_id()),
-                   K(tenant_schema_version), K(tenant_local_version));
-        }
-      }
+        tenant_id, schema_guard_, tenant_local_version, sys_local_version))) {
+      LOG_WARN("fail to get schema guard", K(ret), K(tenant_local_version),
+          K(sys_local_version), K(tenant_schema_version), K(sys_schema_version));
     }
   }
 
-  // table_version_equal == false：
-  // 只有当table_version_equal==true时，使用local_schema_version获取schema guard，
-  // 其余情况都需要需要获取task指定schema版本的schema_guard
-  if (OB_SUCC(ret) && !table_version_equal) {
-    if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(
-          session_info->get_effective_tenant_id(),
-          schema_guard_,
-          tenant_schema_version,
-          sys_schema_version))) {
-        LOG_WARN("fail to get schema guard", K(ret), K(tenant_schema_version), K(sys_schema_version));
+  if (OB_SUCC(ret) && tenant_schema_version != tenant_local_version) {
+    // You must have obtained schema_guard_ before,
+    // and obtained the latest schema version of the current server
+    if (OB_FAIL(ObSQLUtils::check_table_version(table_version_equal, dependency_tables, schema_guard_))) {
+      LOG_WARN("fail to check table_version", K(ret), K(dependency_tables));
+    } else if (!table_version_equal) {
+      if (tenant_schema_version == OB_INVALID_VERSION) {
+        // When the table version is inconsistent, the schema_version sent from the control terminal is -1,
+        // and you need to retry until the table version is consistent
+        ret = OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH;
+        LOG_WARN("dependency table version is not equal, need retry", K(ret));
+      } else if (tenant_schema_version > tenant_local_version) {
+        // The local schema version is behind. At this point,
+        // you need to refresh the schema version and reacquire schema_guard
+        if (OB_FAIL(gctx_.schema_service_->async_refresh_schema(tenant_id, tenant_schema_version))) {
+          LOG_WARN("fail to push back effective_tenant_id", K(ret), K(tenant_schema_version),
+              K(tenant_id), K(tenant_local_version));
+        } else if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(
+            tenant_id, schema_guard_, tenant_schema_version, sys_schema_version))) {
+          LOG_WARN("fail to get schema guard", K(ret), K(tenant_schema_version), K(sys_schema_version));
+        }
+      } else if (tenant_schema_version <= tenant_local_version) {
+        // In this scenario, schema_guard needs to be taken again
+        if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(
+            tenant_id, schema_guard_, tenant_schema_version, sys_schema_version))) {
+         LOG_WARN("fail to get schema guard", K(ret), K(tenant_schema_version), K(sys_schema_version));
+        }
       }
+    } else {
+      // If table_version_equal == true, the table schema is consistent,
+      // At this point, there is no need to reacquire schema_guard, the current schema_guard is available
+    }
   }
 
   int64_t local_tenant_schema_version = -1;
   if (OB_FAIL(ret)) {
     //do nothing
-  } else if (OB_FAIL(schema_guard_.get_schema_version(session_info->get_effective_tenant_id(), local_tenant_schema_version))) {
+  } else if (OB_FAIL(schema_guard_.get_schema_version(tenant_id, local_tenant_schema_version))) {
     LOG_WARN("get schema version from schema_guard failed", K(ret));
   } else if (OB_FAIL(session_info->get_query_timeout(query_timeout))) {
     LOG_WARN("get query timeout failed", K(ret));
   } else {
     THIS_WORKER.set_timeout_ts(query_timeout + session_info->get_query_start_time());
-    session_info->set_plan_cache_manager(gctx_.sql_engine_->get_plan_cache_manager());
     session_info->set_peer_addr(ObRpcProcessor<T>::arg_.get_ctrl_server());
     exec_ctx_.set_my_session(session_info);
     exec_ctx_.show_session();
     exec_ctx_.get_sql_ctx()->session_info_ = session_info;
+    exec_ctx_.set_mem_attr(ObMemAttr(tenant_id, ObModIds::OB_SQL_EXEC_CONTEXT, ObCtxIds::EXECUTE_CTX_ID));
+
     vt_ctx.session_ = session_info;
     vt_ctx.vt_iter_factory_ = &vt_iter_factory_;
     vt_ctx.schema_guard_ = &schema_guard_;
     exec_ctx_.set_virtual_table_ctx(vt_ctx);
   }
-
+  LOG_TRACE("print tenant_schema_version for remote_execute", K(tenant_schema_version), K(tenant_local_version),
+      K(local_tenant_schema_version), K(table_version_equal), K(ret), K(sys_schema_version), K(sys_local_version));
   if (OB_FAIL(ret)) {
     if (local_tenant_schema_version != tenant_schema_version) {
       if (is_schema_error(ret)) {
         ret = OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH; // 重写错误码，使得scheduler端能等待远端schema刷新并重试
       }
-    } else if (-1 == tenant_schema_version && ret == OB_TENANT_NOT_EXIST) {
-      // fix bug: https://work.aone.alibaba-inc.com/issue/45890226
+    } else if (ret == OB_TENANT_NOT_EXIST) {
+      // fix bug:
       // 控制端重启observer，导致租户schema没刷出来，发送过来的schema_version异常, 让对端重试
       ret = OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH;
     } else {
@@ -195,8 +194,7 @@ int ObRemoteBaseExecuteP<T>::base_before_process(int64_t tenant_schema_version,
     // overwrite ret to make sure sql will retry
     if (OB_NOT_NULL(session_info)
         && OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH == ret
-        && GSCHEMASERVICE.is_schema_error_need_retry(
-           NULL, session_info->get_effective_tenant_id())) {
+        && GSCHEMASERVICE.is_schema_error_need_retry(NULL, tenant_id)) {
       ret = OB_ERR_REMOTE_SCHEMA_NOT_FULL;
     }
   }
@@ -427,6 +425,7 @@ int ObRemoteBaseExecuteP<T>::execute_remote_plan(ObExecContext &exec_ctx,
   ObPhysicalPlanCtx *plan_ctx = exec_ctx.get_physical_plan_ctx();
   ObOperator *se_op = nullptr; // static engine operator
   exec_ctx.set_use_temp_expr_ctx_cache(true);
+  FLTSpanGuard(remote_execute);
   if (OB_ISNULL(plan_ctx) || OB_ISNULL(session)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("op is NULL", K(ret), K(plan_ctx), K(session));
@@ -528,7 +527,7 @@ bool ObRemoteBaseExecuteP<T>::query_can_retry_in_remote(int &last_err,
         last_err = err;
         if (OB_SUCCESS != (err = exec_ctx_.check_status())) {
           bret = false;
-          LOG_WARN("cehck execute status failed", K(err), K(last_err), K(bret));
+          LOG_WARN_RET(err, "cehck execute status failed", K(err), K(last_err), K(bret));
           err = last_err; //返回真实值
         } else {
           LOG_INFO("query retry in remote", K(retry_times), K(last_err));
@@ -540,7 +539,7 @@ bool ObRemoteBaseExecuteP<T>::query_can_retry_in_remote(int &last_err,
     }
     if (!bret && is_try_lock_row_err(last_err) && is_timeout_err(err)) {
       //锁冲突重试到超时，最后直接给用户报LOCK CONFLICT错误
-      LOG_WARN("retry query until query timeout", K(last_err), K(err));
+      LOG_WARN_RET(err, "retry query until query timeout", K(last_err), K(err));
       err = OB_ERR_EXCLUSIVE_LOCK_CONFLICT;
     }
   }
@@ -550,74 +549,65 @@ bool ObRemoteBaseExecuteP<T>::query_can_retry_in_remote(int &last_err,
 template<typename T>
 void ObRemoteBaseExecuteP<T>::record_sql_audit_and_plan_stat(
                                                const ObPhysicalPlan *plan,
-                                               ObSQLSessionInfo *session,
-                                               ObExecRecord exec_record,
-                                               ObExecTimestamp exec_timestamp,
-                                               ObWaitEventDesc &max_wait_desc,
-                                               ObWaitEventStat &total_wait_desc)
+                                               ObSQLSessionInfo *session)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(session)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(session));
   } else {
-    exec_timestamp.exec_type_ = RpcProcessor;
-    ObAuditRecordData &audit_record = session->get_raw_audit_record();
-    audit_record.try_cnt_++;
-    audit_record.seq_ = 0;  //don't use now
-    audit_record.status_ =
-        (OB_SUCCESS == ret || common::OB_ITER_END == ret) ? obmysql::REQUEST_SUCC : ret;
-    session->get_cur_sql_id(audit_record.sql_id_, OB_MAX_SQL_ID_LENGTH + 1);
-    audit_record.db_id_ = session->get_database_id();
-    audit_record.execution_id_ = session->get_current_execution_id();
-    audit_record.client_addr_ = session->get_client_addr();
-    audit_record.user_client_addr_ = session->get_user_client_addr();
-    audit_record.user_group_ = THIS_WORKER.get_group_id();
-    audit_record.affected_rows_ = 0;
-    audit_record.return_rows_ = 0;
+    const bool enable_sql_audit =
+        GCONF.enable_sql_audit && session->get_local_ob_enable_sql_audit();
+    if (enable_sql_audit) {
+      ObAuditRecordData &audit_record = session->get_raw_audit_record();
+      audit_record.try_cnt_++;
+      audit_record.seq_ = 0;  //don't use now
+      audit_record.status_ =
+          (OB_SUCCESS == ret || common::OB_ITER_END == ret) ? obmysql::REQUEST_SUCC : ret;
+      session->get_cur_sql_id(audit_record.sql_id_, OB_MAX_SQL_ID_LENGTH + 1);
+      audit_record.db_id_ = session->get_database_id();
+      audit_record.execution_id_ = session->get_current_execution_id();
+      audit_record.client_addr_ = session->get_client_addr();
+      audit_record.user_client_addr_ = session->get_user_client_addr();
+      audit_record.user_group_ = THIS_WORKER.get_group_id();
+      audit_record.affected_rows_ = 0;
+      audit_record.return_rows_ = 0;
 
-    exec_record.max_wait_event_ = max_wait_desc;
-    exec_record.wait_time_end_ = total_wait_desc.time_waited_;
-    exec_record.wait_count_end_ = total_wait_desc.total_waits_;
+      audit_record.plan_id_ = plan != nullptr ? plan->get_plan_id() : 0;
+      audit_record.plan_type_ = plan != nullptr ? plan->get_plan_type() : OB_PHY_PLAN_UNINITIALIZED;
+      audit_record.is_executor_rpc_ = true;
+      audit_record.is_inner_sql_ = session->is_inner();
+      audit_record.is_hit_plan_cache_ = true;
+      audit_record.is_multi_stmt_ = false;
+      audit_record.is_perf_event_closed_ = !lib::is_diagnose_info_enabled();
 
-    audit_record.plan_id_ = plan != nullptr ? plan->get_plan_id() : 0;
-    audit_record.plan_type_ = plan != nullptr ? plan->get_plan_type() : OB_PHY_PLAN_UNINITIALIZED;
-    audit_record.is_executor_rpc_ = true;
-    audit_record.is_inner_sql_ = session->is_inner();
-    audit_record.is_hit_plan_cache_ = true;
-    audit_record.is_multi_stmt_ = false;
+      //统计plan相关的信息
+      ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(exec_ctx_);
+      ObIArray<ObTableRowCount> *table_row_count_list = NULL;
+      if (NULL != plan_ctx) {
+        audit_record.consistency_level_ = plan_ctx->get_consistency_level();
+        audit_record.table_scan_stat_ = plan_ctx->get_table_scan_stat();
+        table_row_count_list = &(plan_ctx->get_table_row_count_list());
+      }
+      if (NULL != plan) {
+        ObPhysicalPlan *mutable_plan = const_cast<ObPhysicalPlan*>(plan);
+        if (!exec_ctx_.get_sql_ctx()->self_add_plan_ && exec_ctx_.get_sql_ctx()->plan_cache_hit_) {
+          mutable_plan->update_plan_stat(audit_record,
+                                        false, // false mean not first update plan stat
+                                        exec_ctx_.get_is_evolution(),
+                                        table_row_count_list);
+        } else if (exec_ctx_.get_sql_ctx()->self_add_plan_ && !exec_ctx_.get_sql_ctx()->plan_cache_hit_) {
+          mutable_plan->update_plan_stat(audit_record,
+                                        true,
+                                        exec_ctx_.get_is_evolution(),
+                                        table_row_count_list);
 
-    audit_record.exec_timestamp_ = exec_timestamp;
-    audit_record.exec_record_ = exec_record;
-
-    //更新阶段累加时间
-    audit_record.update_stage_stat();
-
-    //统计plan相关的信息
-    ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(exec_ctx_);
-    ObIArray<ObTableRowCount> *table_row_count_list = NULL;
-    if (NULL != plan_ctx) {
-      audit_record.consistency_level_ = plan_ctx->get_consistency_level();
-      audit_record.table_scan_stat_ = plan_ctx->get_table_scan_stat();
-      table_row_count_list = &(plan_ctx->get_table_row_count_list());
-    }
-    if (NULL != plan) {
-      ObPhysicalPlan *mutable_plan = const_cast<ObPhysicalPlan*>(plan);
-      if (!exec_ctx_.get_sql_ctx()->self_add_plan_ && exec_ctx_.get_sql_ctx()->plan_cache_hit_) {
-        mutable_plan->update_plan_stat(audit_record,
-                                       false, // false mean not first update plan stat
-                                       exec_ctx_.get_is_evolution(),
-                                       table_row_count_list);
-      } else if (exec_ctx_.get_sql_ctx()->self_add_plan_ && !exec_ctx_.get_sql_ctx()->plan_cache_hit_) {
-        mutable_plan->update_plan_stat(audit_record,
-                                       true,
-                                       exec_ctx_.get_is_evolution(),
-                                       table_row_count_list);
-
+        }
       }
     }
     ObSQLUtils::handle_audit_record(false, EXECUTE_REMOTE, *session);
   }
+
 }
 
 template<typename T>
@@ -626,9 +616,9 @@ int ObRemoteBaseExecuteP<T>::execute_with_sql(ObRemoteTask &task)
   int ret = OB_SUCCESS;
   NG_TRACE(exec_remote_plan_begin);
   ObExecRecord exec_record;
-  int64_t local_tenant_schema_version = -1;
   ObExecTimestamp exec_timestamp;
   exec_timestamp.exec_type_ = RpcProcessor;
+  int64_t local_tenant_schema_version = -1;
   ObSQLSessionInfo *session = NULL;
   const bool enable_perf_event = lib::is_diagnose_info_enabled();
   bool enable_sql_audit = GCONF.enable_sql_audit;
@@ -668,7 +658,7 @@ int ObRemoteBaseExecuteP<T>::execute_with_sql(ObRemoteTask &task)
     {
       ObMaxWaitGuard max_wait_guard(enable_perf_event ? &max_wait_desc : NULL, di);
       ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
-      if (enable_sql_audit) {
+      if (enable_perf_event) {
         exec_record.record_start();
       }
       if (OB_FAIL(gctx_.sql_engine_->handle_remote_query(plan_ctx->get_remote_sql_info(),
@@ -682,24 +672,30 @@ int ObRemoteBaseExecuteP<T>::execute_with_sql(ObRemoteTask &task)
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("plan is null", K(ret));
       }
-      if (enable_perf_event) {
-        //监控项统计开始
-        exec_start_timestamp_ = ObTimeUtility::current_time();
-        exec_ctx_.set_plan_start_time(exec_start_timestamp_);
-      }
+      //监控项统计开始
+      exec_start_timestamp_ = ObTimeUtility::current_time();
+      exec_ctx_.set_plan_start_time(exec_start_timestamp_);
+      ObAuditRecordData &audit_record = session->get_raw_audit_record();
 
       if (OB_SUCC(ret)) {
         NG_TRACE_EXT(execute_task, OB_ID(task), task, OB_ID(stmt_type), plan->get_stmt_type());
         ObWorkerSessionGuard worker_session_guard(session);
         ObSQLSessionInfo::LockGuard lock_guard(session->get_query_lock());
-        session->get_raw_audit_record().request_memory_used_ = 0;
-        observer::ObProcessMallocCallback pmcb(0,
-              session->get_raw_audit_record().request_memory_used_);
+        audit_record.request_memory_used_ = 0;
+        observer::ObProcessMallocCallback pmcb(0, audit_record.request_memory_used_);
         lib::ObMallocCallbackGuard guard(pmcb);
         session->set_peer_addr(task.get_ctrl_server());
         NG_TRACE_EXT(execute_task, OB_ID(task), task, OB_ID(stmt_type), plan->get_stmt_type());
         if (OB_FAIL(execute_remote_plan(exec_ctx_, *plan))) {
           LOG_WARN("execute remote plan failed", K(ret), K(task), K(exec_ctx_.get_das_ctx().get_snapshot()));
+        } else if (plan->need_record_plan_info()) {
+          if(exec_ctx_.get_feedback_info().is_valid() &&
+             plan->get_logical_plan().is_valid() &&
+             OB_FAIL(plan->set_feedback_info(exec_ctx_))) {
+            LOG_WARN("failed to set feedback info", K(ret));
+          } else {
+            plan->set_record_plan_info(false);
+          }
         }
       }
       // ===============================================================
@@ -721,29 +717,27 @@ int ObRemoteBaseExecuteP<T>::execute_with_sql(ObRemoteTask &task)
                NULL, session->get_effective_tenant_id())) {
           ret = OB_ERR_REMOTE_SCHEMA_NOT_FULL;
         }
-        if (is_master_changed_error(ret)
-            || is_partition_change_error(ret)
-            || is_get_location_timeout_error(ret)) {
-          ObTaskExecutorCtx &task_exec_ctx = exec_ctx_.get_task_exec_ctx();
-          LOG_DEBUG("remote execute failed, begin to refresh location cache nonblocking", K(ret));
-          int refresh_err = ObTaskExecutorCtxUtil::refresh_location_cache(task_exec_ctx, true);
-          if (OB_SUCCESS != refresh_err) {
-            LOG_WARN("refresh location cache failed", K(ret), K(refresh_err));
-          }
-        }
+        DAS_CTX(exec_ctx_).get_location_router().refresh_location_cache(true, ret);
       }
+      //监控项统计结束
+      exec_end_timestamp_ = ObTimeUtility::current_time();
+
+      // some statistics must be recorded for plan stat, even though sql audit disabled
+      record_exec_timestamp(true, exec_timestamp);
+      audit_record.exec_timestamp_ = exec_timestamp;
+      audit_record.exec_timestamp_.update_stage_time();
+
       if (enable_perf_event) {
-        //监控项统计结束
-        exec_end_timestamp_ = ObTimeUtility::current_time();
-        if (enable_sql_audit) {
-          exec_record.record_end();
-        }
-        record_exec_timestamp(true, exec_timestamp);
+        exec_record.record_end();
+        exec_record.max_wait_event_ = max_wait_desc;
+        exec_record.wait_time_end_ = total_wait_desc.time_waited_;
+        exec_record.wait_count_end_ = total_wait_desc.total_waits_;
+        audit_record.exec_record_ = exec_record;
+        audit_record.update_event_stage_state();
       }
 
       //此处代码要放在scanner.set_err_code(ret)代码前,避免ret被都写成了OB_SUCCESS
-      record_sql_audit_and_plan_stat(plan, session, exec_record, exec_timestamp,
-                                     max_wait_desc, total_wait_desc);
+      record_sql_audit_and_plan_stat(plan, session);
     }
   }
   if (OB_NOT_NULL(plan)) {
@@ -766,7 +760,7 @@ int ObRemoteBaseExecuteP<T>::base_before_response(common::ObScanner &scanner)
     int get_ret = MTL(transaction::ObTransService*)
       ->get_tx_exec_result(*session->get_tx_desc(), scanner.get_trans_result());
     if (OB_SUCCESS != get_ret) {
-      LOG_WARN("failed to get trans result",
+      LOG_WARN_RET(get_ret, "failed to get trans result",
                K(get_ret),
                "scanner_trans_result", scanner.get_trans_result(),
                "tx_desc", *session->get_tx_desc());
@@ -777,6 +771,10 @@ int ObRemoteBaseExecuteP<T>::base_before_response(common::ObScanner &scanner)
                 "scanner_trans_rsult", scanner.get_trans_result(),
                 "tx_desc", *session->get_tx_desc());
     }
+  }
+  if (OB_SUCCESS == exec_errcode_ && is_execute_remote_plan()) {
+    ObExecFeedbackInfo &fb_info = scanner.get_feedback_info();
+    exec_errcode_ = fb_info.assign(exec_ctx_.get_feedback_info());
   }
   exec_ctx_.hide_session();
   // return a scanner no matter success or fail, set err_code to scanner
@@ -797,7 +795,7 @@ int ObRemoteBaseExecuteP<T>::base_before_response(common::ObScanner &scanner)
         has_store_pl_msg = true;
       }
       if (!has_store_pl_msg) {
-        LOG_WARN("get pl msg fail.", K(exec_errcode_));
+        LOG_WARN_RET(OB_ERROR, "get pl msg fail.", K(exec_errcode_));
       }
     }
     if (!has_store_pl_msg) {
@@ -914,7 +912,7 @@ int ObRpcRemoteExecuteP::process()
     {
       ObMaxWaitGuard max_wait_guard(enable_perf_event ? &max_wait_desc : NULL, di);
       ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
-      if (enable_sql_audit) {
+      if (enable_perf_event) {
         exec_record.record_start(di);
       }
       if (OB_FAIL(ret)) {
@@ -925,19 +923,17 @@ int ObRpcRemoteExecuteP::process()
         LOG_ERROR("op_spec is NULL");
         ret = OB_ERR_UNEXPECTED;
       }
-      if (enable_perf_event) {
-        //监控项统计开始
-        exec_start_timestamp_ = ObTimeUtility::current_time();
-        exec_ctx->set_plan_start_time(exec_start_timestamp_);
-      }
+      //监控项统计开始
+      exec_start_timestamp_ = ObTimeUtility::current_time();
+      exec_ctx->set_plan_start_time(exec_start_timestamp_);
+      ObAuditRecordData &audit_record = session->get_raw_audit_record();
 
       if (OB_SUCC(ret)) {
         NG_TRACE_EXT(execute_task, OB_ID(task), task, OB_ID(stmt_type), task.get_des_phy_plan().get_stmt_type());
         ObWorkerSessionGuard worker_session_guard(session);
         ObSQLSessionInfo::LockGuard lock_guard(session->get_query_lock());
-        session->get_raw_audit_record().request_memory_used_ = 0;
-        observer::ObProcessMallocCallback pmcb(0,
-              session->get_raw_audit_record().request_memory_used_);
+        audit_record.request_memory_used_ = 0;
+        observer::ObProcessMallocCallback pmcb(0, audit_record.request_memory_used_);
         lib::ObMallocCallbackGuard guard(pmcb);
         NG_TRACE_EXT(execute_task, OB_ID(task), task,
                      OB_ID(stmt_type), task.get_des_phy_plan().get_stmt_type());
@@ -968,21 +964,25 @@ int ObRpcRemoteExecuteP::process()
           ret = OB_ERR_REMOTE_SCHEMA_NOT_FULL;
         }
       }
-      if (enable_perf_event) {
-        //监控项统计结束
-        exec_end_timestamp_ = ObTimeUtility::current_time();
-        if (enable_sql_audit) {
-          exec_record.record_end(di);
-        }
-      }
+      //监控项统计结束
+      exec_end_timestamp_ = ObTimeUtility::current_time();
+
+      // some statistics must be recorded for plan stat, even though sql audit disabled
       record_exec_timestamp(true, exec_timestamp);
+      audit_record.exec_timestamp_ = exec_timestamp;
+      audit_record.exec_timestamp_.update_stage_time();
+
+      if (enable_perf_event) {
+        exec_record.record_end();
+        exec_record.max_wait_event_ = max_wait_desc;
+        exec_record.wait_time_end_ = total_wait_desc.time_waited_;
+        exec_record.wait_count_end_ = total_wait_desc.total_waits_;
+        audit_record.exec_record_ = exec_record;
+        audit_record.update_event_stage_state();
+      }
 
       //此处代码要放在scanner.set_err_code(ret)代码前,避免ret被都写成了OB_SUCCESS
-      if (enable_sql_audit) {
-        record_sql_audit_and_plan_stat(
-                         &phy_plan_, session, exec_record, exec_timestamp,
-                         max_wait_desc, total_wait_desc);
-      }
+      record_sql_audit_and_plan_stat(&phy_plan_, session);
     }
   }
 

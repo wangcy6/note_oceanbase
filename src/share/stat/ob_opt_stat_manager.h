@@ -21,12 +21,10 @@
 #include "share/ob_rpc_struct.h"
 #include "lib/queue/ob_dedup_queue.h"
 #include "share/stat/ob_stat_define.h"
+#include "share/stat/ob_opt_ds_stat.h"
+#include "share/stat/ob_stat_item.h"
 
 namespace oceanbase {
-namespace sql
-{
-class ObPlanCacheManager;
-}
 namespace common {
 class ObOptColumnStatHandle;
 
@@ -36,23 +34,25 @@ public:
   ObOptStatManager();
   virtual ~ObOptStatManager() {}
   virtual int init(ObMySQLProxy *proxy,
-                   ObServerConfig *config,
-                   sql::ObPlanCacheManager *pc_mgr);
+                   ObServerConfig *config);
 
   static int64_t get_default_data_size();
 
   static int64_t get_default_avg_row_size();
 
-  int check_has_opt_stat(const uint64_t tenant_id,
-                         const uint64_t table_ref_id,
-                         const ObIArray<int64_t> &part_ids,
-                         const int64_t part_cnt,
-                         bool &has_opt_stat);
+  static int64_t get_default_table_row_count();
 
-  int check_stat_version(const uint64_t tenant_id,
-                         const uint64_t tab_ref_id,
-                         const int64_t part_id,
-                         int64_t &last_analyzed);
+  int check_opt_stat_validity(sql::ObExecContext &ctx,
+                              const uint64_t tenant_id,
+                              const uint64_t table_ref_id,
+                              const ObIArray<int64_t> &part_ids,
+                              bool &is_opt_stat_valid);
+
+  int check_opt_stat_validity(sql::ObExecContext &ctx,
+                              const uint64_t tenant_id,
+                              const uint64_t tab_ref_id,
+                              const int64_t global_part_id,
+                              bool &is_opt_stat_valid);
 
   int update_table_stat(const uint64_t tenant_id,
                         const ObOptTableStat *table_stats,
@@ -64,24 +64,12 @@ public:
 
   int get_column_stat(const uint64_t tenant_id,
                       const uint64_t tab_ref_id,
-                      const int64_t part_id,
-                      const uint64_t column_id,
-                      int64_t *num_distinct = NULL,
-                      int64_t *num_null = NULL,
-                      int64_t *avg_length = NULL,
-                      ObObj *min_obj = NULL,
-                      ObObj *max_obj = NULL,
-                      ObIAllocator *alloc = NULL);
-
-  int get_column_stat(const uint64_t tenant_id,
-                      const uint64_t tab_ref_id,
                       const ObIArray<int64_t> &part_ids,
                       const uint64_t column_id,
-                      int64_t *num_distinct = NULL,
-                      int64_t *num_null = NULL,
-                      int64_t *avg_length = NULL,
-                      ObObj *min_obj = NULL,
-                      ObObj *max_obj = NULL,
+                      const ObIArray<int64_t> &global_part_ids,
+                      const int64_t row_cnt,
+                      const double scale_ratio,
+                      ObGlobalColumnStat &stat,
                       ObIAllocator *alloc = NULL);
 
   int get_column_stat(const uint64_t tenant_id,
@@ -99,21 +87,15 @@ public:
   int get_table_stat(const uint64_t tenant_id,
                      const uint64_t table_ref_id,
                      const int64_t part_id,
-                     const int64_t part_cnt,
-                     int64_t *row_count = NULL,
-                     int64_t *avg_len = NULL,
-                     int64_t *avg_part_size = NULL,
-                     int64_t *macro_block_count = NULL,
-                     int64_t *micro_block_count = NULL);
+                     const double scale_ratio,
+                     ObGlobalTableStat &stat);
 
   int get_table_stat(const uint64_t tenant_id,
                      const uint64_t tab_ref_id,
                      const ObIArray<int64_t> &part_ids,
-                     const int64_t part_cnt,
-                     int64_t *row_count = NULL,
-                     int64_t *avg_len = NULL,
-                     int64_t *avg_part_size = NULL,
-                     int64_t *micro_block_count = NULL);
+                     const ObIArray<int64_t> &global_part_ids,
+                     const double scale_ratio,
+                     ObGlobalTableStat &stat);
 
   int get_table_stat(const uint64_t tenant_id,
                      const uint64_t table_id,
@@ -136,9 +118,14 @@ public:
   virtual int update_column_stat(share::schema::ObSchemaGetterGuard *schema_guard,
                                  const uint64_t tenant_id,
                                  const common::ObIArray<ObOptColumnStat *> &column_stats,
-                                 bool only_update_col_stat = false);
+                                 bool only_update_col_stat = false,
+                                 const ObObjPrintParams &print_params = ObObjPrintParams());
 
   int delete_table_stat(const uint64_t tenant_id,
+                        const uint64_t ref_id,
+                        int64_t &affected_rows);
+
+  int delete_table_stat(uint64_t tenant_id,
                         const uint64_t ref_id,
                         const ObIArray<int64_t> &part_ids,
                         const bool cascade_column,
@@ -152,6 +139,7 @@ public:
 
   int erase_column_stat(const ObOptColumnStat::Key &key);
   int erase_table_stat(const ObOptTableStat::Key &key);
+  int erase_ds_stat(const ObOptDSStat::Key &key);
 
   int erase_table_stat(const uint64_t tenant_id,
                        const uint64_t table_id,
@@ -167,7 +155,8 @@ public:
                   ObIArray<ObOptColumnStat *> &column_stats,
                   const int64_t current_time,
                   const bool is_index_stat,
-                  const bool is_history_stat);
+                  const bool is_history_stat,
+                  const ObObjPrintParams &print_params);
 
   /**  @brief  外部获取行统计信息的接口 */
   virtual int get_table_stat(const uint64_t tenant_id,
@@ -178,18 +167,34 @@ public:
   int invalidate_plan(const uint64_t tenant_id, const uint64_t table_id);
 
   int handle_refresh_stat_task(const obrpc::ObUpdateStatCacheArg &arg);
+
+  int get_table_rowcnt(const uint64_t tenant_id,
+                       const uint64_t table_id,
+                       const ObIArray<ObTabletID> &all_tablet_ids,
+                       const ObIArray<share::ObLSID> &all_ls_ids,
+                       int64_t &table_rowcnt);
+
   static ObOptStatManager &get_instance()
   {
     static ObOptStatManager instance_;
     return instance_;
   }
   bool is_inited() const { return inited_; }
+  int check_stat_tables_ready(share::schema::ObSchemaGetterGuard &schema_guard,
+                              const uint64_t tenant_id,
+                              bool &are_stat_tables_ready);
+
+  int get_ds_stat(const ObOptDSStat::Key &key, ObOptDSStatHandle &ds_stat_handle);
+  int add_ds_stat_cache(const ObOptDSStat::Key &key,
+                        const ObOptDSStat &value,
+                        ObOptDSStatHandle &ds_stat_handle);
+  int update_opt_stat_gather_stat(const ObOptStatGatherStat &gather_stat);
+  int update_opt_stat_task_stat(const ObOptStatTaskInfo &task_info);
 protected:
   static const int64_t REFRESH_STAT_TASK_NUM = 5;
   bool inited_;
   common::ObDedupQueue refresh_stat_task_queue_;
   ObOptStatService stat_service_;
-  sql::ObPlanCacheManager *pc_mgr_;
   int64_t last_schema_version_;
 };
 

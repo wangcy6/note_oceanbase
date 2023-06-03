@@ -23,7 +23,11 @@
 #include "observer/omt/ob_tenant_config_mgr.h"
 #include "sql/optimizer/ob_sharding_info.h"
 #include "sql/optimizer/ob_opt_est_cost.h"
+#include "sql/engine/expr/ob_expr_join_filter.h"
 #include "sql/engine/aggregate/ob_adaptive_bypass_ctrl.h"
+#include "sql/optimizer/ob_dynamic_sampling.h"
+#include "share/config/ob_config_helper.h"
+
 
 namespace oceanbase
 {
@@ -110,9 +114,13 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
     global_hint_(global_hint),
     expr_factory_(expr_factory),
     log_plan_factory_(allocator),
-    parallel_(1),
-    px_parallel_rule_(PXParallelRule::NOT_USE_PX),
-    use_pdml_(false),
+    force_serial_set_order_(false),
+    parallel_(ObGlobalHint::UNSET_PARALLEL),
+    px_parallel_rule_(PXParallelRule::USE_PX_DEFAULT),
+    can_use_pdml_(false),
+    max_parallel_(ObGlobalHint::UNSET_PARALLEL),
+    parallel_degree_limit_(ObGlobalHint::UNSET_PARALLEL),
+    parallel_min_scan_time_threshold_(-1),
     is_online_ddl_(false),
     ddl_sample_column_count_(0),
     is_heap_table_ddl_(false),
@@ -121,7 +129,7 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
     enable_batch_opt_(-1),
     force_default_stat_(false),
     eval_plan_cost_(false),
-    enable_bloom_filter_(-1),
+    runtime_filter_type_(-1),
     batch_size_(0),
     root_stmt_(root_stmt),
     enable_px_batch_rescan_(-1),
@@ -146,7 +154,11 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
     aggregation_optimization_settings_(0),
     query_ctx_(query_ctx),
     nested_sql_flags_(0),
-    has_for_update_(false)
+    has_for_update_(false),
+    has_var_assign_(false),
+    is_var_assign_only_in_root_stmt_(false),
+    failed_ds_tab_list_(),
+    has_multiple_link_stmt_(false)
   { }
   inline common::ObOptStatManager *get_opt_stat_manager() { return opt_stat_manager_; }
   inline void set_opt_stat_manager(common::ObOptStatManager *sm) { opt_stat_manager_ = sm; }
@@ -155,6 +167,7 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
   {
     expected_worker_map_.destroy();
     minimal_worker_map_.destroy();
+    log_plan_factory_.destroy();
   }
   inline const ObSQLSessionInfo *get_session_info() const { return session_info_; }
   inline ObSQLSessionInfo *get_session_info() { return session_info_; }
@@ -212,34 +225,28 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
   inline const ObGlobalHint &get_global_hint() { return global_hint_; }
   inline ObRawExprFactory &get_expr_factory() { return expr_factory_; }
   inline ObLogPlanFactory &get_log_plan_factory() { return log_plan_factory_; }
-  inline bool use_pdml() const { return use_pdml_; }
+  inline bool can_use_pdml() const { return can_use_pdml_; }
   inline bool is_online_ddl() const { return is_online_ddl_; }
   inline int64_t get_ddl_sample_column_count() const { return ddl_sample_column_count_; }
   inline bool is_heap_table_ddl() const { return is_heap_table_ddl_; }
   inline bool is_pdml_heap_table() const { return is_pdml_heap_table_; }
+  inline bool force_serial_set_order() const { return force_serial_set_order_; }
+  void set_serial_set_order(bool force_serial_set_order) { force_serial_set_order_ = force_serial_set_order; }
   inline int64_t get_parallel() const { return parallel_; }
-  inline bool is_use_parallel_rule() const
-  {
-    return px_parallel_rule_ == MANUAL_HINT ||
-        px_parallel_rule_ == MANUAL_TABLE_HINT ||
-        px_parallel_rule_ == SESSION_FORCE_PARALLEL ||
-        px_parallel_rule_ == MANUAL_TABLE_DOP;
-  }
-  inline bool use_intra_parallel() const
-  {
-    return parallel_ > 1;
-  }
-  inline bool is_use_table_dop() const
-  {
-    return px_parallel_rule_ == PXParallelRule::MANUAL_TABLE_DOP;
-  }
-  inline bool is_use_table_parallel_hint() const
-  {
-    return px_parallel_rule_ == PXParallelRule::MANUAL_TABLE_HINT;
-  }
-  inline ObFdItemFactory &get_fd_item_factory() { return fd_item_factory_; }
+  inline int64_t get_max_parallel() const { return max_parallel_; }
+  inline int64_t get_parallel_degree_limit() const { return parallel_degree_limit_; }
+  inline int64_t get_parallel_min_scan_time_threshold() const { return parallel_min_scan_time_threshold_; }
+  inline bool force_disable_parallel() const  { return px_parallel_rule_ >= PL_UDF_DAS_FORCE_SERIALIZE
+                                                        && px_parallel_rule_ < MAX_OPTION; }
+  inline bool is_use_table_dop() const  { return MANUAL_TABLE_DOP == px_parallel_rule_; }
+  inline bool is_use_auto_dop() const { return AUTO_DOP == px_parallel_rule_; }
+  inline bool is_parallel_rule_valid() const { return MAX_OPTION != px_parallel_rule_; }
   void set_parallel(int64_t parallel) { parallel_ = parallel; }
-  void set_use_pdml(bool u) { use_pdml_ = u; }
+  void set_max_parallel(int64_t max_parallel) { max_parallel_ = max_parallel_ < max_parallel ? max_parallel : max_parallel_; }
+  void set_parallel_degree_limit(int64_t parallel_degree_limit) { parallel_degree_limit_ = parallel_degree_limit; }
+  void set_parallel_min_scan_time_threshold(int64_t threshold) { parallel_min_scan_time_threshold_ = threshold; }
+  void set_can_use_pdml(bool u) { can_use_pdml_ = u; }
+  inline ObFdItemFactory &get_fd_item_factory() { return fd_item_factory_; }
   void set_is_online_ddl(bool flag) { is_online_ddl_ = flag; }
   void set_ddl_sample_column_count(const int64_t count) { ddl_sample_column_count_ = count; }
   void set_is_heap_table_ddl(bool flag) { is_heap_table_ddl_ = flag; }
@@ -247,11 +254,18 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
   inline void set_parallel_rule(PXParallelRule rule) { px_parallel_rule_ = rule; }
   const PXParallelRule& get_parallel_rule() const { return px_parallel_rule_; }
   inline bool is_batched_multi_stmt() {
+    bool bret = false;
     if (NULL != exec_ctx_ && NULL != exec_ctx_->get_sql_ctx()) {
-      return exec_ctx_->get_sql_ctx()->multi_stmt_item_.is_batched_multi_stmt();
-    } else {
-      return false;
+      bret = exec_ctx_->get_sql_ctx()->multi_stmt_item_.is_batched_multi_stmt();
     }
+    return bret;
+  }
+  inline bool is_strict_defensive_check() {
+    bool bret = false;
+    if (NULL != exec_ctx_ && NULL != exec_ctx_->get_sql_ctx()) {
+      bret = exec_ctx_->get_sql_ctx()->is_strict_defensive_check_;
+    }
+    return bret;
   }
   void disable_batch_rpc() { enable_batch_opt_ = 0; }
   bool enable_batch_rpc()
@@ -300,15 +314,32 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
   void set_use_default_stat() { force_default_stat_ = true; }
   void set_cost_evaluation() { eval_plan_cost_ = true; }
   bool is_cost_evaluation() { return eval_plan_cost_; }
-  bool enable_bloom_filter() {
-    if (-1 == enable_bloom_filter_) {
-      if (session_info_->is_enable_bloom_filter()) {
-        enable_bloom_filter_ = 1;
-      } else {
-        enable_bloom_filter_ = 0;
-      }
+  bool enable_runtime_filter() {
+    if (0 > runtime_filter_type_) {
+      get_runtime_filter_type();
     }
-    return 1 == enable_bloom_filter_;
+    return 0 != runtime_filter_type_ && GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_2_0_0;
+  }
+  bool enable_bloom_filter() {
+    if (0 > runtime_filter_type_) {
+      get_runtime_filter_type();
+    }
+    return 0 != (runtime_filter_type_ & (1 << RuntimeFilterType::BLOOM_FILTER));
+  }
+  bool enable_range_filter() {
+    if (0 > runtime_filter_type_) {
+      get_runtime_filter_type();
+    }
+    return 0 != (runtime_filter_type_ & (1 << RuntimeFilterType::RANGE));
+  }
+  bool enable_in_filter() {
+    if (0 > runtime_filter_type_) {
+      get_runtime_filter_type();
+    }
+    return 0 != (runtime_filter_type_ & (1 << RuntimeFilterType::IN));
+  }
+  void get_runtime_filter_type() {
+    runtime_filter_type_ = session_info_->get_runtime_filter_type();
   }
 
   int64_t get_batch_size() const { return batch_size_; }
@@ -457,12 +488,26 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
   bool has_trigger() const { return has_trigger_; }
   void set_has_pl_udf(bool v) { has_pl_udf_ = v; }
   bool has_pl_udf() const { return has_pl_udf_; }
+  void set_allow_parallel_trigger(bool v) { is_allow_parallel_trigger_ = v; }
+  bool is_allow_parallel_trigger() const { return is_allow_parallel_trigger_; }
+  void set_has_cursor_expression(bool v) { has_cursor_expression_ = v; }
+  bool has_cursor_expression() const { return has_cursor_expression_; }
+  void set_has_dblink(bool v) { has_dblink_ = v; }
+  bool has_dblink() const { return has_dblink_; }
+  void set_has_subquery_in_function_table(bool v) { has_subquery_in_function_table_ = v; }
+  bool has_subquery_in_function_table() const { return has_subquery_in_function_table_; }
   bool contain_nested_sql() const { return nested_sql_flags_ > 0; }
   //use nested sql can't in online DDL session
   bool contain_user_nested_sql() const { return nested_sql_flags_ > 0 && !is_online_ddl_; }
   void set_for_update() { has_for_update_ = true; }
   bool has_for_update() { return has_for_update_;};
-
+  inline bool has_var_assign() { return has_var_assign_; }
+  inline void set_has_var_assign(bool v) { has_var_assign_ = v; }
+  inline bool is_var_assign_only_in_root_stmt() { return is_var_assign_only_in_root_stmt_; }
+  inline void set_is_var_assign_only_in_root_stmt(bool v) { is_var_assign_only_in_root_stmt_ = v; }
+  common::ObIArray<ObDSFailTabInfo> &get_failed_ds_tab_list() { return failed_ds_tab_list_; }
+  inline bool has_multiple_link_stmt() const { return has_multiple_link_stmt_; }
+  inline void set_has_multiple_link_stmt(bool v) { has_multiple_link_stmt_ = v; }
 private:
   ObSQLSessionInfo *session_info_;
   ObExecContext *exec_ctx_;
@@ -477,10 +522,14 @@ private:
   const ObGlobalHint &global_hint_;
   ObRawExprFactory &expr_factory_;
   ObLogPlanFactory log_plan_factory_;
+  bool force_serial_set_order_; //to keep a serial execute for set query
   int64_t parallel_;
   // 决定计划并行度的规则
   PXParallelRule px_parallel_rule_;
-  bool use_pdml_;
+  bool can_use_pdml_; // can use pdml after check parallel
+  int64_t max_parallel_;
+  int64_t parallel_degree_limit_; // parallel limit for auto dop
+  int64_t parallel_min_scan_time_threshold_; // auto dop threshold for table scan cost
   bool is_online_ddl_;
   int64_t ddl_sample_column_count_;
   bool is_heap_table_ddl_; // we need to treat heap table ddl seperately
@@ -489,7 +538,8 @@ private:
   int enable_batch_opt_;
   bool force_default_stat_;
   bool eval_plan_cost_;
-  int enable_bloom_filter_;  //租户配置项是否打开join filter.
+  // for runtime filter
+  int64_t runtime_filter_type_;
   // batch row count for vectorized execution, 0 for no vectorize.
   int64_t batch_size_;
   ObDMLStmt *root_stmt_;
@@ -526,9 +576,18 @@ private:
       int8_t has_fk_                           : 1; //this sql has foreign key object
       int8_t has_trigger_                      : 1; //this sql has trigger object
       int8_t has_pl_udf_                       : 1; //this sql has pl user defined function
+      int8_t has_subquery_in_function_table_   : 1; //this stmt has function table
+      int8_t has_dblink_                       : 1; //this stmt has dblink table
+      int8_t is_allow_parallel_trigger_        : 1; //this sql linked trigger can parallel execute
+      int8_t has_cursor_expression_            : 1; //this sql has cursor expression
     };
   };
   bool has_for_update_;
+  bool has_var_assign_;
+  bool is_var_assign_only_in_root_stmt_;
+  //record the dynamic sampling falied table list, avoid repeated dynamic sampling.
+  common::ObSEArray<ObDSFailTabInfo, 1, common::ModulePageAllocator, true> failed_ds_tab_list_;
+  bool has_multiple_link_stmt_;
 };
 }
 }

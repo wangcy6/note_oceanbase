@@ -25,6 +25,8 @@
 #include "storage/memtable/ob_row_compactor.h"
 #include "storage/memtable/ob_multi_source_data.h"
 #include "storage/checkpoint/ob_freeze_checkpoint.h"
+#include "storage/compaction/ob_medium_compaction_mgr.h"
+#include "storage/tx_storage/ob_ls_handle.h" //ObLSHandle
 
 namespace oceanbase
 {
@@ -166,12 +168,13 @@ public:
   virtual ~ObMemtable();
 public:
   int init(const ObITable::TableKey &table_key,
-           storage::ObLS *ls,
+           ObLSHandle &ls_handle,
            storage::ObFreezer *freezer,
            storage::ObTabletMemtableMgr *memtable_mgr,
            const int64_t schema_version,
            const uint32_t freeze_clock);
   virtual void destroy();
+  virtual int safe_to_destroy(bool &is_safe);
 
   OB_INLINE void reset() { destroy(); }
 public:
@@ -190,7 +193,8 @@ public:
       const uint64_t table_id,
       const storage::ObTableReadInfo &read_info,
       const common::ObIArray<share::schema::ObColDesc> &columns, // TODO: remove columns
-      const storage::ObStoreRow &row);
+      const storage::ObStoreRow &row,
+      const share::ObEncryptMeta *encrypt_meta);
   virtual int set(
       storage::ObStoreCtx &ctx,
       const uint64_t table_id,
@@ -198,7 +202,8 @@ public:
       const common::ObIArray<share::schema::ObColDesc> &columns, // TODO: remove columns
       const ObIArray<int64_t> &update_idx,
       const storage::ObStoreRow &old_row,
-      const storage::ObStoreRow &new_row);
+      const storage::ObStoreRow &new_row,
+      const share::ObEncryptMeta *encrypt_meta);
 
   // lock is used to lock the row(s)
   // ctx is the locker tx's context, we need the tx_id, version and scn to do the concurrent control(mvcc_write)
@@ -288,8 +293,7 @@ public:
   // decrypt_buf is used for decryption
   virtual int replay_row(
       storage::ObStoreCtx &ctx,
-      ObMemtableMutatorIterator *mmi,
-      ObEncryptRowBuf &decrypt_buf);
+      ObMemtableMutatorIterator *mmi);
   virtual int replay_schema_version_change_log(
       const int64_t schema_version);
 
@@ -310,9 +314,11 @@ public:
   int set_freezer(storage::ObFreezer *handler);
   storage::ObFreezer *get_freezer() { return freezer_; }
   int get_ls_id(share::ObLSID &ls_id);
-  void set_memtable_mgr(storage::ObTabletMemtableMgr *mgr) { memtable_mgr_ = mgr; }
+  void set_memtable_mgr(storage::ObTabletMemtableMgr *mgr) { ATOMIC_STORE(&memtable_mgr_, mgr); }
+  void clear_memtable_mgr() { ATOMIC_STORE(&memtable_mgr_, nullptr); }
+  storage::ObTabletMemtableMgr *get_memtable_mgr() { return ATOMIC_LOAD(&memtable_mgr_); }
   void set_freeze_clock(const uint32_t freeze_clock) { ATOMIC_STORE(&freeze_clock_, freeze_clock); }
-  uint32_t get_freeze_clock() { return ATOMIC_LOAD(&freeze_clock_); }
+  uint32_t get_freeze_clock() const { return ATOMIC_LOAD(&freeze_clock_); }
   int set_emergency(const bool emergency);
   ObMtStat& get_mt_stat() { return mt_stat_; }
   int64_t get_size() const;
@@ -320,7 +326,13 @@ public:
   inline bool not_empty() const { return INT64_MAX != get_protection_clock(); };
   void set_max_schema_version(const int64_t schema_version);
   virtual int64_t get_max_schema_version() const override;
+<<<<<<< HEAD
   int row_compact(ObMvccRow *value, const bool for_replay, const share::SCN snapshot_version);
+=======
+  int row_compact(ObMvccRow *value,
+                  const share::SCN snapshot_version,
+                  const int64_t flag);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int64_t get_hash_item_count() const;
   int64_t get_hash_alloc_memory() const;
   int64_t get_btree_item_count() const;
@@ -342,7 +354,7 @@ public:
   inline void set_write_barrier() { write_barrier_ = true; }
   inline void unset_write_barrier() { write_barrier_ = false; }
   inline void set_read_barrier() { read_barrier_ = true; }
-  virtual int64_t inc_write_ref() override { return ATOMIC_AAF(&write_ref_cnt_, 1); }
+  virtual int64_t inc_write_ref() override { return inc_write_ref_(); }
   virtual int64_t dec_write_ref() override;
   virtual int64_t get_write_ref() const override { return ATOMIC_LOAD(&write_ref_cnt_); }
   inline void set_is_tablet_freeze() { is_tablet_freeze_ = true; }
@@ -368,6 +380,12 @@ public:
   ObMvccEngine &get_mvcc_engine() { return mvcc_engine_; }
   const ObMvccEngine &get_mvcc_engine() const { return mvcc_engine_; }
   OB_INLINE bool is_inited() const { return is_inited_;}
+  int64_t get_memtable_mgr_op_cnt() { return ATOMIC_LOAD(&memtable_mgr_op_cnt_); }
+  int64_t inc_memtable_mgr_op_cnt() { return ATOMIC_AAF(&memtable_mgr_op_cnt_, 1); }
+  int64_t dec_memtable_mgr_op_cnt() { return ATOMIC_SAF(&memtable_mgr_op_cnt_, 1); }
+  static int batch_remove_unused_callback_for_uncommited_txn(
+    const share::ObLSID ls_id,
+    const memtable::ObMemtableSet *memtable_set);
 
   /* freeze */
   virtual int set_frozen() override { local_allocator_.set_frozen(); return OB_SUCCESS; }
@@ -387,7 +405,7 @@ public:
   {
     return key_.scn_range_.start_scn_;
   }
-  bool is_empty()
+  bool is_empty() const override
   {
     return get_end_scn() == get_start_scn() &&
       share::ObScnRange::MIN_SCN == get_max_end_scn();
@@ -401,6 +419,10 @@ public:
   int set_start_scn(const share::SCN start_ts);
   int set_end_scn(const share::SCN freeze_ts);
   int set_max_end_scn(const share::SCN scn);
+<<<<<<< HEAD
+=======
+  int set_max_end_scn_to_inc_start_scn();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   inline int set_logging_blocked()
   {
     logging_blocked_start_time = common::ObTimeUtility::current_time();
@@ -435,9 +457,21 @@ public:
   int set_migration_clog_checkpoint_scn(const share::SCN &clog_checkpoint_scn);
   share::SCN get_migration_clog_checkpoint_scn() { return migration_clog_checkpoint_scn_.atomic_get(); }
   int resolve_right_boundary_for_migration();
+  void unset_logging_blocked_for_active_memtable();
+  void resolve_left_boundary_for_active_memtable();
+  inline void set_allow_freeze(const bool allow_freeze) { ATOMIC_STORE(&allow_freeze_, allow_freeze); }
+  inline bool allow_freeze() const { return ATOMIC_LOAD(&allow_freeze_); }
 
   /* multi source data operations */
-  virtual int get_multi_source_data_unit(ObIMultiSourceDataUnit *multi_source_data_unit, ObIAllocator *allocator);
+  virtual int get_multi_source_data_unit(
+      ObIMultiSourceDataUnit *multi_source_data_unit,
+      ObIAllocator *allocator,
+      const bool get_lastest = true);
+  template<class T>
+  int get_multi_source_data_unit_list(
+      const T * const useless_unit,
+      ObMultiSourceData::ObIMultiSourceDataUnitList &dst_list,
+      ObIAllocator *allocator);
   bool has_multi_source_data_unit(const MultiSourceDataUnitType type) const;
 
   template<class T>
@@ -446,17 +480,25 @@ public:
                                   const bool for_replay,
                                   const MemtableRefOp ref_op = MemtableRefOp::NONE,
                                   const bool is_callback = false);
+
+
   // Print stat data in log.
   // For memtable debug.
   int print_stat() const;
+  int check_cleanout(bool &is_all_cleanout,
+                     bool &is_all_delay_cleanout,
+                     int64_t &count);
   int dump2text(const char *fname);
-  INHERIT_TO_STRING_KV("ObITable", ObITable, KP(this), K_(timestamp), K_(state),
+  INHERIT_TO_STRING_KV("ObITable", ObITable, KP(this), KP_(memtable_mgr), K_(timestamp), K_(state),
                        K_(freeze_clock), K_(max_schema_version), K_(write_ref_cnt), K_(local_allocator),
                        K_(unsubmitted_cnt), K_(unsynced_cnt),
                        K_(logging_blocked), K_(unset_active_memtable_logging_blocked), K_(resolve_active_memtable_left_boundary),
                        K_(contain_hotspot_row), K_(max_end_scn), K_(rec_scn), K_(snapshot_version), K_(migration_clog_checkpoint_scn),
                        K_(is_tablet_freeze), K_(is_force_freeze), K_(contain_hotspot_row),
-                       K_(read_barrier), K_(is_flushed), K_(freeze_state));
+                       K_(read_barrier), K_(is_flushed), K_(freeze_state), K_(allow_freeze),
+                       K_(mt_stat_.frozen_time), K_(mt_stat_.ready_for_flush_time),
+                       K_(mt_stat_.create_flush_dag_time), K_(mt_stat_.release_time),
+                       K_(mt_stat_.last_print_time));
 private:
   static const int64_t OB_EMPTY_MEMSTORE_MAX_SIZE = 10L << 20; // 10MB
   int mvcc_write_(storage::ObStoreCtx &ctx,
@@ -470,12 +512,11 @@ private:
 
   int lock_row_on_frozen_stores_(
       storage::ObStoreCtx &ctx,
+      const ObTxNodeArg &arg,
       const ObMemtableKey *key,
       ObMvccRow *value,
       const storage::ObTableReadInfo &read_info,
-      storage::ObStoreRowLockState &lock_state);
-
-  int remove_unused_callback_for_uncommited_txn_();
+      ObMvccWriteResult &res);
 
   void get_begin(ObMvccAccessCtx &ctx);
   void get_end(ObMvccAccessCtx &ctx, int ret);
@@ -509,13 +550,19 @@ private:
                                const int64_t last_compact_cnt,
                                const int64_t total_trans_node_count);
   bool ready_for_flush_();
+  int64_t inc_write_ref_();
+  int64_t dec_write_ref_();
+  int64_t inc_unsubmitted_cnt_();
+  int64_t dec_unsubmitted_cnt_();
+  int64_t inc_unsynced_cnt_();
+  int64_t dec_unsynced_cnt_();
 private:
   DISALLOW_COPY_AND_ASSIGN(ObMemtable);
   bool is_inited_;
-  storage::ObLS *ls_;
+  storage::ObLSHandle ls_handle_;
   storage::ObFreezer *freezer_;
   storage::ObTabletMemtableMgr *memtable_mgr_;
-  uint32_t freeze_clock_;
+  mutable uint32_t freeze_clock_;
   ObMemstoreAllocator local_allocator_;
   ObMTKVBuilder kv_builder_;
   ObQueryEngine query_engine_;
@@ -525,6 +572,7 @@ private:
   int64_t pending_cb_cnt_; // number of transactions have to sync log
   int64_t unsubmitted_cnt_; // number of trans node to be submitted logs
   int64_t unsynced_cnt_; // number of trans node to be synced logs
+  int64_t memtable_mgr_op_cnt_; // number of operations for memtable_mgr
   bool logging_blocked_; // flag whether the memtable can submit log, cannot submit if true
   int64_t logging_blocked_start_time; // record the start time of logging blocked
   bool unset_active_memtable_logging_blocked_;
@@ -541,12 +589,15 @@ private:
   bool is_flushed_;
   bool read_barrier_ CACHE_ALIGNED;
   bool write_barrier_;
+  bool allow_freeze_;
   int64_t write_ref_cnt_ CACHE_ALIGNED;
   lib::Worker::CompatMode mode_;
   int64_t minor_merged_time_;
   bool contain_hotspot_row_;
   ObMultiSourceData multi_source_data_;
   mutable common::TCRWLock multi_source_data_lock_;
+  transaction::ObTxEncryptMeta *encrypt_meta_;
+  common::SpinRWLock encrypt_meta_lock_;
 };
 
 template<class T>
@@ -571,20 +622,36 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
   } else {
     const MultiSourceDataUnitType &type = multi_source_data_unit->type();
     if (MemtableRefOp::INC_REF == ref_op) {
+      const_cast<T*>(multi_source_data_unit)->inc_unsync_cnt_for_multi_data();
+      TRANS_LOG(INFO, "unsync_cnt_for_multi_data inc", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
+    } else if (MemtableRefOp::DEC_REF == ref_op) {
+      const_cast<T*>(multi_source_data_unit)->dec_unsync_cnt_for_multi_data();
+      TRANS_LOG(INFO, "unsync_cnt_for_multi_data dec", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
+    }
+    if (MemtableRefOp::INC_REF == ref_op) {
       inc_unsubmitted_and_unsynced_cnt();
     }
     if (OB_FAIL(multi_source_data_.save_multi_source_data_unit(multi_source_data_unit, is_callback))) {
       TRANS_LOG(WARN, "fail to save to memtable", K(ret), KPC(multi_source_data_unit), K(type), KPC(this));
       if (MemtableRefOp::INC_REF == ref_op) {
+        const_cast<T*>(multi_source_data_unit)->dec_unsync_cnt_for_multi_data();
         dec_unsubmitted_and_unsynced_cnt();
+        TRANS_LOG(INFO, "unsync_cnt_for_multi_data dec for rollback", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
+      } else if (MemtableRefOp::DEC_REF == ref_op) {
+        const_cast<T*>(multi_source_data_unit)->inc_unsync_cnt_for_multi_data();
+        TRANS_LOG(INFO, "unsync_cnt_for_multi_data inc for rollback", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
       }
     } else {
+<<<<<<< HEAD
       if (MemtableRefOp::INC_REF == ref_op) {
         TRANS_LOG(INFO, "unsync_cnt_for_multi_data inc", K(key_.tablet_id_), K(type));
         if (OB_FAIL(multi_source_data_.update_unsync_cnt_for_multi_data(type, true))) {
           TRANS_LOG(WARN, "fail to inc_cnt_for_multi_data", K(multi_source_data_unit), K(type), KPC(this));
         }
       }
+=======
+      const share::SCN start_scn = get_start_scn();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       if (scn > get_start_scn() && scn < share::ObScnRange::MAX_SCN) {
         if (OB_FAIL(ret)) {
         }
@@ -592,6 +659,19 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
         else if ((!for_replay || !is_callback)
                  && OB_FAIL(set_max_end_scn(scn))) {
           TRANS_LOG(WARN, "failed to set max_end_scn", K(ret), K(scn), KPC(this));
+<<<<<<< HEAD
+=======
+        }
+        // commit log is replayed to empty memtable which is frozen after clog switch to follower gracefully, commit status mds will be lost.
+        // so push end_scn to start_scn + 1
+        else if (get_max_end_scn().is_min() && get_end_scn().is_max()) {
+          if (OB_FAIL(set_max_end_scn_to_inc_start_scn())) {
+            TRANS_LOG(WARN, "failed to set max_end_scn", K(ret), K(scn), KPC(this));
+          }
+          TRANS_LOG(INFO, "empty memtable push end_scn to start_scn + 1", K(ret), K(scn), KPC(this));
+        }
+        if (OB_FAIL(ret)) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         } else if (OB_FAIL(set_rec_scn(scn))) {
           TRANS_LOG(WARN, "failed to set rec_scn", K(ret), K(scn), KPC(this));
         }
@@ -601,12 +681,7 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
       }
 
       if (MemtableRefOp::DEC_REF == ref_op) {
-        TRANS_LOG(INFO, "unsync_cnt_for_multi_data dec", K(key_.tablet_id_), K(type));
         dec_unsubmitted_and_unsynced_cnt();
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(multi_source_data_.update_unsync_cnt_for_multi_data(type, false))) {
-          TRANS_LOG(WARN, "fail to dec_cnt_for_multi_data", K(multi_source_data_unit), K(type), KPC(this));
-        }
       }
     }
     TRANS_LOG(INFO, "memtable save multi source data unit", K(ret), K(scn), K(ref_op),
@@ -616,28 +691,27 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
   return ret;
 }
 
-typedef ObMemtable ObMemStore;
-
-/*
- * Print memtable statistics when receiving a signal.
- * For debug use.
- */
-class ObMemtableStat
+template<class T>
+int ObMemtable::get_multi_source_data_unit_list(
+    const T * const useless_unit,
+    ObMultiSourceData::ObIMultiSourceDataUnitList &dst_list,
+    ObIAllocator *allocator)
 {
-public:
-  ObMemtableStat();
-  virtual ~ObMemtableStat();
-  static ObMemtableStat &get_instance();
-public:
-  int register_memtable(ObMemtable *memtable);
-  int unregister_memtable(ObMemtable *memtable);
-public:
-  int print_stat();
-private:
-  DISALLOW_COPY_AND_ASSIGN(ObMemtableStat);
-  ObSpinLock lock_;
-  ObArray<ObMemtable *> memtables_;
-};
+  int ret = OB_SUCCESS;
+  TCRLockGuard guard(multi_source_data_lock_);
+
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    TRANS_LOG(WARN, "not inited", K(ret));
+  } else if (OB_UNLIKELY(!multi_source_data_.is_valid())) {
+    ret = OB_ERR_UNEXPECTED;
+    TRANS_LOG(WARN, "multi source data is invalid", K(ret));
+  } else if (OB_FAIL(multi_source_data_.get_multi_source_data_unit_list(useless_unit, dst_list, allocator))) {
+    TRANS_LOG(WARN, "fail to get multi source data unit", K(ret));
+  }
+
+  return ret;
+}
 
 class RowHeaderGetter
 {
@@ -650,6 +724,30 @@ public:
 private:
   uint32_t modify_count_;
   uint32_t acc_checksum_;
+};
+
+class MemtableMgrOpGuard
+{
+public:
+  explicit MemtableMgrOpGuard(ObMemtable *memtable): memtable_(memtable),
+                                                     memtable_mgr_(nullptr)
+  {
+    if (OB_NOT_NULL(memtable_)) {
+      memtable_->inc_memtable_mgr_op_cnt();
+      memtable_mgr_ = memtable_->get_memtable_mgr();
+    }
+  }
+  ~MemtableMgrOpGuard()
+  {
+    if (OB_NOT_NULL(memtable_)) {
+      memtable_->dec_memtable_mgr_op_cnt();
+      memtable_mgr_ = nullptr;
+    }
+  }
+  storage::ObTabletMemtableMgr *get_memtable_mgr() { return memtable_mgr_; }
+private:
+  ObMemtable *memtable_;
+  storage::ObTabletMemtableMgr *memtable_mgr_;
 };
 
 }

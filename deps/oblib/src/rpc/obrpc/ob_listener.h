@@ -27,11 +27,7 @@ namespace obrpc
 #define NEGOTIATION_PACKET_HEADER_MAGIC_EASY (0x1234567877668833)
 
 #define MAX_PROTOCOL_TYPE_SIZE (5)
-#ifdef PERF_MODE
-#define OB_LISTENER_MAX_THREAD_CNT         128
-#else
 #define OB_LISTENER_MAX_THREAD_CNT         64
-#endif
 
 inline struct sockaddr_in* make_unix_sockaddr(struct sockaddr_in *sin, in_addr_t ip, int port) {
   if (NULL != sin) {
@@ -66,6 +62,7 @@ public:
   int regist(uint64_t magic, int count, int *pipefd_array);
   uint8_t compatible_balance_assign(io_threads_pipefd_pool_t *& pipefd_pool);
   void set_port(int port) {port_ = port;}
+  int do_one_event(int accept_fd);
   void destroy();
 
 private:

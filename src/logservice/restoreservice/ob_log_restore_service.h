@@ -21,6 +21,11 @@
 #include "ob_remote_fetch_log_worker.h"   // ObRemoteFetchWorker
 #include "ob_remote_location_adaptor.h"   // ObRemoteLocationAdaptor
 #include "ob_remote_error_reporter.h"     // ObRemoteErrorReporter
+#include "ob_log_restore_allocator.h"     // ObLogRestoreAllocator
+#include "ob_log_restore_scheduler.h"     // ObLogRestoreScheduler
+#include "ob_log_restore_controller.h"    // ObLogRestoreController
+#include "ob_log_restore_net_driver.h"    // ObLogRestoreNetDriver
+#include "ob_log_restore_archive_driver.h"    // ObLogRestoreArchiveDriver
 
 namespace oceanbase
 {
@@ -43,6 +48,10 @@ using oceanbase::storage::ObLSService;
 // provide the ability to fetch log from remote cluster and backups
 class ObLogRestoreService : public share::ObThreadPool
 {
+  const int64_t SCHEDULE_INTERVAL = 1000 * 1000L;   // 1s
+  const int64_t UPDATE_RESTORE_UPPER_LIMIT_INTERVAL = 100 * 1000L;  // 100ms
+  const int64_t PRIMARY_THREAD_RUN_INTERVAL = 1000 * 1000L;   // 1s
+  const int64_t STANDBY_THREAD_RUN_INTERVAL = 100 * 1000L;  // 100ms
 public:
   ObLogRestoreService();
   ~ObLogRestoreService();
@@ -59,22 +68,35 @@ public:
   void stop();
   void wait();
   void signal();
+  ObLogRestoreAllocator *get_log_restore_allocator() { return &allocator_;}
 
 private:
   void run1();
   void do_thread_task_();
-  void update_upstream_();
-  void schedule_fetch_log_();
+  void update_restore_quota_();
+  int update_upstream_(share::ObLogRestoreSourceItem &source, bool &source_exist);
+  void schedule_fetch_log_(share::ObLogRestoreSourceItem &source);
+  void schedule_resource_();
+  void clean_resource_();
   void report_error_();
+  void update_restore_upper_limit_();
+  bool need_schedule_() const;
 
 private:
   bool inited_;
+  int64_t last_normal_work_ts_;
+  int64_t last_update_restore_upper_limit_ts_;
   ObLSService *ls_svr_;
   ObLogResSvrRpc proxy_;
+  ObLogRestoreController restore_controller_;
   ObRemoteLocationAdaptor location_adaptor_;
+  ObLogRestoreArchiveDriver archive_driver_;
+  ObLogRestoreNetDriver net_driver_;
   ObRemoteFetchLogImpl fetch_log_impl_;
   ObRemoteFetchWorker fetch_log_worker_;
   ObRemoteErrorReporter error_reporter_;
+  ObLogRestoreAllocator allocator_;
+  ObLogRestoreScheduler scheduler_;
   common::ObCond cond_;
 
 private:

@@ -78,6 +78,20 @@ class ObPLUserTypeTable;
 class ObUserDefinedType;
 class ObPLStmt;
 
+enum ObProcType
+{
+  INVALID_PROC_TYPE = 0,
+  STANDALONE_PROCEDURE,
+  STANDALONE_FUNCTION,
+  PACKAGE_PROCEDURE, /* A subprogram created inside a package is a packaged subprogram */
+  PACKAGE_FUNCTION,
+  NESTED_PROCEDURE, /* A subprogram created inside a PL/SQL block is a nested subprogram */
+  NESTED_FUNCTION,
+  STANDALONE_ANONYMOUS,
+  UDT_PROCEDURE,
+  UDT_FUNCTION,
+};
+
 enum ObPLType
 {
   PL_INVALID_TYPE = -1,
@@ -99,7 +113,8 @@ enum ObPLOpaqueType
   PL_INVALID = -1,
   PL_ANY_TYPE = 0,
   PL_ANY_DATA = 1,
-  PL_XML_TYPE = 2
+  PL_XML_TYPE = 2,
+  PL_JSON_TYPE = 3
 };
 
 enum ObPLIntegerType
@@ -389,8 +404,15 @@ public:
   inline bool is_object_type() const {
     return (is_record_type() || is_opaque_type()) && is_udt_type();
   }
+  //存储过程内部通过type定义的record
+  inline bool is_type_record() const {
+    return is_record_type() && !is_udt_type();
+  }
   inline bool is_lob_type() const {
     return PL_OBJ_TYPE == type_ && obj_type_.get_meta_type().is_lob_locator();
+  }
+  inline bool is_lob_storage_type() const {
+    return PL_OBJ_TYPE == type_ && obj_type_.get_meta_type().is_lob_storage();
   }
   inline bool is_long_type() const {
     return PL_OBJ_TYPE == type_ && ObVarcharType == obj_type_.get_meta_type().get_type()
@@ -626,11 +648,11 @@ public:
   void reset();
   bool operator==(const ObObjAccessIdx &other) const;
 
-  TO_STRING_KV(K_(elem_type),
-               K_(access_type),
+  TO_STRING_KV(K_(access_type),
                K_(var_name),
                K_(var_type),
                K_(var_index),
+               K_(elem_type),
                K_(type_method_params),
                KP_(get_sysfunc));
 public:
@@ -640,7 +662,7 @@ public:
   bool is_subprogram_var() const { return IS_SUBPROGRAM_VAR == access_type_; }
   bool is_user_var() const { return IS_USER == access_type_; }
   bool is_session_var() const { return IS_SESSION == access_type_ || IS_GLOBAL == access_type_; }
-  bool is_ns() const { return IS_DB_NS == access_type_ || IS_PKG_NS == access_type_; }
+  bool is_ns() const { return IS_DB_NS == access_type_ || IS_PKG_NS == access_type_ || IS_UDT_NS == access_type_; }
   bool is_const() const { return IS_CONST == access_type_; }
   bool is_property() const { return IS_PROPERTY == access_type_; }
   bool is_external() const
@@ -720,7 +742,8 @@ enum ObPLCursorFlag {
   REF_BY_REFCURSOR = 1, // this a ref cursor
   SESSION_CURSOR = 2, // this cursor is alloc in session memory
   TRANSFERING_RESOURCE = 4, // this cursor is returned by a udf
-  SYNC_CURSOR = 5, // this cursor from package cursor sync, can not used by this server.
+  SYNC_CURSOR = 8, // this cursor from package cursor sync, can not used by this server.
+  INVALID_CURSOR = 16, // this cursor is convert to a dbms cursor, invalid for dynamic cursor op.
 };
 class ObPLCursorInfo
 {
@@ -936,12 +959,16 @@ public:
   inline void set_sync_cursor() { set_flag_bit(SYNC_CURSOR); }
   inline bool is_sync_cursor() { return test_flag_bit(SYNC_CURSOR); }
 
+  inline void set_invalid_cursor() { set_flag_bit(INVALID_CURSOR); }
+  inline bool is_invalid_cursor() { return test_flag_bit(INVALID_CURSOR); }
+
   static int prepare_entity(sql::ObSQLSessionInfo &session, 
                             lib::MemoryContext &entity);
-  int prepare_spi_result(sql::ObSPIResultSet *&spi_result);
+  int prepare_spi_result(ObPLExecCtx *ctx, sql::ObSPIResultSet *&spi_result);
   int prepare_spi_cursor(sql::ObSPICursor *&spi_cursor,
                           uint64_t tenant_id,
-                          uint64_t mem_limit);
+                          uint64_t mem_limit,
+                          bool is_local_for_update = false);
 
   TO_STRING_KV(K_(id),
                K_(is_explicit),

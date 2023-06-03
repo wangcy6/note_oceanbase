@@ -148,7 +148,6 @@ public:
   uint32_t get_session_id() const { return session_id_; }
   void before_unlock(CtxLockArg &arg);
   void after_unlock(CtxLockArg &arg);
-  bool is_can_elr() const { return can_elr_; }
 public:
   void set_exiting() { is_exiting_ = true; }
   bool is_exiting() const { return is_exiting_; }
@@ -250,6 +249,7 @@ protected:
   int64_t ctx_create_time_;
   ObTransService *trans_service_;
   mutable CtxLock lock_;
+  //ObTransTraceLog trace_log_;
   ObTransTraceLog *tlog_;
   uint64_t cluster_version_;
   ObLSTxCtxMgr *ls_tx_ctx_mgr_;
@@ -269,8 +269,6 @@ protected:
   bool has_pending_callback_;
   // whether the trans can release locks early
   bool can_elr_;
-  // del part ctx from hashmap after unlock to avoid deadlock between foreach/remove_if and del
-  bool need_del_ctx_;
   // inc opid before ctx unlocked
   int64_t opid_;
 

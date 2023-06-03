@@ -195,15 +195,12 @@ public:
 protected:
   int check_tenant_out_of_memstore_limit_(bool &is_out_of_mem);
 
-  int check_replica_allow_access_(
-      const ObStoreAccessType access_type,
-      const ObReplicaType replica_type);
-
   int get_write_store_ctx_guard_(
       const share::ObLSID &ls_id,
       const int64_t timeout,
       transaction::ObTxDesc &tx_desc,
       const transaction::ObTxReadSnapshot &snapshot,
+      const concurrent_control::ObWriteFlag write_flag,
       ObStoreCtxGuard &ctx_guard);
   int check_read_allowed_(
       const share::ObLSID &ls_id,
@@ -212,6 +209,7 @@ protected:
       const ObTableScanParam &scan_param,
       ObStoreCtxGuard &ctx_guard,
       share::SCN user_specified_snapshot);
+<<<<<<< HEAD
   int check_read_allowed_(
       const share::ObLSID &ls_id,
       const common::ObTabletID &tablet_id,
@@ -220,6 +218,8 @@ protected:
       const transaction::ObTxDesc &tx_desc,
       const transaction::ObTxReadSnapshot &snapshot,
       ObStoreCtxGuard &ctx_guard);
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int check_write_allowed_(
       const share::ObLSID &ls_id,
       const common::ObTabletID &tablet_id,

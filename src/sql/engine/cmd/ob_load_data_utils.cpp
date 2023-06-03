@@ -26,11 +26,13 @@ const char ObLoadDataUtils::NULL_VALUE_FLAG = '\xff';
 int ObLoadDataUtils::build_insert_sql_string_head(ObLoadDupActionType insert_mode,
                                                   const ObString &table_name,
                                                   const ObIArray<ObString> &insert_keys,
-                                                  ObSqlString &insertsql_keys)
+                                                  ObSqlString &insertsql_keys,
+                                                  bool need_gather_opt_stat)
 {
   int ret = OB_SUCCESS;
   static const char *replace_stmt = "replace into ";
   static const char *insert_stmt = "insert into ";
+  static const char *insert_stmt_gather_opt_stat = "insert /*+GATHER_OPTIMIZER_STATISTICS*/ into ";
   static const char *insert_ignore_stmt = "insert ignore into ";
 
   const char *stmt_head = NULL;
@@ -41,9 +43,14 @@ int ObLoadDataUtils::build_insert_sql_string_head(ObLoadDupActionType insert_mod
   case ObLoadDupActionType::LOAD_IGNORE:
     stmt_head = insert_ignore_stmt;
     break;
-  case ObLoadDupActionType::LOAD_STOP_ON_DUP:
-    stmt_head = insert_stmt;
+  case ObLoadDupActionType::LOAD_STOP_ON_DUP: {
+    if (need_gather_opt_stat) {
+      stmt_head = insert_stmt_gather_opt_stat;
+    } else {
+      stmt_head = insert_stmt;
+    }
     break;
+  }
   default:
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("not suppport insert mode", K(insert_mode));
@@ -213,7 +220,7 @@ ObString ObLoadDataUtils::escape_quotation(const ObString &value, ObDataBuffer &
   ObString result;
 
   if (OB_ISNULL(buf)) {
-    LOG_WARN("data buf is not inited");
+    LOG_WARN_RET(OB_NOT_INIT, "data buf is not inited");
   } else {
     //check if escape is needed
     bool need_escape = false;
@@ -242,7 +249,7 @@ ObString ObLoadDataUtils::escape_quotation(const ObString &value, ObDataBuffer &
         escape_sm.shift_by_input(*(src + i));
       }
       if (OB_UNLIKELY(pos >= data_buf.get_capacity())) {
-        LOG_ERROR("data is too long"); //this should never happened, just for protection
+        LOG_ERROR_RET(OB_ERR_UNEXPECTED, "data is too long"); //this should never happened, just for protection
         result.reset();
       } else {
         result.assign_ptr(buf, static_cast<int32_t>(pos));
@@ -269,7 +276,7 @@ bool ObKMPStateMachine::scan_buf(char *&cur_pos, const char *buf_end)
 {
   bool matched = false;
   if (OB_UNLIKELY(!is_inited_ || NULL == cur_pos)) {
-    LOG_ERROR("ObKmpStateMachine not inited.", K(cur_pos), K(buf_end));
+    LOG_ERROR_RET(OB_NOT_INIT, "ObKmpStateMachine not inited.", K(cur_pos), K(buf_end));
   } else {
     for (;!matched && cur_pos < buf_end; cur_pos++) {
       while (matched_pos_ > 0 && *cur_pos != str_[matched_pos_]) {
@@ -341,16 +348,12 @@ int ObKMPStateMachine::init(ObIAllocator &allocator, const ObString &str)
 int ObLoadDataUtils::check_session_status(ObSQLSessionInfo &session, int64_t reserved_us) {
   int ret = OB_SUCCESS;
   bool is_timeout = false;
-  int64_t query_timeout = 0;
-  int64_t query_start_time = session.get_query_start_time();
+  int64_t worker_query_timeout = THIS_WORKER.get_timeout_ts();
   int64_t current_time = ObTimeUtil::current_time();
 
-  if (OB_FAIL(session.get_query_timeout(query_timeout))) {
-    LOG_WARN("fail to get query timeout", K(ret));
-  } else if (OB_FAIL(session.is_timeout(is_timeout))) {
+  if (OB_FAIL(session.is_timeout(is_timeout))) {
     LOG_WARN("get session timeout info failed", K(ret));
-  } else if (OB_UNLIKELY(query_start_time + query_timeout
-                         < current_time + reserved_us)) {
+  } else if (OB_UNLIKELY(worker_query_timeout < current_time + reserved_us)) {
     ret = OB_TIMEOUT;
     LOG_WARN("query is timeout", K(ret));
   } else if (OB_UNLIKELY(is_timeout)) {
@@ -360,7 +363,79 @@ int ObLoadDataUtils::check_session_status(ObSQLSessionInfo &session, int64_t res
     LOG_WARN("session's state is not OB_SUCCESS", K(ret));
   }
   if (OB_FAIL(ret)) {
-    LOG_WARN("LOAD DATA timeout", K(ret), K(session.get_sessid()), K(query_timeout), K(query_start_time), K(current_time));
+    LOG_WARN("LOAD DATA timeout", K(ret), K(session.get_sessid()), K(worker_query_timeout), K(current_time), K(reserved_us));
+  }
+  return ret;
+}
+
+int ObLoadDataUtils::check_need_opt_stat_gather(ObExecContext &ctx,
+                                                ObLoadDataStmt &load_stmt,
+                                                bool &need_opt_stat_gather)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = nullptr;
+  const ObLoadDataHint &hint = load_stmt.get_hints();
+  ObObj obj;
+  int64_t append = 0;
+  int64_t gather_optimizer_statistics = 0;
+  need_opt_stat_gather = false;
+  if (OB_ISNULL(session = ctx.get_my_session())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session is null", KR(ret));
+  } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR__OPTIMIZER_GATHER_STATS_ON_LOAD, obj))) {
+    LOG_WARN("fail to get sys variable", K(ret));
+  } else if (OB_FAIL(hint.get_value(ObLoadDataHint::APPEND, append))) {
+    LOG_WARN("fail to get value of APPEND", K(ret));
+  } else if (OB_FAIL(hint.get_value(ObLoadDataHint::GATHER_OPTIMIZER_STATISTICS, gather_optimizer_statistics))) {
+    LOG_WARN("fail to get value of APPEND", K(ret));
+  } else if (((append != 0) || (gather_optimizer_statistics != 0)) && obj.get_bool()) {
+    need_opt_stat_gather = true;
+  }
+  return ret;
+}
+
+/////////////////
+
+ObGetAllJobStatusOp::ObGetAllJobStatusOp()
+    : job_status_array_(),
+      current_job_index_(0)
+{
+}
+
+ObGetAllJobStatusOp::~ObGetAllJobStatusOp()
+{
+  reset();
+}
+
+void ObGetAllJobStatusOp::reset()
+{
+  ObLoadDataStat *job_status;
+  for (int64_t i = 0; i < job_status_array_.count(); ++i) {
+    job_status = job_status_array_.at(i);
+    job_status->release();
+  }
+  job_status_array_.reset();
+  current_job_index_ = 0;
+}
+
+int ObGetAllJobStatusOp::operator()(common::hash::HashMapPair<ObLoadDataGID, ObLoadDataStat *> &entry)
+{
+  int ret = OB_SUCCESS;
+  entry.second->aquire();
+  if (OB_FAIL(job_status_array_.push_back(entry.second))) {
+    entry.second->release();
+    LOG_WARN("push_back ObLoadDataStat failed", K(ret));
+  }
+  return ret;
+}
+
+int ObGetAllJobStatusOp::get_next_job_status(ObLoadDataStat *&job_status)
+{
+  int ret = OB_SUCCESS;
+  if (current_job_index_ >= job_status_array_.count()) {
+    ret = OB_ITER_END;
+  } else {
+    job_status = job_status_array_.at(current_job_index_++);
   }
   return ret;
 }
@@ -368,11 +443,13 @@ int ObLoadDataUtils::check_session_status(ObSQLSessionInfo &session, int64_t res
 int ObGlobalLoadDataStatMap::init()
 {
   int ret = OB_SUCCESS;
+  ObMemAttr attr(OB_SERVER_TENANT_ID, ObModIds::OB_SQL_LOAD_DATA);
+  SET_USE_500(attr);
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
   } else if (OB_FAIL(map_.create(bucket_num,
-                                 ObModIds::OB_SQL_LOAD_DATA,
-                                 ObModIds::OB_SQL_LOAD_DATA))) {
+                                 attr,
+                                 attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("create hash table failed", K(ret));
   } else {
@@ -416,61 +493,19 @@ int ObGlobalLoadDataStatMap::get_job_status(const ObLoadDataGID &id, ObLoadDataS
 int ObGlobalLoadDataStatMap::get_all_job_status(ObGetAllJobStatusOp &job_status_op)
 {
   int ret = OB_SUCCESS;
-
   OZ (map_.foreach_refactored(job_status_op));
-
   return ret;
 }
 
-ObGetAllJobStatusOp::ObGetAllJobStatusOp()
-    : job_status_array_(),
-      current_job_index_(0)
-{
-
-}
-
-ObGetAllJobStatusOp::~ObGetAllJobStatusOp()
-{
-  reset();
-}
-
-void ObGetAllJobStatusOp::reset()
-{
-  ObLoadDataStat *job_status;
-  for (int i = 0; i < job_status_array_.count(); i++) {
-    job_status = job_status_array_.at(i);
-    job_status->release();
-  }
-  job_status_array_.reset();
-  current_job_index_ = 0;
-}
-
-int ObGetAllJobStatusOp::operator()(common::hash::HashMapPair<ObLoadDataGID, ObLoadDataStat *> &entry)
+int ObGlobalLoadDataStatMap::get_job_stat_guard(const ObLoadDataGID &id, ObLoadDataStatGuard &guard)
 {
   int ret = OB_SUCCESS;
-
-  entry.second->aquire();
-  if (OB_FAIL(job_status_array_.push_back(entry.second))) {
-    entry.second->release();
-    LOG_WARN("push_back ObLoadDataStat failed", K(ret));
-  }
-
+  auto get_and_add_ref = [&](hash::HashMapPair<ObLoadDataGID, ObLoadDataStat*> &entry) -> void
+  {
+    guard.aquire(entry.second);
+  };
+  OZ (map_.read_atomic(id, get_and_add_ref));
   return ret;
-}
-
-ObLoadDataStat* ObGetAllJobStatusOp::next_job_status()
-{
-  ObLoadDataStat *job_status = nullptr;
-  if (current_job_index_ < job_status_array_.count()) {
-    job_status = job_status_array_.at(current_job_index_++);
-  }
-
-  return job_status;
-}
-
-bool ObGetAllJobStatusOp::end()
-{
-  return (current_job_index_ >= job_status_array_.count());
 }
 
 ObGlobalLoadDataStatMap *ObGlobalLoadDataStatMap::getInstance()
@@ -489,5 +524,3 @@ OB_SERIALIZE_MEMBER(ObLoadDataGID, id);
 
 }
 }
-
-

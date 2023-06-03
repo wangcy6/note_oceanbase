@@ -19,6 +19,7 @@
 #include "sql/optimizer/ob_log_plan.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "sql/dblink/ob_dblink_utils.h"
+#include "src/storage/tx/ob_trans_define_v4.h"
 
 using namespace ::oceanbase::common;
 namespace oceanbase
@@ -136,7 +137,6 @@ void ObQueryRetryInfo::reset()
 {
   inited_ = false;
   is_rpc_timeout_ = false;
-  invalid_servers_.reset();
   last_query_retry_err_ = OB_SUCCESS;
   retry_cnt_ = 0;
   query_switch_leader_retry_timeout_ts_ = 0;
@@ -146,25 +146,7 @@ void ObQueryRetryInfo::clear()
 {
   // 这里不能将inited_设为false
   is_rpc_timeout_ = false;
-  invalid_servers_.reset();
   //last_query_retry_err_ = OB_SUCCESS;
-}
-
-// 合并重试信息，用于主线程和调度线程的重试信息合并
-int ObQueryRetryInfo::merge(const ObQueryRetryInfo &other)
-{
-  int ret = OB_SUCCESS;
-  if (other.is_rpc_timeout_) {
-    is_rpc_timeout_ = other.is_rpc_timeout_;
-  }
-  for (int64_t i = 0; OB_SUCC(ret) && i < other.invalid_servers_.count(); ++i) {
-    if (OB_FAIL(add_invalid_server_distinctly(other.invalid_servers_.at(i)))) {
-      LOG_WARN("fail to add invalid server distinctly", K(ret), K(i),
-               K(other.invalid_servers_.at(i)), K(other.invalid_servers_), K(invalid_servers_));
-    }
-  }
-  // last_query_retry_err_不会在调度线程上修改，所以这里不用管
-  return ret;
 }
 
 void ObQueryRetryInfo::set_is_rpc_timeout(bool is_rpc_timeout)
@@ -175,27 +157,6 @@ void ObQueryRetryInfo::set_is_rpc_timeout(bool is_rpc_timeout)
 bool ObQueryRetryInfo::is_rpc_timeout() const
 {
   return is_rpc_timeout_;
-}
-
-int ObQueryRetryInfo::add_invalid_server_distinctly(const ObAddr &invalid_server,
-                                                    bool print_info_log/* = false*/)
-{
-  int ret = OB_SUCCESS;
-  bool is_found = false;
-  for (int64_t i = 0; OB_SUCC(ret) && !is_found && i < invalid_servers_.count(); ++i) {
-    if (invalid_server == invalid_servers_.at(i)) {
-      is_found = true;
-    }
-  }
-  if (OB_SUCC(ret) && !is_found) {
-    if (OB_FAIL(invalid_servers_.push_back(invalid_server))) {
-      LOG_WARN("fail to push back invalid server", K(ret), K(invalid_server));
-    }
-  }
-  if (print_info_log) {
-    LOG_INFO("add a server to invalid server list", K(ret), K(invalid_server), K(invalid_servers_));
-  }
-  return ret;
 }
 
 ObSqlCtx::ObSqlCtx()
@@ -225,13 +186,23 @@ ObSqlCtx::ObSqlCtx()
     all_equal_param_constraints_(nullptr),
     all_pre_calc_constraints_(nullptr),
     all_expr_constraints_(nullptr),
+    all_priv_constraints_(nullptr),
     is_ddl_from_primary_(false),
     cur_stmt_(NULL),
     cur_plan_(nullptr),
     can_reroute_sql_(false),
     is_sensitive_(false),
+    is_protocol_weak_read_(false),
     flashback_query_expr_(nullptr),
     is_execute_call_stmt_(false),
+    enable_sql_resource_manage_(false),
+    res_map_rule_id_(OB_INVALID_ID),
+    res_map_rule_param_idx_(OB_INVALID_INDEX),
+    res_map_rule_version_(0),
+    is_text_ps_mode_(false),
+    is_strict_defensive_check_(false),
+    first_plan_hash_(0),
+    is_bulk_(false),
     reroute_info_(nullptr)
 {
   sql_id_[0] = '\0';
@@ -264,9 +235,17 @@ void ObSqlCtx::reset()
   all_equal_param_constraints_ = nullptr;
   all_pre_calc_constraints_ = nullptr;
   all_expr_constraints_ = nullptr;
+  all_priv_constraints_ = nullptr;
   is_ddl_from_primary_ = false;
   can_reroute_sql_ = false;
   is_sensitive_ = false;
+  enable_sql_resource_manage_ = false;
+  res_map_rule_id_ = OB_INVALID_ID;
+  res_map_rule_param_idx_ = OB_INVALID_INDEX;
+  res_map_rule_version_ = 0;
+  is_protocol_weak_read_ = false;
+  first_plan_hash_ = 0;
+  first_outline_data_.reset();
   if (nullptr != reroute_info_) {
     reroute_info_->reset();
     op_reclaim_free(reroute_info_);
@@ -277,6 +256,9 @@ void ObSqlCtx::reset()
   stmt_type_ = stmt::T_NONE;
   cur_plan_ = nullptr;
   is_execute_call_stmt_ = false;
+  is_text_ps_mode_ = false;
+  is_strict_defensive_check_ = false;
+  is_bulk_ = false;
 }
 
 //release dynamic allocated memory
@@ -287,9 +269,12 @@ void ObSqlCtx::clear()
   base_constraints_.reset();
   strict_constraints_.reset();
   non_strict_constraints_.reset();
+  dup_table_replica_cons_.reset();
   multi_stmt_rowkey_pos_.reset();
   spm_ctx_.bl_key_.reset();
   cur_stmt_ = nullptr;
+  is_text_ps_mode_ = false;
+  is_strict_defensive_check_ = false;
 }
 
 OB_SERIALIZE_MEMBER(ObSqlCtx, stmt_type_);
@@ -300,6 +285,7 @@ void ObSqlSchemaGuard::reset()
   schema_guard_ = NULL;
   allocator_.reset();
   next_link_table_id_ = 1;
+  dblink_scn_.reuse();
 }
 
 TableItem *ObSqlSchemaGuard::get_table_item_by_ref_id(const ObDMLStmt *stmt, uint64_t ref_table_id)
@@ -329,11 +315,47 @@ bool ObSqlSchemaGuard::is_link_table(const ObDMLStmt *stmt, uint64_t table_id)
   return is_link;
 }
 
+int ObSqlSchemaGuard::get_dblink_schema(const uint64_t tenant_id,
+                                        const uint64_t dblink_id,
+                                        const share::schema::ObDbLinkSchema *&dblink_schema)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(schema_guard_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null schema guard", K(ret));
+  } else if (OB_FAIL(schema_guard_->get_dblink_schema(tenant_id,
+                                                      dblink_id,
+                                                      dblink_schema))) {
+    LOG_WARN("failed to get dblink schema", K(ret));
+  }
+  return ret;
+}
+
+int ObSqlSchemaGuard::set_link_table_schema(uint64_t dblink_id,
+                                            const common::ObString &database_name,
+                                            share::schema::ObTableSchema *table_schema)
+{
+  int ret = OB_SUCCESS;
+  table_schema->set_dblink_id(dblink_id);
+  table_schema->set_table_type(share::schema::ObTableType::USER_TABLE);
+  OX(table_schema->set_link_database_name(database_name);)
+  OX (table_schema->set_table_id(next_link_table_id_++));
+  OX (table_schema->set_link_table_id(table_schema->get_table_id()));
+  OV (table_schema->get_table_id() != OB_INVALID_ID,
+      OB_ERR_UNEXPECTED, dblink_id, next_link_table_id_);
+  if (OB_FAIL(table_schemas_.push_back(table_schema))) {
+    LOG_WARN("failed to push back table schema", K(ret));
+  }
+  return ret;
+}
+
 int ObSqlSchemaGuard::get_table_schema(uint64_t dblink_id,
                                          const ObString &database_name,
                                          const ObString &table_name,
                                          const ObTableSchema *&table_schema,
-                                         uint32_t sessid)
+                                         sql::ObSQLSessionInfo *session_info,
+                                         const ObString &dblink_name,
+                                         bool is_reverse_link)
 {
   int ret = OB_SUCCESS;
   int64_t schema_count = table_schemas_.count();
@@ -352,11 +374,41 @@ int ObSqlSchemaGuard::get_table_schema(uint64_t dblink_id,
   if (OB_SUCC(ret) && OB_ISNULL(table_schema)) {
     ObTableSchema *tmp_schema = NULL;
     OV (OB_NOT_NULL(schema_guard_), OB_NOT_INIT);
+    uint64_t current_scn = OB_INVALID_ID;
+    uint64_t *scn = NULL;
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(session_info)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("session info is null", K(ret));
+      } else {
+         bool use_scn = (session_info->is_in_transaction() &&
+          transaction::ObTxIsolationLevel::RC == session_info->get_tx_desc()->get_isolation_level())
+          || !session_info->is_in_transaction();
+        if (use_scn && OB_FAIL(get_link_current_scn(dblink_id, tenant_id, session_info, current_scn))) {
+          if (OB_HASH_NOT_EXIST == ret) {
+            scn = &current_scn;
+            ret = OB_SUCCESS;
+          } else {
+            LOG_WARN("get link current scn failed", K(ret));
+          }
+        }
+      }
+    }
     OZ (schema_guard_->get_link_table_schema(tenant_id,
                                              dblink_id,
                                              database_name, table_name,
                                              allocator_, tmp_schema,
-                                             sessid));
+                                             session_info,
+                                             dblink_name,
+                                             is_reverse_link,
+                                             scn));
+    if (OB_SUCC(ret) && (NULL != scn)) {
+      if (OB_FAIL(dblink_scn_.set_refactored(dblink_id, *scn))) {
+        LOG_WARN("set refactored failed", K(ret));
+      } else {
+        LOG_TRACE("set dblink current scn", K(dblink_id), K(*scn));
+      }
+    }
     OV (OB_NOT_NULL(tmp_schema));
     OX (tmp_schema->set_table_id(next_link_table_id_++));
     OX (tmp_schema->set_link_table_id(tmp_schema->get_table_id()));
@@ -458,20 +510,12 @@ int ObSqlSchemaGuard::get_column_schema(uint64_t table_id, uint64_t column_id,
 }
 
 int ObSqlSchemaGuard::get_table_schema_version(const uint64_t table_id,
-                                               int64_t &schema_version,
-                                               bool is_link /* = false */) const
+                                               int64_t &schema_version) const
 {
   int ret = OB_SUCCESS;
-  if (is_link) {
-    const ObTableSchema *table_schema = NULL;
-    OZ (get_link_table_schema(table_id, table_schema), table_id);
-    OV (OB_NOT_NULL(table_schema), OB_TABLE_NOT_EXIST, table_id);
-    OX (schema_version = table_schema->get_schema_version());
-  } else {
-    const uint64_t tenant_id = MTL_ID();
-    OV (OB_NOT_NULL(schema_guard_));
-    OZ (schema_guard_->get_schema_version(TABLE_SCHEMA, tenant_id, table_id, schema_version), table_id);
-  }
+  const uint64_t tenant_id = MTL_ID();
+  OV (OB_NOT_NULL(schema_guard_));
+  OZ (schema_guard_->get_schema_version(TABLE_SCHEMA, tenant_id, table_id, schema_version), table_id);
   return ret;
 }
 
@@ -481,18 +525,15 @@ int ObSqlSchemaGuard::get_can_read_index_array(uint64_t table_id,
                                                  bool with_mv,
                                                  bool with_global_index,
                                                  bool with_domain_index,
-                                                 bool is_link /* = false */)
+                                                 bool with_spatial_index)
 {
   int ret = OB_SUCCESS;
   const uint64_t tenant_id = MTL_ID();
-  if (is_link) {
-    size = 0;
-  } else {
-    OV (OB_NOT_NULL(schema_guard_));
-    OZ (schema_guard_->get_can_read_index_array(tenant_id, table_id,
-                                                index_tid_array, size, with_mv,
-                                                with_global_index, with_domain_index));
-  }
+  OV (OB_NOT_NULL(schema_guard_));
+  OZ (schema_guard_->get_can_read_index_array(tenant_id, table_id,
+                                              index_tid_array, size, with_mv,
+                                              with_global_index, with_domain_index,
+                                              with_spatial_index));
   return ret;
 }
 
@@ -533,6 +574,28 @@ int ObSqlSchemaGuard::get_link_column_schema(uint64_t table_id, uint64_t column_
   OZ (get_link_table_schema(table_id, table_schema), table_id);
   if (OB_NOT_NULL(table_schema)) {
     OX (column_schema = table_schema->get_column_schema(column_id));
+  }
+  return ret;
+}
+
+int ObSqlSchemaGuard::get_link_current_scn(uint64_t dblink_id, uint64_t tenant_id,
+                                           ObSQLSessionInfo *session_info,
+                                           uint64_t &current_scn)
+{
+  int ret = OB_SUCCESS;
+  current_scn = OB_INVALID_ID;
+  if (!dblink_scn_.created()) {
+    if (OB_FAIL(dblink_scn_.create(4, "DblinkScnMap", "DblinkScnMap", tenant_id))) {
+      LOG_WARN("create hash map failed", K(ret));
+    } else {
+      ret = OB_HASH_NOT_EXIST;
+    }
+  } else {
+    if (OB_FAIL(dblink_scn_.get_refactored(dblink_id, current_scn))) {
+      if (OB_HASH_NOT_EXIST != ret) {
+        LOG_WARN("get dblink scn failed", K(ret));
+      }
+    }
   }
   return ret;
 }
@@ -587,9 +650,11 @@ int ObSqlCtx::set_location_constraints(const ObLocationConstraintContext &locati
   base_constraints_.reset();
   strict_constraints_.reset();
   non_strict_constraints_.reset();
+  dup_table_replica_cons_.reset();
   const ObIArray<LocationConstraint> &base_constraints = location_constraint.base_table_constraints_;
   const ObIArray<ObPwjConstraint *> &strict_constraints = location_constraint.strict_constraints_;
   const ObIArray<ObPwjConstraint *> &non_strict_constraints = location_constraint.non_strict_constraints_;
+  const ObIArray<ObDupTabConstraint> &dup_table_replica_cons = location_constraint.dup_table_replica_cons_;
   if (base_constraints.count() > 0) {
     base_constraints_.set_allocator(&allocator);
     if (OB_FAIL(base_constraints_.init(base_constraints.count()))) {
@@ -630,6 +695,19 @@ int ObSqlCtx::set_location_constraints(const ObLocationConstraintContext &locati
         }
       }
       LOG_DEBUG("set non strict constraints", K(non_strict_constraints.count()));
+    }
+  }
+  if (OB_SUCC(ret) && dup_table_replica_cons.count() > 0) {
+    dup_table_replica_cons_.set_allocator(&allocator);
+    if (OB_FAIL(dup_table_replica_cons_.init(dup_table_replica_cons.count()))) {
+      LOG_WARN("init duplicate table replica constraints failed", K(ret));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < dup_table_replica_cons.count(); i++) {
+        if (OB_FAIL(dup_table_replica_cons_.push_back(dup_table_replica_cons.at(i)))) {
+          LOG_WARN("failed to push back location constraint", K(ret));
+        }
+      }
+      LOG_DEBUG("set duplicate table replica constraints", K(dup_table_replica_cons.count()));
     }
   }
   return ret;

@@ -53,6 +53,7 @@ private:
     int64_t sqc_id_;
     int64_t dfo_id_;
     ObGranuleIteratorSpec *pw_gi_spec_;
+    // TODO: remove on_set_tscs_, tsc_op_specs_ and dml_spec_ on 4.2
     bool on_set_tscs_;
     common::ObSEArray<const ObTableScanSpec *, 32> tsc_op_specs_;
     ObTableModifySpec *dml_spec_;
@@ -113,6 +114,7 @@ private:
   virtual void record_exec_timestamp(bool is_first, ObExecTimestamp &exec_timestamp)
   { ObExecStatUtils::record_exec_timestamp(*this, is_first, exec_timestamp); }
   int record_tx_desc();
+  int record_exec_feedback_info();
   void release();
   /* variables */
   const observer::ObGlobalContext &gctx_;

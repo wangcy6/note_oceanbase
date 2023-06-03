@@ -24,7 +24,7 @@ namespace sql
 {
 
 ObExprRandomBytes::ObExprRandomBytes(ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_RANDOM_BYTES, N_RANDOM_BYTES, 1, NOT_ROW_DIMENSION)
+    : ObFuncExprOperator(alloc, T_FUN_SYS_RANDOM_BYTES, N_RANDOM_BYTES, 1, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -42,6 +42,7 @@ int ObExprRandomBytes::calc_result_type1(ObExprResType &type,
   static const int64_t MAX_RAND_BYTES = 1024;
   type.set_varbinary();
   type.set_collation_type(CS_TYPE_BINARY);
+  type.set_collation_level(CS_LEVEL_COERCIBLE);
   type.set_length(MAX_RAND_BYTES);
   return ret;
 }

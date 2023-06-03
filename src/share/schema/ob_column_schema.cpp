@@ -53,7 +53,7 @@ const char *ObColumnSchemaV2::convert_column_type_to_str(ColumnType type)
   } else if (ObRawType == type) {
     type_str = STR_COLUMN_TYPE_RAW;
   } else {
-    LOG_ERROR("Not supported column type, ", K(type));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "Not supported column type, ", K(type));
   }
   return type_str;
 }
@@ -86,7 +86,7 @@ ColumnType ObColumnSchemaV2::convert_str_to_column_type(const char *str)
   } else if (STRCMP(str, STR_COLUMN_TYPE_UNKNOWN) == 0) {
     type = ObUnknownType;
   } else {
-    LOG_ERROR("Not supported column type, ", K(str));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "Not supported column type, ", K(str));
   }
   return type;
 }
@@ -141,6 +141,9 @@ ObColumnSchemaV2 &ObColumnSchemaV2::operator =(const ObColumnSchemaV2 &src_schem
     next_column_id_ = src_schema.next_column_id_;
     encoding_type_ = src_schema.encoding_type_;
     sequence_id_ = src_schema.sequence_id_;
+    srs_id_ = src_schema.srs_id_;
+    udt_set_id_ = src_schema.udt_set_id_;
+    sub_type_ = src_schema.sub_type_;
 
     int ret = OB_SUCCESS;
     if (OB_FAIL(deep_copy_obj(src_schema.orig_default_value_, orig_default_value_))) {
@@ -215,10 +218,10 @@ bool ObColumnSchemaV2::is_prefix_column() const
   return bret;
 }
 
-bool ObColumnSchemaV2::is_func_idx_column(const bool is_oracle_mode) const
+bool ObColumnSchemaV2::is_func_idx_column() const
 {
   bool bret = false;
-  if (is_hidden() && is_generated_column() && is_oracle_mode) {
+  if (is_hidden() && is_generated_column()) {
     const char *func_idx_str = "SYS_NC";
     int64_t min_len = min(column_name_.length(), static_cast<int64_t>(strlen(func_idx_str)));
     bret = (0 == strncmp(get_column_name(), func_idx_str, min_len));
@@ -256,6 +259,9 @@ void ObColumnSchemaV2::reset()
   next_column_id_ = UINT64_MAX;
   encoding_type_ = INT64_MAX;
   sequence_id_ = INT64_MAX;
+  srs_id_ = OB_DEFAULT_COLUMN_SRS_ID;
+  udt_set_id_ = 0;
+  sub_type_ = 0;
   reset_string_array(extended_type_info_);
   ObSchema::reset();
 }
@@ -302,7 +308,10 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
     LOG_WARN("serialize_string_array failed", K(ret));
   } else {
     LST_DO_CODE(OB_UNIS_ENCODE,
-                sequence_id_);
+                sequence_id_,
+                srs_id_,
+                udt_set_id_,
+                sub_type_);
   }
 
   return ret;
@@ -365,7 +374,10 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
     LOG_WARN("Fail to deep copy comment, ", K(ret), K_(comment));
   } else {
     LST_DO_CODE(OB_UNIS_DECODE,
-                sequence_id_);
+                sequence_id_,
+                srs_id_,
+                udt_set_id_,
+                sub_type_);
   }
   return ret;
 }
@@ -406,7 +418,10 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               next_column_id_);
   len += get_string_array_serialize_size(extended_type_info_);
   LST_DO_CODE(OB_UNIS_ADD_LEN,
-              sequence_id_);
+              sequence_id_,
+              srs_id_,
+              udt_set_id_,
+              sub_type_);
   return len;
 }
 
@@ -456,7 +471,7 @@ void ObColumnSchemaV2::print_info() const
 void ObColumnSchemaV2::print(FILE *fd) const
 {
   if (OB_ISNULL(fd)) {
-    LOG_WARN("fd is NULL");
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "fd is NULL");
   } else {
     fprintf(fd, " column: %8ld %16ld %24.*s %16s %8d %8d %8d\n",
             column_id_, schema_version_,
@@ -497,6 +512,9 @@ int64_t ObColumnSchemaV2::to_string(char *buf, const int64_t buf_len) const
     K_(next_column_id),
     K_(sequence_id),
     K_(encoding_type),
+    K_(srs_id),
+    K_(udt_set_id),
+    K_(sub_type),
     KPC_(column_ref_idxs));
   J_OBJ_END();
   return pos;
@@ -508,10 +526,13 @@ int ObColumnSchemaV2::get_byte_length(
     const bool for_check_length) const
 {
   int ret = OB_SUCCESS;
-  if (CS_TYPE_INVALID == get_collation_type()) {
+  if (CS_TYPE_INVALID == get_collation_type()
+      && !ob_is_extend(meta_type_.get_type())
+      && !ob_is_user_defined_sql_type(meta_type_.get_type())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("collation type is invalid", K(ret));
-  } else if (ob_is_text_tc(meta_type_.get_type()) || ob_is_json(meta_type_.get_type())) {
+  } else if (ob_is_text_tc(meta_type_.get_type()) || ob_is_json(meta_type_.get_type())
+             || ob_is_geometry(meta_type_.get_type())) {
     if (for_check_length) {
       // when check row length, a lob will occupy at most 2KB
       length = min(get_data_length(), OB_MAX_LOB_HANDLE_LENGTH);
@@ -697,6 +718,61 @@ int ObColumnSchemaV2::deserialize_extended_type_info(const char *buf,
   }
   return ret;
 }
+
+int ObColumnSchemaV2::set_geo_type(const int32_t type_val)
+{
+  int ret = OB_SUCCESS;
+  switch (type_val) {
+    case static_cast<int32_t>(common::ObGeoType::GEOMETRY): {
+      set_geo_type(common::ObGeoType::GEOMETRY);
+      break;
+    }
+
+    case static_cast<int32_t>(common::ObGeoType::POINT): {
+      set_geo_type(common::ObGeoType::POINT);
+      break;
+    }
+
+    case static_cast<int32_t>(common::ObGeoType::LINESTRING): {
+      set_geo_type(common::ObGeoType::LINESTRING);
+      break;
+    }
+
+    case static_cast<int32_t>(common::ObGeoType::POLYGON): {
+      set_geo_type(common::ObGeoType::POLYGON);
+      break;
+    }
+
+    case static_cast<int32_t>(common::ObGeoType::MULTIPOINT): {
+      set_geo_type(common::ObGeoType::MULTIPOINT);
+      break;
+    }
+
+    case static_cast<int32_t>(common::ObGeoType::MULTILINESTRING): {
+      set_geo_type(common::ObGeoType::MULTILINESTRING);
+      break;
+    }
+
+    case static_cast<int32_t>(common::ObGeoType::MULTIPOLYGON): {
+      set_geo_type(common::ObGeoType::MULTIPOLYGON);
+      break;
+    }
+
+    case static_cast<int32_t>(common::ObGeoType::GEOMETRYCOLLECTION): {
+      set_geo_type(common::ObGeoType::GEOMETRYCOLLECTION);
+      break;
+    }
+
+    default: {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("undefined geometry type", K(ret), K(type_val));
+      break;
+    }
+  }
+
+  return ret;
+}
+
 } //end of namespace schema
 } //end of namespace share
 } //end of namespace oceanbase

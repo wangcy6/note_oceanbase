@@ -32,6 +32,7 @@ public:
       const int64_t schema_version,
       const int64_t snapshot_version,
       const int64_t execution_id,
+      const int64_t consumer_group_id,
       const ObSQLMode &sql_mode,
       const common::ObCurTraceId::TraceId &trace_id,
       const int64_t parallelism,
@@ -42,6 +43,7 @@ public:
       const ObTableSchema &orig_table_schema,
       const AlterTableSchema &alter_table_schema,
       const ObTimeZoneInfoWrap &tz_info_wrap);
+  ObDDLTaskID get_ddl_task_id() { return ObDDLTaskID(tenant_id_, task_id_); }
   virtual ~ObDDLRedefinitionSSTableBuildTask() = default;
   virtual int process() override;
   virtual int64_t get_deep_copy_size() const override { return sizeof(*this); }
@@ -55,6 +57,7 @@ private:
   int64_t schema_version_;
   int64_t snapshot_version_;
   int64_t execution_id_;
+  int64_t consumer_group_id_;
   ObSQLMode sql_mode_;
   ObTimeZoneInfoWrap tz_info_wrap_;
   share::ObColumnNameMap col_name_map_;
@@ -105,26 +108,33 @@ private:
 class ObDDLRedefinitionTask : public ObDDLTask
 {
 public:
-  ObDDLRedefinitionTask(): 
-    ObDDLTask(share::DDL_INVALID), lock_(), wait_trans_ctx_(), sync_tablet_autoinc_seq_ctx_(),
+  explicit ObDDLRedefinitionTask(const share::ObDDLType task_type):
+    ObDDLTask(task_type), wait_trans_ctx_(), sync_tablet_autoinc_seq_ctx_(),
     build_replica_request_time_(0), complete_sstable_job_ret_code_(INT64_MAX), alter_table_arg_(),
     dependent_task_result_map_(), snapshot_held_(false), has_synced_autoincrement_(false),
     has_synced_stats_info_(false), update_autoinc_job_ret_code_(INT64_MAX), update_autoinc_job_time_(0),
     check_table_empty_job_ret_code_(INT64_MAX), check_table_empty_job_time_(0) {}
-  virtual ~ObDDLRedefinitionTask(){};
+  virtual ~ObDDLRedefinitionTask() {}
   virtual int process() = 0;
   virtual int update_complete_sstable_job_status(
       const common::ObTabletID &tablet_id,
       const int64_t snapshot_version,
       const int64_t execution_id,
-      const int ret_code) = 0;
+      const int ret_code,
+      const ObDDLTaskInfo &addition_info) = 0;
   int on_child_task_finish(
-      const ObDDLTaskKey &child_task_key,
+      const uint64_t child_task_key,
       const int ret_code);
-  virtual int serialize_params_to_message(char *buf, const int64_t buf_size, int64_t &pos) const override;
-  virtual int deserlize_params_from_message(const char *buf, const int64_t buf_size, int64_t &pos) override;
-  virtual int64_t get_serialize_param_size() const override;
   int notify_update_autoinc_finish(const uint64_t autoinc_val, const int ret_code);
+  virtual void flt_set_task_span_tag() const = 0;
+  virtual void flt_set_status_span_tag() const = 0;
+  virtual int cleanup_impl() override;
+  int reap_old_replica_build_task(bool &need_exec_new_inner_sql);
+  INHERIT_TO_STRING_KV("ObDDLTask", ObDDLTask,
+      K(wait_trans_ctx_), K(sync_tablet_autoinc_seq_ctx_), K(build_replica_request_time_),
+      K(complete_sstable_job_ret_code_), K(snapshot_held_), K(has_synced_autoincrement_),
+      K(has_synced_stats_info_), K(update_autoinc_job_ret_code_), K(update_autoinc_job_time_),
+      K(check_table_empty_job_ret_code_), K(check_table_empty_job_time_));
 protected:
   int prepare(const share::ObDDLTaskStatus next_task_status);
   int lock_table(const share::ObDDLTaskStatus next_task_status);
@@ -144,9 +154,8 @@ protected:
   int success();
   int hold_snapshot(const int64_t snapshot_version);
   int release_snapshot(const int64_t snapshot_version);
-  int cleanup();
-  int add_constraint_ddl_task(const int64_t constraint_id, share::schema::ObSchemaGetterGuard &schema_guard);
-  int add_fk_ddl_task(const int64_t fk_id, share::schema::ObSchemaGetterGuard &schema_guard);
+  int add_constraint_ddl_task(const int64_t constraint_id);
+  int add_fk_ddl_task(const int64_t fk_id);
   int sync_auto_increment_position();
   int modify_autoinc(const share::ObDDLTaskStatus next_task_status);
   int finish();
@@ -154,23 +163,29 @@ protected:
   int check_update_autoinc_end(bool &is_end);
   int check_check_table_empty_end(bool &is_end);
   int sync_stats_info();
-  int sync_table_level_stats_info(common::ObMySQLTransaction &trans, const ObTableSchema &data_table_schema);
+  int sync_table_level_stats_info(common::ObMySQLTransaction &trans,
+                                  const ObTableSchema &data_table_schema,
+                                  const bool need_sync_history = true);
   int sync_partition_level_stats_info(common::ObMySQLTransaction &trans,
                                       const ObTableSchema &data_table_schema,
-                                      const ObTableSchema &new_table_schema);
+                                      const ObTableSchema &new_table_schema,
+                                      const bool need_sync_history = true);
   int sync_column_level_stats_info(common::ObMySQLTransaction &trans,
                                    const ObTableSchema &data_table_schema,
                                    const ObTableSchema &new_table_schema,
-                                   ObSchemaGetterGuard &schema_guard);
+                                   ObSchemaGetterGuard &schema_guard,
+                                   const bool need_sync_history = true);
   int sync_one_column_table_level_stats_info(common::ObMySQLTransaction &trans,
                                              const ObTableSchema &data_table_schema,
                                              const uint64_t old_col_id,
-                                             const uint64_t new_col_id);
+                                             const uint64_t new_col_id,
+                                             const bool need_sync_history = true);
   int sync_one_column_partition_level_stats_info(common::ObMySQLTransaction &trans,
                                                  const ObTableSchema &data_table_schema,
                                                  const ObTableSchema &new_table_schema,
                                                  const uint64_t old_col_id,
-                                                 const uint64_t new_col_id);   
+                                                 const uint64_t new_col_id,
+                                                 const bool need_sync_history = true);
   int generate_sync_partition_level_stats_sql(const char *table_name,
                                               const ObIArray<ObObjectID> &src_partition_ids,
                                               const ObIArray<ObObjectID> &dest_partition_ids,
@@ -185,11 +200,17 @@ protected:
                                                      const int64_t batch_start,
                                                      const int64_t batch_end,
                                                      ObSqlString &sql_string);
+
+  bool check_need_sync_stats_history();
+  bool check_need_sync_stats();
   int sync_tablet_autoinc_seq();
   int check_need_rebuild_constraint(const ObTableSchema &table_schema,
                                     ObIArray<uint64_t> &constraint_ids,
                                     bool &need_rebuild_constraint);
   int check_need_check_table_empty(bool &need_check_table_empty);
+  int get_child_task_ids(char *buf, int64_t len);
+  int get_estimated_timeout(const share::schema::ObTableSchema *dst_table_schema, int64_t &estimated_timeout);
+  int get_orig_all_index_tablet_count(ObSchemaGetterGuard &schema_guard, int64_t &all_tablet_count);
 protected:
   struct DependTaskStatus final
   {
@@ -202,16 +223,16 @@ protected:
     int64_t ret_code_;
     int64_t task_id_;
   };
+  static const int64_t OB_REDEFINITION_TASK_VERSION = 1L;
   static const int64_t MAX_DEPEND_OBJECT_COUNT = 100L;
   static const int64_t RETRY_INTERVAL = 1 * 1000 * 1000; // 1s
   static const int64_t RETRY_LIMIT = 100;   
-  common::TCRWLock lock_;
   ObDDLWaitTransEndCtx wait_trans_ctx_;
   ObSyncTabletAutoincSeqCtx sync_tablet_autoinc_seq_ctx_;
   int64_t build_replica_request_time_;
   int64_t complete_sstable_job_ret_code_;
   obrpc::ObAlterTableArg alter_table_arg_;
-  common::hash::ObHashMap<ObDDLTaskKey, DependTaskStatus> dependent_task_result_map_;
+  common::hash::ObHashMap<uint64_t, DependTaskStatus> dependent_task_result_map_;
   bool snapshot_held_;
   bool has_synced_autoincrement_;
   bool has_synced_stats_info_;

@@ -36,6 +36,7 @@ public:
       const int64_t dest_table_id,
       const int64_t schema_version,
       const int64_t parallelism,
+      const int64_t consumer_group_id,
       const obrpc::ObAlterTableArg &alter_table_arg,
       const int64_t task_status = share::ObDDLTaskStatus::PREPARE,
       const int64_t snapshot_version = 0);
@@ -45,7 +46,14 @@ public:
     const common::ObTabletID &tablet_id,
     const int64_t snapshot_version,
     const int64_t execution_id,
-    const int ret_code) override;
+    const int ret_code,
+    const ObDDLTaskInfo &addition_info) override;
+  virtual int collect_longops_stat(share::ObLongopsValue &value) override;
+  virtual bool support_longops_monitoring() const { return true; }
+  virtual void flt_set_task_span_tag() const override;
+  virtual void flt_set_status_span_tag() const override;
+  INHERIT_TO_STRING_KV("ObDDLRedefinitionTask", ObDDLRedefinitionTask,
+      K(has_rebuild_index_), K(has_rebuild_constraint_), K(has_rebuild_foreign_key_), K(is_sstable_complete_task_submitted_));
 private:
   int wait_data_complement(const share::ObDDLTaskStatus next_task_status);
   int send_build_single_replica_request();
@@ -55,6 +63,9 @@ private:
   int copy_table_indexes();
   int copy_table_constraints();
   int copy_table_foreign_keys();
+  virtual int serialize_params_to_message(char *buf, const int64_t buf_len, int64_t &pos) const override;
+  virtual int deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t data_len, int64_t &pos) override;
+  virtual int64_t get_serialize_param_size() const override;
 private:
   static const int64_t OB_COLUMN_REDEFINITION_TASK_VERSION = 1L; 
   int64_t sstable_complete_request_time_;

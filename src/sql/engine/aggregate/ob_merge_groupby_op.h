@@ -99,7 +99,7 @@ public:
       is_first_calc_(true),
       cur_group_last_row_idx_(-1),
       use_sort_data_(false),
-      inner_sort_(),
+      inner_sort_(op_monitor_info_),
       rollup_hash_vals_(nullptr),
       ndv_calculator_(nullptr),
       global_rollup_key_(),
@@ -206,6 +206,7 @@ private:
             uint64_t *hash_vals,
             ObBitVector *skip,
             int64_t count);
+  int advance_collect_result(int64_t group_id);
 private:
   bool is_end_;
   // added to support groupby with rollup

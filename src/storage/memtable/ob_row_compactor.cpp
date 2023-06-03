@@ -35,220 +35,19 @@ using namespace storage;
 using namespace blocksstable;
 namespace memtable
 {
-CompactMapImproved::StaticMemoryHelper::StaticMemoryHelper()
-{
-  int ret = OB_SUCCESS;
-  // TODO mod id && tenant id.
-  if (OB_FAIL(node_alloc_.init(sizeof(Node),
-                               ObModIds::OB_ROW_COMPACTION))) {
-    TRANS_LOG(WARN, "failed to init small allocator", K(ret));
-  } else {
-    // Do nothing. Thread local vars are inited by their default vals.
-  }
-  TRANS_LOG(INFO, "global mem_helper inited", K(ret));
-}
-
-CompactMapImproved::StaticMemoryHelper::~StaticMemoryHelper()
-{
-  int ret = OB_SUCCESS;
-  if (OB_FAIL(node_alloc_.destroy())) {
-    TRANS_LOG(WARN, "failed to destroy small allocator", K(ret));
-  } else {
-    arr_arena_.free();
-    // the following statement annotated may cause core dump
-    // causing by the undefined destruct order of static variables and thread local variables
-    //bkts_ = NULL;
-    //ver_ = 0;
-  }
-  //TRANS_LOG(INFO, "global mem_helper destoryed", K(ret));
-}
-
-CompactMapImproved::Node *CompactMapImproved::StaticMemoryHelper::get_tl_arr()
-{
-  CompactMapImproved::Node *ret = NULL;
-  if (NULL == bkts_) {
-    // Alloc thread local bucket array.
-    lib::ObLockGuard<ObSpinLock> guard(arr_arena_lock_);
-    if (NULL == (bkts_ = reinterpret_cast<Node *>(GET_TSI(Node[BKT_N])))) {
-      TRANS_LOG(WARN, "failed to alloc thread local bucket array");
-    } else {
-      // Init bucket array.
-      for (int64_t idx = 0; idx < BKT_N; ++idx) {
-        CompactMapImproved::Node &bkt = bkts_[idx];
-        bkt.ver_ = 0;
-        bkt.col_id_ = INVALID_COL_ID;
-        bkt.next_ = NULL;
-        // Ignore cell.
-      }
-    }
-  }
-  ret = bkts_;
-  return ret;
-}
-
-uint32_t &CompactMapImproved::StaticMemoryHelper::get_tl_arr_ver()
-{
-  // Return its reference.
-  return ver_;
-}
-
-CompactMapImproved::Node *CompactMapImproved::StaticMemoryHelper::get_node()
-{
-  CompactMapImproved::Node *ret = NULL;
-  if (OB_ISNULL(ret = reinterpret_cast<CompactMapImproved::Node *>(node_alloc_.alloc()))) {
-    TRANS_LOG(WARN, "failed to alloc node", K(sizeof(Node)), K(node_alloc_));
-  } else {
-    ret->ver_ = 0;
-    ret->col_id_ = INVALID_COL_ID;
-    ret->next_ = NULL;
-    // Ignore cell.
-  }
-  return ret;
-}
-
-void CompactMapImproved::StaticMemoryHelper::revert_node(CompactMapImproved::Node *n)
-{
-  if (NULL != n) {
-    node_alloc_.free(n);
-    n = NULL;
-  }
-}
-
-_RLOCAL(uint32_t, CompactMapImproved::StaticMemoryHelper::ver_);		
-
-_RLOCAL(CompactMapImproved::Node*, CompactMapImproved::StaticMemoryHelper::bkts_);
-
-int CompactMapImproved::init()
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(bkts_ = mem_helper_.get_tl_arr())) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    TRANS_LOG(WARN, "failed to get thread local bucket array");
-  } else {
-    // Init cursor.
-    scan_cur_bkt_ = &bkts_[0];
-    scan_cur_node_ = scan_cur_bkt_;
-    // Inc version.
-    // ver_ : [0, MAX_VER).
-    // bucket ver_ init at MAX_VER.
-    ver_ = ++(mem_helper_.get_tl_arr_ver());
-    if (MAX_VER == ver_) {
-      mem_helper_.get_tl_arr_ver() = 0;
-      ver_ = 0;
-      for (int64_t idx = 0; idx < BKT_N; ++idx) {
-        bkts_[idx].ver_ = MAX_VER;
-      }
-    }
-  }
-  return ret;
-}
-
-void CompactMapImproved::destroy()
-{
-  bkts_ = NULL;
-  ver_ = 0;
-  scan_cur_node_ = NULL;
-  scan_cur_bkt_ = NULL;
-}
-
-int CompactMapImproved::set(const uint64_t col_id, const ObObj &cell)
-{
-  int ret = OB_SUCCESS;
-  const int64_t bkt_idx = static_cast<int64_t>(col_id) & BKT_N_MOD_MASK; // mod 512.
-  if (OB_INVALID_ID == col_id) {
-    ret = OB_INVALID_ARGUMENT;
-  } else if (NULL == bkts_) {
-    ret = OB_NOT_INIT;
-    TRANS_LOG(WARN, "bkts_ is NULL", K(bkts_), K(bkt_idx));
-  } else {
-    Node &bkt = bkts_[bkt_idx];
-    if (ver_ != bkt.ver_) {
-      // Empty bucket.
-      bkt.ver_ = ver_;
-      bkt.col_id_ = static_cast<uint32_t>(col_id);
-      bkt.cell_ = cell;
-      bkt.next_ = NULL;
-    } else {
-      // Non-empty. Check dup.
-      bool exist = false;
-      Node *node = &bkt;
-      while (!exist && NULL != node) {
-        exist = (col_id == static_cast<uint64_t>(node->col_id_));
-        node = node->next_;
-      }
-      if (!exist) {
-        // No-dup, set it.
-        node = mem_helper_.get_node();
-        if (OB_ISNULL(node)) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-          TRANS_LOG(WARN, "failed to get Node from memory helper");
-        } else {
-          node->ver_ = ver_;
-          node->col_id_ = static_cast<uint32_t>(col_id);
-          node->cell_ = cell;
-          node->next_ = bkt.next_;
-          bkt.next_ = node;
-        }
-      } else {
-        // Dup.
-        ret = OB_ENTRY_EXIST;
-      }
-    }
-  }
-  return ret;
-}
-
-int CompactMapImproved::get_next(uint64_t &col_id, ObObj &cell)
-{
-  int ret = OB_SUCCESS;
-  if (NULL == scan_cur_bkt_) {
-    ret = OB_NOT_INIT;
-  } else {
-    // Find next valid node.
-    while (OB_SUCCESS == ret
-           && (ver_ != scan_cur_bkt_->ver_ || NULL == scan_cur_node_)) {
-      if (BKT_N > (scan_cur_bkt_ + 1 - bkts_)) {
-        scan_cur_bkt_ += 1;
-        scan_cur_node_ = scan_cur_bkt_;
-      } else {
-        ret = OB_ITER_END;
-      }
-    }
-  }
-  // Retrieve value.
-  if (OB_SUCC(ret)) {
-    col_id = static_cast<uint64_t>(scan_cur_node_->col_id_);
-    cell = scan_cur_node_->cell_;
-    CompactMapImproved::Node *scanned_node = scan_cur_node_;
-    scan_cur_node_ = scan_cur_node_->next_;
-    if (scanned_node != scan_cur_bkt_) {
-      // Scanned nodes are freed.
-      scan_cur_bkt_->next_ = scan_cur_node_;
-      mem_helper_.revert_node(scanned_node);
-      scanned_node = NULL;
-    }
-  }
-  return ret;
-}
-
-CompactMapImproved::StaticMemoryHelper CompactMapImproved::mem_helper_;
 
 ObMemtableRowCompactor::ObMemtableRowCompactor()
   : is_inited_(false),
     row_(NULL),
     memtable_(NULL),
-    node_alloc_(NULL),
-    for_replay_(false),
-    map_ins_(),
-    map_(map_ins_)
+    node_alloc_(NULL)
 {}
 
 ObMemtableRowCompactor::~ObMemtableRowCompactor() {}
 
 int ObMemtableRowCompactor::init(ObMvccRow *row,
                                  ObMemtable *mt,
-                                 ObIAllocator *node_alloc,
-                                 const bool for_replay)
+                                 ObIAllocator *node_alloc)
 {
   int ret = OB_SUCCESS;
   if (is_inited_) {
@@ -257,14 +56,11 @@ int ObMemtableRowCompactor::init(ObMvccRow *row,
   } else if (OB_ISNULL(row) || OB_ISNULL(node_alloc) || OB_ISNULL(mt)) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "invalid argument", K(ret), KP(row), KP(node_alloc), KP(mt));
-  } else if (OB_FAIL(map_.init())) {
-    TRANS_LOG(WARN, "failed to init compact map", K(ret));
   } else {
     is_inited_ = true;
     row_ = row;
     memtable_ = mt;
     node_alloc_ = node_alloc;
-    for_replay_ = for_replay;
   }
   return ret;
 }
@@ -273,7 +69,12 @@ int ObMemtableRowCompactor::init(ObMvccRow *row,
 // So modification is guaranteed to be safety with another modification,
 // while we need pay attention to the concurrency between lock_for_read
 // and modification(such as compact)
+<<<<<<< HEAD
 int ObMemtableRowCompactor::compact(const SCN snapshot_version)
+=======
+int ObMemtableRowCompactor::compact(const SCN snapshot_version,
+                                    const int64_t flag)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   int ret = OB_SUCCESS;
 
@@ -292,7 +93,7 @@ int ObMemtableRowCompactor::compact(const SCN snapshot_version)
     find_start_pos_(snapshot_version, start);
     tg.click();
 
-    ObMvccTransNode *compact_node = construct_compact_node_(snapshot_version, start);
+    ObMvccTransNode *compact_node = construct_compact_node_(snapshot_version, flag, start);
     tg.click();
 
     if (OB_NOT_NULL(compact_node)) {
@@ -351,7 +152,7 @@ void ObMemtableRowCompactor::find_start_pos_(const SCN snapshot_version,
     if (search_cnt >= 100
         && 0 == search_cnt % 100
         && NULL != row_->latest_compact_node_) {
-      TRANS_LOG(WARN, "too much trans node scaned when row compact",
+      TRANS_LOG_RET(WARN, OB_ERROR, "too much trans node scaned when row compact",
                 K(search_cnt), K(snapshot_version), KPC(start), K(*row_),
                 K(*(row_->list_head_)), K(*(row_->latest_compact_node_)));
     }
@@ -364,7 +165,6 @@ int ObMemtableRowCompactor::try_cleanout_tx_node_during_compact_(ObTxTableGuard 
   int ret = OB_SUCCESS;
 
   ObTxTable *tx_table = tx_table_guard.get_tx_table();
-  int64_t read_epoch = tx_table_guard.epoch();
   if (!(tnode->is_committed() || tnode->is_aborted())) {
     if (!tnode->is_delayed_cleanout() && !tnode->is_elr()) {
       // It may be the case that one row contains multiple version from one txn.
@@ -386,11 +186,7 @@ int ObMemtableRowCompactor::try_cleanout_tx_node_during_compact_(ObTxTableGuard 
       // log back
       ret = OB_ERR_UNEXPECTED;
       TRANS_LOG(ERROR, "unexpected non cleanout uncommitted node", KPC(tnode), KPC(row_));
-    } else if (OB_FAIL(tx_table->cleanout_tx_node(tnode->tx_id_,
-                                                  read_epoch,
-                                                  *row_,
-                                                  *tnode,
-                                                  false   /*need_row_latch*/))) {
+    } else if (OB_FAIL(tx_table_guard.cleanout_tx_node(tnode->tx_id_, *row_, *tnode, false /*need_row_latch*/))) {
       TRANS_LOG(WARN, "cleanout tx state failed", K(ret), KPC(row_), KPC(tnode));
     }
   }
@@ -399,11 +195,14 @@ int ObMemtableRowCompactor::try_cleanout_tx_node_during_compact_(ObTxTableGuard 
 }
 
 ObMvccTransNode *ObMemtableRowCompactor::construct_compact_node_(const SCN snapshot_version,
+<<<<<<< HEAD
+=======
+                                                                 const int64_t flag,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                                                                  ObMvccTransNode *save)
 {
   int ret = OB_SUCCESS;
   ObRowReader row_reader;
-  ObDatumRow datum_row;
   ObDatumRow compact_datum_row;
   ObMvccTransNode *trans_node = nullptr;
   ObMvccTransNode *cur = save;
@@ -464,6 +263,7 @@ ObMvccTransNode *ObMemtableRowCompactor::construct_compact_node_(const SCN snaps
       }
     }
     if (OB_SUCC(ret) && find_committed_tnode) {
+      ObDatumRow *datum_row = nullptr;
       if (NULL == mtd) {
         ret = OB_ERR_UNEXPECTED;
         TRANS_LOG(WARN, "mtd init fail", "ret", ret);
@@ -482,22 +282,25 @@ ObMvccTransNode *ObMemtableRowCompactor::construct_compact_node_(const SCN snaps
         } else {
           ret = OB_ITER_END;
         }
-      } else if (OB_FAIL(row_reader.read_row(mtd->buf_, mtd->buf_len_, nullptr, datum_row))) {
+      } else if (OB_ISNULL(datum_row = MTL_NEW(ObDatumRow, "mt_row_compact"))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        TRANS_LOG(WARN, "allocate memory for datum row failed", KR(ret), KP(this));
+      } else if (OB_FAIL(row_reader.read_row(mtd->buf_, mtd->buf_len_, nullptr, *datum_row))) {
         TRANS_LOG(WARN, "Failed to read datum row", K(ret));
-      } else if (OB_FAIL(compact_datum_row.reserve(datum_row.get_column_count(), true))) {
-          STORAGE_LOG(WARN, "Failed to reserve datum row", K(ret), K(datum_row));
+      } else if (OB_FAIL(compact_datum_row.reserve(datum_row->get_column_count(), true))) {
+          STORAGE_LOG(WARN, "Failed to reserve datum row", K(ret), KPC(datum_row));
       } else {
-        compact_datum_row.count_ = MAX(datum_row.get_column_count(), compact_datum_row.count_);
+        compact_datum_row.count_ = MAX(datum_row->get_column_count(), compact_datum_row.count_);
         if (ObDmlFlag::DF_NOT_EXIST == dml_flag) {
           dml_flag = mtd->dml_flag_;
           compact_datum_row.row_flag_.set_flag(dml_flag);
         }
-        for (int64_t i = 0; i < compact_datum_row.get_column_count(); ++i) {
+        for (int64_t i = 0; i < datum_row->get_column_count(); ++i) {
           if (compact_datum_row.storage_datums_[i].is_nop()) {
-            compact_datum_row.storage_datums_[i] = datum_row.storage_datums_[i];
+            compact_datum_row.storage_datums_[i] = datum_row->storage_datums_[i];
           }
         }
-        TRANS_LOG(DEBUG, "chaser debug compact memtable row", K(datum_row), K(dml_flag), K(compact_datum_row));
+        TRANS_LOG(DEBUG, "chaser debug compact memtable row", KPC(datum_row), K(dml_flag), K(compact_datum_row));
         compact_row_cnt++;
         if (NDT_COMPACT == cur->type_) {
           // Stop at compact node.
@@ -507,6 +310,8 @@ ObMvccTransNode *ObMemtableRowCompactor::construct_compact_node_(const SCN snaps
           cur = cur->prev_;
         }
       }
+
+      MTL_DELETE(ObDatumRow, "mt_row_compact", datum_row);
     }
   }
   ret = (OB_ITER_END == ret) ? OB_SUCCESS : ret;
@@ -518,7 +323,7 @@ ObMvccTransNode *ObMemtableRowCompactor::construct_compact_node_(const SCN snaps
       char *buf = nullptr;
       int64_t len = 0;
       if (OB_FAIL(row_writer.write(rowkey_cnt, compact_datum_row, buf, len))) {
-        TRANS_LOG(WARN, "Failed to writer compact row", K(ret), K(datum_row));
+        TRANS_LOG(WARN, "Failed to writer compact row", K(ret));
       } else if (OB_UNLIKELY(ObDmlFlag::DF_NOT_EXIST == dml_flag)) {
         ret = OB_ERR_UNEXPECTED;
         TRANS_LOG(ERROR, "Unexpected not exist trans node", K(ret), K(dml_flag), K(compact_datum_row), K(snapshot_version));
@@ -551,7 +356,11 @@ ObMvccTransNode *ObMemtableRowCompactor::construct_compact_node_(const SCN snaps
           trans_node->type_ = NDT_COMPACT;
           trans_node->flag_ = save->flag_;
           trans_node->scn_ = save->scn_;
+<<<<<<< HEAD
           trans_node->set_snapshot_version_barrier(snapshot_version);
+=======
+          trans_node->set_snapshot_version_barrier(snapshot_version, flag);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
           TRANS_LOG(DEBUG, "success to compact row, ", K(trans_node->tx_id_), K(dml_flag), K(compact_row_cnt), KPC(save));
         }
       }

@@ -47,13 +47,30 @@ void ObTxCallbackList::reset()
   length_ = 0;
 }
 
-int ObTxCallbackList::append_callback(ObITransCallback *callback)
+// the semantic of the append_callback is atomic which means the cb is removed
+// and no side effect is taken effects if some unexpected failure has happened.
+int ObTxCallbackList::append_callback(ObITransCallback *callback,
+                                      const bool for_replay)
 {
   int ret = OB_SUCCESS;
+  // It is important that we should put the before_append_cb and after_append_cb
+  // into the latch guard otherwise the callback may already paxosed and released
+  // before callback it.
   SpinLockGuard lock(latch_);
 
-  if (OB_SUCC(get_tail()->append(callback))) {
-    length_ ++;
+  if (OB_ISNULL(callback)) {
+    ret = OB_ERR_UNEXPECTED;
+    TRANS_LOG(ERROR, "before_append_cb failed", K(ret), KPC(callback));
+  } else if (OB_FAIL(callback->before_append_cb(for_replay))) {
+    TRANS_LOG(WARN, "before_append_cb failed", K(ret), KPC(callback));
+  } else {
+    (void)get_tail()->append(callback);
+    length_++;
+
+    // Once callback is appended into callback lists, we can not handle the
+    // error after it. So it should never report the error later. What's more,
+    // after_append also should never return the error.
+    (void)callback->after_append_cb(for_replay);
   }
 
   return ret;
@@ -85,6 +102,18 @@ int64_t ObTxCallbackList::concat_callbacks(ObTxCallbackList &that)
 int ObTxCallbackList::callback_(ObITxCallbackFunctor &functor)
 {
   return callback_(functor, get_guard(), get_guard());
+}
+
+int ObTxCallbackList::callback_(ObITxCallbackFunctor &functor,
+                                const ObCallbackScope &callbacks)
+{
+  ObITransCallback *start = (ObITransCallback *)*(callbacks.start_);
+  ObITransCallback *end = (ObITransCallback *)*(callbacks.end_);
+  if (functor.is_reverse()) {
+    return callback_(functor, start->get_next(), end->get_prev());
+  } else {
+    return callback_(functor, start->get_prev(), end->get_next());
+  }
 }
 
 int ObTxCallbackList::callback_(ObITxCallbackFunctor &functor,
@@ -163,22 +192,41 @@ int ObTxCallbackList::remove_callbacks_for_fast_commit(bool &has_remove)
   return ret;
 }
 
-int ObTxCallbackList::remove_callbacks_for_remove_memtable(ObIMemtable *memtable_for_remove)
+int ObTxCallbackList::remove_callbacks_for_remove_memtable(
+  const memtable::ObMemtableSet *memtable_set,
+  const share::SCN max_applied_scn)
 {
   int ret = OB_SUCCESS;
   SpinLockGuard guard(latch_);
 
   ObRemoveSyncCallbacksWCondFunctor functor(
     // condition for remove
-    [memtable_for_remove](ObITransCallback *callback) -> bool {
-      if (callback->get_memtable() == memtable_for_remove) {
-        return true;
-      } else {
-        return false;
+    [memtable_set](ObITransCallback *callback) -> bool {
+      bool ok = false;
+      int ret = OB_SUCCESS;
+      int bool_ret = true;
+      while (!ok) {
+        if (OB_HASH_EXIST == (ret = memtable_set->exist_refactored((uint64_t)callback->get_memtable()))) {
+          bool_ret = true;
+          ok = true;
+        } else if (OB_HASH_NOT_EXIST == ret) {
+          bool_ret = false;
+          ok = true;
+        } else {
+          // We have no idea to handle the error
+          TRANS_LOG(ERROR, "hashset fetch encounter unexpected error", K(ret));
+          ok = false;
+        }
       }
+      return bool_ret;
     }, // condition for stop
+<<<<<<< HEAD
     [memtable_for_remove](ObITransCallback *callback) -> bool {
       if (callback->get_scn() > memtable_for_remove->get_key().get_end_scn()) {
+=======
+    [max_applied_scn](ObITransCallback *callback) -> bool {
+      if (callback->get_scn() > max_applied_scn) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         return true;
       } else {
         return false;
@@ -193,7 +241,7 @@ int ObTxCallbackList::remove_callbacks_for_remove_memtable(ObIMemtable *memtable
     callback_mgr_.add_release_memtable_callback_remove_cnt(functor.get_remove_cnt());
     ensure_checksum_(functor.get_checksum_last_scn());
     if (functor.get_remove_cnt() > 0) {
-      TRANS_LOG(INFO, "remove callbacks for remove memtable", KP(memtable_for_remove),
+      TRANS_LOG(INFO, "remove callbacks for remove memtable", KP(memtable_set),
                 K(functor), K(*this));
     }
   }
@@ -250,6 +298,23 @@ int ObTxCallbackList::reverse_search_callback_by_seq_no(const int64_t seq_no,
     search_res = functor.get_search_result();
   }
 
+  return ret;
+}
+
+int ObTxCallbackList::sync_log_fail(const ObCallbackScope &callbacks,
+                                    int64_t &removed_cnt)
+{
+  int ret = OB_SUCCESS;
+  ObSyncLogFailFunctor functor;
+
+  SpinLockGuard guard(latch_);
+
+  if (OB_FAIL(callback_(functor, callbacks))) {
+    TRANS_LOG(WARN, "clean unlog callbacks failed", K(ret), K(functor));
+  } else {
+    TRANS_LOG(INFO, "sync failed log successfully", K(functor), K(*this));
+  }
+  removed_cnt = functor.get_remove_cnt();
   return ret;
 }
 

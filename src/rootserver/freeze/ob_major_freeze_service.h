@@ -17,12 +17,20 @@
 #include "logservice/ob_log_base_type.h"
 #include "share/scn.h"
 #include "lib/lock/ob_recursive_mutex.h"
+#include "rootserver/freeze/ob_tenant_major_freeze.h"
 
 namespace oceanbase
 {
 namespace rootserver
 {
 class ObTenantMajorFreeze;
+
+enum ObMajorFreezeServiceType : uint8_t {
+  SERVICE_TYPE_INVALID = 0,
+  SERVICE_TYPE_PRIMARY = 1,
+  SERVICE_TYPE_RESTORE = 2,
+  SERVICE_TYPE_MAX = 3
+};
 
 class ObMajorFreezeService : public logservice::ObIReplaySubHandler,
                              public logservice::ObICheckpointSubHandler,
@@ -31,12 +39,14 @@ class ObMajorFreezeService : public logservice::ObIReplaySubHandler,
 public:
   ObMajorFreezeService() 
     : is_inited_(false), tenant_id_(common::OB_INVALID_ID), 
-      is_launched_(false), lock_(), rw_lock_(), switch_lock_(),
+      is_launched_(false), lock_(common::ObLatchIds::MAJOR_FREEZE_SERVICE_LOCK),
+      rw_lock_(common::ObLatchIds::MAJOR_FREEZE_LOCK),
+      switch_lock_(common::ObLatchIds::MAJOR_FREEZE_SWITCH_LOCK),
       tenant_major_freeze_(nullptr)
   {}
   virtual ~ObMajorFreezeService();
 
-  int init(uint64_t tenant_id);
+  int init(const uint64_t tenant_id);
 
   int flush(share::SCN &rec_scn)
   {
@@ -72,11 +82,19 @@ public:
 
   uint64_t get_tenant_id() const { return tenant_id_; }
 
-  static int mtl_init(ObMajorFreezeService *&service);
   int start() { return common::OB_SUCCESS; };
   void stop();
   void wait();
   void destroy();
+
+  bool is_paused() const;
+  int get_uncompacted_tablets(common::ObArray<share::ObTabletReplica> &uncompacted_tablets) const;
+
+protected:
+  virtual ObMajorFreezeServiceType get_service_type() const
+  {
+    return ObMajorFreezeServiceType::SERVICE_TYPE_INVALID;
+  }
 
 private:
   int alloc_tenant_major_freeze();
@@ -92,11 +110,35 @@ private:
   common::ObRecursiveMutex lock_;
   // rw_lock_: used for switch_role, not use lock_ in switch_role. Otherwise, if major_freeze
   // hang, switch_role may also hang
-  // https://work.aone.alibaba-inc.com/issue/44368193
+  //
   common::SpinRWLock rw_lock_;
   // switch_lock_: used for avoiding switch_to_leader, switch_to_follower concurrently execute. 
   common::ObRecursiveMutex switch_lock_;
   ObTenantMajorFreeze *tenant_major_freeze_;
+};
+
+class ObPrimaryMajorFreezeService : public ObMajorFreezeService
+{
+public:
+  ObPrimaryMajorFreezeService();
+  virtual ~ObPrimaryMajorFreezeService();
+
+  static int mtl_init(ObPrimaryMajorFreezeService *&service);
+
+protected:
+  virtual ObMajorFreezeServiceType get_service_type() const override;
+};
+
+class ObRestoreMajorFreezeService : public ObMajorFreezeService
+{
+public:
+  ObRestoreMajorFreezeService();
+  virtual ~ObRestoreMajorFreezeService();
+
+  static int mtl_init(ObRestoreMajorFreezeService *&service);
+
+protected:
+  virtual ObMajorFreezeServiceType get_service_type() const override;
 };
 
 } // end namespace rootserver

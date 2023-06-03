@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2021 OceanBase
+ * Copyright (c) 2021, 2022 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
  * You can use this software according to the terms and conditions of the Mulan PubL v2.
  * You may obtain a copy of Mulan PubL v2 at:
@@ -23,13 +23,13 @@
 #include "lib/container/ob_iarray.h"
 #include "share/ob_errno.h"
 #include "share/ob_thread_pool.h"
-#include "share/lock/ob_qsync_lock.h"
+#include "lib/lock/ob_qsync_lock.h"
 #include "ob_gts_source.h"
 #include "ob_gts_define.h"
 #include "ob_ts_worker.h"
 #include "ob_location_adapter.h"
 
-#define REFRESH_GTS_INTERVEL_US  (100 * 1000)
+#define REFRESH_GTS_INTERVEL_US  (500 * 1000)
 
 namespace oceanbase
 {
@@ -60,7 +60,6 @@ class SCN;
 namespace transaction
 {
 class ObLocationAdapter;
-class ObITsSource;
 class ObGtsRequestRpc;
 class ObIGlobalTimestampService;
 
@@ -82,9 +81,6 @@ class ObITsMgr
 {
 public:
   virtual int update_gts(const uint64_t tenant_id, const int64_t gts, bool &update) = 0;
-  /*
-  virtual int update_local_trans_version(const uint64_t tenant_id, const int64_t version, bool &update) = 0;
-  */
   virtual int get_gts(const uint64_t tenant_id,
                       const MonotonicTs stc,
                       ObTsCbTask *task,
@@ -93,6 +89,7 @@ public:
   virtual int get_gts(const uint64_t tenant_id, ObTsCbTask *task, share::SCN &scn) = 0;
   virtual int get_ts_sync(const uint64_t tenant_id, const int64_t timeout_ts,
       share::SCN &scn, bool &is_external_consistent) = 0;
+<<<<<<< HEAD
   /*
   virtual int get_local_trans_version(const uint64_t tenant_id,
                                       const MonotonicTs stc,
@@ -108,39 +105,20 @@ public:
   virtual int wait_gts_elapse(const uint64_t tenant_id, const share::SCN &scn) = 0;
   virtual int update_base_ts(const int64_t base_ts) = 0;
   virtual int get_base_ts(int64_t &base_ts) = 0;
+=======
+  virtual int wait_gts_elapse(const uint64_t tenant_id, const share::SCN &scn, ObTsCbTask *task,
+                              bool &need_wait) = 0;
+  virtual int wait_gts_elapse(const uint64_t tenant_id, const share::SCN &scn) = 0;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   virtual bool is_external_consistent(const uint64_t tenant_id) = 0;
 public:
   VIRTUAL_TO_STRING_KV("", "");
-};
-
-class ObTsSourceInfo;
-class ObTsSourceGuard
-{
-public:
-  ObTsSourceGuard() : ts_source_(NULL), ts_source_info_(NULL), ts_type_(0) {}
-  ~ObTsSourceGuard();
-  void set(ObTsSourceInfo *info, ObITsSource *ts_source, const int ts_type)
-  {
-    ts_source_info_ = info;
-    ts_source_ = ts_source;
-    ts_type_ = ts_type;
-  }
-  void set_ts_source(ObITsSource *ts_source) { ts_source_ = ts_source; }
-  void set_ts_source_info(ObTsSourceInfo *ts_source_info) { ts_source_info_ = ts_source_info; }
-  ObITsSource *get_ts_source() { return ts_source_; }
-  void set_ts_type(int ts_type) { ts_type_ = ts_type; }
-  int get_ts_type() { return ts_type_; }
-private:
-  ObITsSource *ts_source_;
-  ObTsSourceInfo *ts_source_info_;
-  int ts_type_;
 };
 
 typedef common::LinkHashNode<ObTsTenantInfo> ObTsTenantInfoNode;
 typedef common::LinkHashValue<ObTsTenantInfo> ObTsTenantInfoValue;
 class ObTsSourceInfo : public ObTsTenantInfoValue
 {
-  friend class ObTsSourceGuard;
 public:
   ObTsSourceInfo();
   ~ObTsSourceInfo() { destroy(); }
@@ -149,33 +127,15 @@ public:
 public:
   uint64_t get_tenant_id() const { return tenant_id_; }
   ObGtsSource *get_gts_source() { return &gts_source_; }
-  int get_ts_source(const uint64_t tenant_id, ObTsSourceGuard &guard, bool &is_valid);
-  int check_and_switch_ts_source(const uint64_t tenant_id);
   void update_last_access_ts() { last_access_ts_ = common::ObClockGenerator::getClock(); }
   int64_t get_last_access_ts() const { return last_access_ts_; }
-  int64_t get_last_obtain_switch_ts() const { return last_obtain_switch_ts_; }
-  int set_invalid();
   int check_if_tenant_has_been_dropped(const uint64_t tenant_id, bool &has_dropped);
   int gts_callback_interrupted(const int errcode);
-  int switch_ts_source(const uint64_t tenant_id, const int ts_type);
-private:
-  int switch_ts_source_(const uint64_t tenant_id, const int ts_type);
-  void revert_ts_source_(ObTsSourceGuard &guard);
-private:
-  static const int64_t DEFAULT_CHECK_SWITCH_INTERVAL_US = 100 * 1000;
-  static const int64_t MAX_CHECK_SWITCH_INTERVAL_US = 3 * 1000 * 1000;
 private:
   bool is_inited_;
-  bool is_valid_;
   uint64_t tenant_id_;
-  int64_t last_check_switch_ts_;
-  int64_t last_obtain_switch_ts_;
-  int64_t check_switch_interval_;
-  ObITsSource *ts_source_[MAX_TS_SOURCE];
-  int cur_ts_type_;
+  int64_t last_access_ts_;
   ObGtsSource gts_source_;
-  mutable share::ObQSyncLock rwlock_;
-  int64_t last_access_ts_ CACHE_ALIGNED;
 };
 
 class ObTsSourceInfoAlloc
@@ -216,8 +176,6 @@ public:
     if (OB_ISNULL(ts_source_info)) {
       ret = common::OB_ERR_UNEXPECTED;
       TRANS_LOG(ERROR, "ts source info is null", KR(ret));
-    } else if (OB_FAIL(ts_source_info->check_and_switch_ts_source(gts_tenant_info.get_value()))) {
-      TRANS_LOG(WARN, "check and switch ts source failed", KR(ret), K(gts_tenant_info));
     } else if (NULL == (gts_source = (ts_source_info->get_gts_source()))) {
       ret = common::OB_ERR_UNEXPECTED;
       TRANS_LOG(ERROR, "gts cache queue is null", KR(ret), K(gts_tenant_info));
@@ -254,8 +212,6 @@ public:
       ret = common::OB_ERR_UNEXPECTED;
       TRANS_LOG(ERROR, "ts source info is null", KR(ret));
     } else if (now - ts_source_info->get_last_access_ts() < obsolete_time_) {
-      // do nothing
-    } else if (now - ts_source_info->get_last_obtain_switch_ts() < obsolete_time_) {
       // do nothing
     } else if (OB_FAIL(array_.push_back(gts_tenant_info.get_value()))) {
       TRANS_LOG(WARN, "push back tenant failed", K(ret), K(gts_tenant_info));
@@ -347,10 +303,13 @@ public:
   int delete_tenant(const uint64_t tenant_id);
 public:
   int update_gts(const uint64_t tenant_id, const int64_t gts, bool &update);
+<<<<<<< HEAD
   /*
   int update_local_trans_version(const uint64_t tenant_id, const int64_t version, bool &update);
   */
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   //根据stc获取合适的gts值，如果条件不满足需要注册gts task，等异步回调
   int get_gts(const uint64_t tenant_id,
               const MonotonicTs stc,
@@ -363,6 +322,7 @@ public:
   int get_gts(const uint64_t tenant_id, ObTsCbTask *task, share::SCN &scn);
   int get_ts_sync(const uint64_t tenant_id, const int64_t timeout_ts,
       share::SCN &scn, bool &is_external_consistent);
+<<<<<<< HEAD
   /*
   int get_local_trans_version(const uint64_t tenant_id,
                               const MonotonicTs stc,
@@ -380,6 +340,12 @@ public:
   int get_base_ts(int64_t &base_ts);
   bool is_external_consistent(const uint64_t tenant_id);
   static int get_cur_ts_type(const uint64_t tenant_id, int64_t &cur_ts_type);
+=======
+  int wait_gts_elapse(const uint64_t tenant_id, const share::SCN &scn, ObTsCbTask *task,
+      bool &need_wait);
+  int wait_gts_elapse(const uint64_t tenant_id, const share::SCN &scn);
+  bool is_external_consistent(const uint64_t tenant_id);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int refresh_gts_location(const uint64_t tenant_id);
 public:
   TO_STRING_KV("ts_source", "GTS");
@@ -408,59 +374,8 @@ private:
   ObLocationAdapter *location_adapter_;
   ObLocationAdapter location_adapter_def_;
   ObTsWorker ts_worker_;
-  share::ObQSyncLock lock_;
+  common::ObQSyncLock lock_;
   ObTsSourceInfo *ts_source_infos_[TS_SOURCE_INFO_CACHE_NUM];
-};
-
-class GetBaseTs
-{
-public:
-  GetBaseTs() : base_ts_(0) {}
-  bool operator()(const ObTsTenantInfo &tenant, ObTsSourceInfo *ts_source_info)
-  {
-    UNUSED(tenant);
-    int ret = common::OB_SUCCESS;
-    bool bool_ret = false;
-    int64_t ts = 0;
-    if (NULL == ts_source_info) {
-      ret = common::OB_INVALID_ARGUMENT;
-    } else {
-      ObGtsSource *gts_source = ts_source_info->get_gts_source();
-      if (OB_FAIL(gts_source->get_base_ts(ts))) {
-      } else {
-        base_ts_ = (ts > base_ts_ ? ts : base_ts_);
-        bool_ret = true;
-      }
-    }
-    return bool_ret;
-  }
-  int64_t get_base_ts() const { return base_ts_; }
-private:
-  int64_t base_ts_;
-};
-
-class UpdateBaseTs
-{
-public:
-  UpdateBaseTs(const int64_t base_ts) : base_ts_(base_ts) {}
-  bool operator()(const ObTsTenantInfo &tenant, ObTsSourceInfo *ts_source_info)
-  {
-    UNUSED(tenant);
-    int ret = common::OB_SUCCESS;
-    bool bool_ret = false;
-    if (NULL == ts_source_info) {
-      ret = common::OB_INVALID_ARGUMENT;
-    } else {
-      ObGtsSource *gts_source = ts_source_info->get_gts_source();
-      if (OB_FAIL(gts_source->update_base_ts(base_ts_))) {
-      } else {
-        bool_ret = true;
-      }
-    }
-    return bool_ret;
-  }
-private:
-  int64_t base_ts_;
 };
 
 #define OB_TS_MGR (::oceanbase::transaction::ObTsMgr::get_instance())

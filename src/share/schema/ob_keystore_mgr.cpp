@@ -28,18 +28,18 @@ using namespace common::hash;
 
 ObKeystoreMgr::ObKeystoreMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      keystore_infos_(0, NULL, ObModIds::OB_SCHEMA_KEYSTORE),
-      keystore_map_(ObModIds::OB_SCHEMA_KEYSTORE)
+      keystore_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_KEYSTORE, ObCtxIds::SCHEMA_SERVICE)),
+      keystore_map_(SET_USE_500(ObModIds::OB_SCHEMA_KEYSTORE, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 ObKeystoreMgr::ObKeystoreMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      keystore_infos_(0, NULL, ObModIds::OB_SCHEMA_KEYSTORE),
-      keystore_map_(ObModIds::OB_SCHEMA_KEYSTORE)
+      keystore_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_KEYSTORE, ObCtxIds::SCHEMA_SERVICE)),
+      keystore_map_(SET_USE_500(ObMemAttr(OB_SERVER_TENANT_ID, ObModIds::OB_SCHEMA_KEYSTORE, ObCtxIds::SCHEMA_SERVICE)))
 {
 }
 ObKeystoreMgr::~ObKeystoreMgr()
@@ -61,7 +61,7 @@ int ObKeystoreMgr::init()
 void ObKeystoreMgr::reset()
 {
   if (!is_inited_) {
-    LOG_WARN("keystore manger not init");
+    LOG_WARN_RET(OB_NOT_INIT, "keystore manger not init");
   } else {
     keystore_infos_.clear();
     keystore_map_.clear();
@@ -366,4 +366,3 @@ int ObKeystoreMgr::get_schema_statistics(ObSchemaStatisticsInfo &schema_info) co
 } //end of namespace schema
 } //end of namespace share
 } //end of namespace oceanbase
-

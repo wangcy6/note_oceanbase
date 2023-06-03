@@ -13,6 +13,7 @@
 #define USING_LOG_PREFIX SHARE_LOCATION
 
 #include "share/location_cache/ob_location_service.h"
+#include "share/inner_table/ob_inner_table_schema.h"
 
 namespace oceanbase
 {
@@ -248,6 +249,17 @@ int ObLocationService::vtable_get(
   return ret;
 }
 
+int ObLocationService::external_table_get(
+    const uint64_t tenant_id,
+    const uint64_t table_id,
+    ObIArray<ObAddr> &locations)
+{
+  UNUSED(table_id);
+  bool is_cache_hit = false;
+  //using the locations from any distributed virtual table
+  return vtable_get(tenant_id, OB_ALL_VIRTUAL_PROCESSLIST_TID, 0, is_cache_hit, locations);
+}
+
 int ObLocationService::vtable_nonblock_renew(
     const uint64_t tenant_id,
     const uint64_t table_id)
@@ -259,7 +271,7 @@ int ObLocationService::vtable_nonblock_renew(
   } else if (OB_FAIL(vtable_location_service_.vtable_nonblock_renew(
       tenant_id,
       table_id))) {
-    LOG_WARN("fail to nonblock renew location for virtual table", 
+    LOG_WARN("fail to nonblock renew location for virtual table",
         KR(ret), K(tenant_id), K(table_id));
   }
   return ret;
@@ -271,13 +283,14 @@ int ObLocationService::init(
     common::ObMySQLProxy &sql_proxy,
     ObIAliveServerTracer &server_tracer,
     ObRsMgr &rs_mgr,
-    obrpc::ObCommonRpcProxy &rpc_proxy)
+    obrpc::ObCommonRpcProxy &rpc_proxy,
+    obrpc::ObSrvRpcProxy &srv_rpc_proxy)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("location service init twice", KR(ret));
-  } else if (OB_FAIL(ls_location_service_.init(ls_pt, schema_service))) {
+  } else if (OB_FAIL(ls_location_service_.init(ls_pt, schema_service, rs_mgr, srv_rpc_proxy))) {
     LOG_WARN("ls_location_service init failed", KR(ret));
   } else if (OB_FAIL(tablet_ls_service_.init(sql_proxy))) {
     LOG_WARN("tablet_ls_service init failed", KR(ret));

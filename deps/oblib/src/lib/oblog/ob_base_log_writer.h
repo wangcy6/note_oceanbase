@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <sys/prctl.h>
 
+#include "lib/ob_define.h"
 #include "lib/utility/ob_macro_utils.h"
 
 namespace oceanbase
@@ -62,7 +63,7 @@ struct ObBaseLogWriterCfg
   static const uint64_t DEFAULT_MAX_BUFFER_ITEM_CNT = 1024;
   uint64_t max_buffer_item_cnt_;
   uint64_t group_commit_max_wait_us_;
-  uint64_t group_commit_min_item_cnt_;		
+  uint64_t group_commit_min_item_cnt_;
   uint64_t group_commit_max_item_cnt_;
 };
 
@@ -74,7 +75,7 @@ public:
   virtual int init(
       const ObBaseLogWriterCfg &log_cfg,
       const char *thread_name = "ALOG",
-      const uint64_t tenant_id = 0);
+      const uint64_t tenant_id = OB_SERVER_TENANT_ID);
   virtual int start();
   virtual void stop();
   virtual void wait();
@@ -116,7 +117,7 @@ protected:
 
   SimpleCond* log_write_cond_;
   SimpleCond* log_flush_cond_;
-  char thread_name_[PR_SET_NAME];
+  const char* thread_name_;
 };
 
 }

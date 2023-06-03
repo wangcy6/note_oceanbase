@@ -44,6 +44,8 @@ struct ObCheckpointDList
   ObFreezeCheckpoint *get_first_greater(const share::SCN rec_scn);
   int get_freezecheckpoint_info(
     ObIArray<checkpoint::ObFreezeCheckpointVTInfo> &freeze_checkpoint_array);
+  int get_need_freeze_checkpoints(const share::SCN rec_scn,
+                                  ObIArray<ObFreezeCheckpoint*> &freeze_checkpoints);
 
   ObDList<ObFreezeCheckpoint> checkpoint_list_;
 };
@@ -73,16 +75,16 @@ class ObDataCheckpoint : public ObCommonCheckpoint
 public:
   ObDataCheckpoint()
     : is_inited_(false),
-      lock_(),
+      lock_(common::ObLatchIds::CLOG_CKPT_LOCK),
       ls_(nullptr),
       new_create_list_(),
       active_list_(),
       prepare_list_(),
       ls_frozen_list_(),
-      ls_frozen_list_lock_(),
+      ls_frozen_list_lock_(common::ObLatchIds::CLOG_CKPT_LOCK),
       ls_freeze_finished_(true)
   {}
-  ~ObDataCheckpoint() {}
+  ~ObDataCheckpoint() { ls_ = nullptr; }
 
   // used for virtual table
   static const uint64_t LS_DATA_CHECKPOINT_TABLET_ID = 40000;
@@ -116,7 +118,11 @@ public:
 
   bool is_flushing() const;
 
-  bool has_prepared_flush_checkpoint();
+  bool is_empty();
+
+  static void set_tenant_freeze() { is_tenant_freeze_for_flush_ = true; }
+  static void reset_tenant_freeze() { is_tenant_freeze_for_flush_ = false; }
+  static bool is_tenant_freeze() { return is_tenant_freeze_for_flush_; }
 
 private:
   // traversal prepare_list to flush memtable
@@ -144,8 +150,19 @@ private:
   void ls_frozen_to_prepare_(int64_t &last_time);
   void print_list_(ObCheckpointDList &list);
   void set_ls_freeze_finished_(bool is_finished);
+  int get_need_flush_tablets_(const share::SCN recycle_scn,
+                              common::ObIArray<ObTabletID> &flush_tablets);
+  int freeze_base_on_needs_(share::SCN recycle_scn);
+  int decide_freeze_clock_(ObFreezeCheckpoint *ob_freeze_checkpoint);
 
   static const int64_t LOOP_TRAVERSAL_INTERVAL_US = 1000L * 50;  // 50ms
+  // when freeze memtable base on needs less than TABLET_FREEZE_PERCENT,
+  // tablet_freeze will be instead of logstream_freeze
+  // to relieve pressure for mini minor merge
+  static const int64_t TABLET_FREEZE_PERCENT = 10;
+  // when nums of memtables that wait to freeze less than MAX_FREEZE_CHECKPOINT_NUM.
+  // logstream_freeze without get_need_flush_tablets
+  static const int64_t MAX_FREEZE_CHECKPOINT_NUM = 50;
   bool is_inited_;
   // avoid leaving out ObFreezeCheckpoint that unlinking and not in any list
   common::ObSpinLock lock_;
@@ -166,6 +183,8 @@ private:
   // avoid blocking other list due to traversal ls_frozen_list 
   common::ObSpinLock ls_frozen_list_lock_;
   bool ls_freeze_finished_;
+
+  static __thread bool is_tenant_freeze_for_flush_;
 };
 
 static const ObTabletID LS_DATA_CHECKPOINT_TABLET(ObDataCheckpoint::LS_DATA_CHECKPOINT_TABLET_ID);

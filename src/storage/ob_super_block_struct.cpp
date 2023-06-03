@@ -165,8 +165,8 @@ int ObServerSuperBlock::deserialize(const char *buf, const int64_t buf_size, int
     LOG_WARN("failed to decode header", K(ret), KP(buf), K(buf_size), K(pos));
   } else if (OB_UNLIKELY(header_.body_crc_ !=
       (calc_crc = static_cast<int32_t>(ob_crc64(buf + pos, header_.body_size_))))) {
-    ret = OB_CHECKSUM_ERROR;
-    LOG_WARN("failed to check crc", K(ret), KP(buf), K(buf_size), K(pos), K_(header), K(calc_crc));
+    ret = OB_PHYSIC_CHECKSUM_ERROR;
+    LOG_DBA_ERROR(OB_PHYSIC_CHECKSUM_ERROR, "msg", "failed to check crc", K(ret), KP(buf), K(buf_size), K(pos), K_(header), K(calc_crc));
   } else if (OB_FAIL(body_.deserialize(buf, buf_size, pos))) {
     LOG_WARN("failed to decode body", K(ret), KP(buf), K(buf_size), K(pos));
   } else if (OB_UNLIKELY(!is_valid())) {
@@ -256,6 +256,7 @@ ObTenantSuperBlock::ObTenantSuperBlock(const uint64_t tenant_id, const bool is_h
   replay_start_point_.offset_ = 0;
   tablet_meta_entry_ = ObServerSuperBlock::EMPTY_LIST_ENTRY_BLOCK;
   ls_meta_entry_ = ObServerSuperBlock::EMPTY_LIST_ENTRY_BLOCK;
+  ls_dup_table_entry_ = ObServerSuperBlock::EMPTY_LIST_ENTRY_BLOCK;
 }
 
 void ObTenantSuperBlock::reset()
@@ -264,14 +265,15 @@ void ObTenantSuperBlock::reset()
   replay_start_point_.reset();
   ls_meta_entry_.reset();
   tablet_meta_entry_.reset();
+  ls_dup_table_entry_ = ObServerSuperBlock::EMPTY_LIST_ENTRY_BLOCK;
   is_hidden_= false;
 }
 
 bool ObTenantSuperBlock::is_valid() const
 {
-  return OB_INVALID_TENANT_ID != tenant_id_ &&
-      replay_start_point_.is_valid() &&
-      ls_meta_entry_.is_valid() && tablet_meta_entry_.is_valid();
+  return OB_INVALID_TENANT_ID != tenant_id_ && replay_start_point_.is_valid()
+         && ls_meta_entry_.is_valid() && tablet_meta_entry_.is_valid()
+         && ls_dup_table_entry_.is_valid();
 }
 
 OB_SERIALIZE_MEMBER(ObTenantSuperBlock,
@@ -279,7 +281,8 @@ OB_SERIALIZE_MEMBER(ObTenantSuperBlock,
                     replay_start_point_,
                     ls_meta_entry_,
                     tablet_meta_entry_,
-                    is_hidden_);
+                    is_hidden_,
+                    ls_dup_table_entry_);
 
 }  // end namespace storage
 }  // end namespace oceanbase

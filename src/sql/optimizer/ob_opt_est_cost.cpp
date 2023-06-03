@@ -298,7 +298,7 @@ double ObOptEstCost::cost_quals(double rows,
   return get_model(model_type).cost_quals(rows, quals, need_scale);
 }
 
-int ObOptEstCost::cost_table(ObCostTableScanInfo &est_cost_info,
+int ObOptEstCost::cost_table(const ObCostTableScanInfo &est_cost_info,
                              int64_t parallel,
                              double query_range_row_count,
                              double phy_query_range_row_count,
@@ -314,6 +314,28 @@ int ObOptEstCost::cost_table(ObCostTableScanInfo &est_cost_info,
                                                cost,
                                                index_back_cost))) {
     LOG_WARN("failed to est cost for table scan", K(model_type), K(ret));
+  }
+  return ret;
+}
+
+int ObOptEstCost::cost_table_for_parallel(const ObCostTableScanInfo &est_cost_info,
+                                          const int64_t parallel,
+                                          const double part_cnt_per_dop,
+                                          double query_range_row_count,
+                                          double phy_query_range_row_count,
+                                          double &px_cost,
+                                          double &cost,
+                                          MODEL_TYPE model_type)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(get_model(model_type).cost_table_for_parallel(est_cost_info,
+                                                            parallel,
+                                                            part_cnt_per_dop,
+                                                            query_range_row_count,
+                                                            phy_query_range_row_count,
+                                                            px_cost,
+                                                            cost))) {
+    LOG_WARN("failed to est cost for table scan parallel", K(model_type), K(ret));
   }
   return ret;
 }
@@ -430,21 +452,19 @@ int ObOptEstCost::estimate_width_for_table(const OptTableMetas &table_metas,
                  column_expr->is_hidden_column()) {
         // do nothing
       } else {
-        int64_t avg_len = 0;
-        if (OB_NOT_NULL(table_meta) &&
+        ObGlobalColumnStat stat;
+        if (OB_NOT_NULL(table_meta) && table_meta->use_opt_stat() &&
             OB_FAIL(ctx.get_opt_stat_manager()->get_column_stat(ctx.get_session_info()->get_effective_tenant_id(),
                                                                 table_meta->get_ref_table_id(),
                                                                 table_meta->get_all_used_parts(),
                                                                 column_expr->get_column_id(),
-                                                                NULL,
-                                                                NULL,
-                                                                &avg_len,
-                                                                NULL,
-                                                                NULL,
-                                                                &ctx.get_allocator()))) {
+                                                                table_meta->get_all_used_global_parts(),
+                                                                table_meta->get_rows(),
+                                                                table_meta->get_scale_ratio(),
+                                                                stat))) {
           LOG_WARN("failed to get column stat", K(ret));
-        } else if (avg_len != 0) {
-          width += avg_len;
+        } else if (stat.avglen_val_ != 0) {
+          width += stat.avglen_val_;
         } else {
           width += get_estimate_width_from_type(column_expr->get_result_type());
         }
@@ -476,23 +496,21 @@ int ObOptEstCost::estimate_width_for_exprs(const OptTableMetas &table_metas,
         // column expr
         const ObColumnRefRawExpr* column_expr = static_cast<const ObColumnRefRawExpr*>(expr);
         uint64_t table_id = column_expr->get_table_id();
-        int64_t avg_len = 0;
+        ObGlobalColumnStat stat;
         const OptTableMeta *table_meta = table_metas.get_table_meta_by_table_id(table_id);
         // base table column expr use statistic
-        if (OB_NOT_NULL(table_meta) &&
+        if (OB_NOT_NULL(table_meta) && table_meta->use_opt_stat() &&
             OB_FAIL(ctx.get_opt_stat_manager()->get_column_stat(ctx.get_session_info()->get_effective_tenant_id(),
                                                                 table_meta->get_ref_table_id(),
                                                                 table_meta->get_all_used_parts(),
                                                                 column_expr->get_column_id(),
-                                                                NULL,
-                                                                NULL,
-                                                                &avg_len,
-                                                                NULL,
-                                                                NULL,
-                                                                &ctx.get_allocator()))) {
+                                                                table_meta->get_all_used_global_parts(),
+                                                                table_meta->get_rows(),
+                                                                table_meta->get_scale_ratio(),
+                                                                stat))) {
           LOG_WARN("failed to get column stat", K(ret));
-        } else if (avg_len != 0) {
-          width += avg_len;
+        } else if (stat.avglen_val_ != 0) {
+          width += stat.avglen_val_;
         } else {
           // non base table column expr use estimation
           width += get_estimate_width_from_type(column_expr->get_result_type());
@@ -607,6 +625,12 @@ int ObOptEstCost::calculate_filter_selectivity(ObCostTableScanInfo &est_cost_inf
     LOG_WARN("failed to calculate selectivity", K(est_cost_info.pushdown_prefix_filters_), K(ret));
   } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
                                                              *est_cost_info.sel_ctx_,
+                                                             est_cost_info.ss_postfix_range_filters_,
+                                                             est_cost_info.ss_postfix_range_filters_sel_,
+                                                             all_predicate_sel))) {
+    LOG_WARN("failed to calculate selectivity", K(est_cost_info.ss_postfix_range_filters_), K(ret));
+  } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
+                                                             *est_cost_info.sel_ctx_,
                                                              est_cost_info.postfix_filters_,
                                                              est_cost_info.postfix_filter_sel_,
                                                              all_predicate_sel))) {
@@ -622,6 +646,7 @@ int ObOptEstCost::calculate_filter_selectivity(ObCostTableScanInfo &est_cost_inf
         K(est_cost_info.prefix_filters_), K(est_cost_info.pushdown_prefix_filters_),
         K(est_cost_info.postfix_filters_), K(est_cost_info.table_filters_),
         K(est_cost_info.prefix_filter_sel_), K(est_cost_info.pushdown_prefix_filter_sel_),
+        K(est_cost_info.ss_postfix_range_filters_), K(est_cost_info.ss_postfix_range_filters_sel_),
         K(est_cost_info.postfix_filter_sel_), K(est_cost_info.table_filter_sel_));
   }
   return ret;
@@ -660,35 +685,6 @@ int ObOptEstCost::stat_estimate_single_range_rc(const ObCostTableScanInfo &est_c
     }
     count = static_cast<double>(table_meta_info->table_row_count_) * range_selectivity;
     LOG_TRACE("OPT:[STAT EST RANGE]", K(range), K(range_selectivity), K(count));
-  }
-  return ret;
-}
-
-const char * ObOptEstCost::get_method_name(const RowCountEstMethod method)
-{
-  const char *ret = "unknown";
-  switch (method) {
-    case INVALID_METHOD:
-      ret = "invalid_method";
-      break;
-    case DEFAULT_STAT:
-      ret = "default_stat";
-      break;
-    case BASIC_STAT:
-      ret = "basic_stat";
-      break;
-    case HISTOGRAM:
-      ret = "histogram";
-      break;
-    case LOCAL_STORAGE:
-      ret = "local_storage";
-      break;
-    case REMOTE_STORAGE:
-      ret = "remote_storage";
-      break;
-    default:
-      ret = "unknown";
-      break;
   }
   return ret;
 }

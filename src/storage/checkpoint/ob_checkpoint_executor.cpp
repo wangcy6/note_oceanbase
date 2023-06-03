@@ -29,7 +29,8 @@ namespace checkpoint
 {
 
 ObCheckpointExecutor::ObCheckpointExecutor()
-  : update_checkpoint_enabled_(false)
+    : rwlock_(common::ObLatchIds::CLOG_CKPT_RWLOCK),
+      update_checkpoint_enabled_(false)
 {
   reset();
 }
@@ -94,13 +95,13 @@ void ObCheckpointExecutor::start()
 
 void ObCheckpointExecutor::online()
 {
-  ObSpinLockGuard guard(lock_);
+  WLockGuard guard(rwlock_);
   update_checkpoint_enabled_ = true;
 }
 
 void ObCheckpointExecutor::offline()
 {
-  ObSpinLockGuard guard(lock_);
+  WLockGuard guard(rwlock_);
   update_checkpoint_enabled_ = false;
 }
 
@@ -133,7 +134,8 @@ inline void get_min_rec_scn_service_type_by_index_(int index, char* service_type
 int ObCheckpointExecutor::update_clog_checkpoint()
 {
   int ret = OB_SUCCESS;
-  ObSpinLockGuard guard(lock_);
+  //avoid checkpoint concurrently
+  WLockGuard guard(rwlock_);
   if (update_checkpoint_enabled_) {
     ObFreezer *freezer = ls_->get_freezer();
     if (OB_NOT_NULL(freezer)) {
@@ -168,10 +170,17 @@ int ObCheckpointExecutor::update_clog_checkpoint()
             ret = OB_SUCCESS;
           } else if (OB_NOT_INIT == ret) {
             STORAGE_LOG(WARN, "palf has been disabled", K(ret), K(checkpoint_scn), K(ls_->get_ls_id()));
+<<<<<<< HEAD
+=======
+            ret = OB_SUCCESS;
+          } else if (OB_NEED_RETRY == ret) {
+            STORAGE_LOG(WARN, "locate_by_scn_coarsely need retry", K(checkpoint_scn), K(ls_->get_ls_id()));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
             ret = OB_SUCCESS;
           } else {
             STORAGE_LOG(ERROR, "locate lsn by logts failed", K(ret), K(ls_id),
                         K(checkpoint_scn), K(checkpoint_scn_in_ls_meta));
+<<<<<<< HEAD
           }
         } else if (OB_FAIL(ls_->set_clog_checkpoint(clog_checkpoint_lsn, checkpoint_scn))) {
           STORAGE_LOG(WARN, "set clog checkpoint failed", K(ret), K(clog_checkpoint_lsn), K(checkpoint_scn), K(ls_id));
@@ -181,7 +190,11 @@ int ObCheckpointExecutor::update_clog_checkpoint()
             ret = OB_SUCCESS;
           } else {
             STORAGE_LOG(ERROR, "set base lsn failed", K(ret), K(clog_checkpoint_lsn), K(ls_id));
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
           }
+        } else if (OB_FAIL(ls_->set_clog_checkpoint(clog_checkpoint_lsn, checkpoint_scn))) {
+          STORAGE_LOG(WARN, "set clog checkpoint failed", K(ret), K(clog_checkpoint_lsn), K(checkpoint_scn), K(ls_id));
         } else {
           FLOG_INFO("[CHECKPOINT] update clog checkpoint successfully",
                     K(clog_checkpoint_lsn), K(checkpoint_scn), K(ls_id),
@@ -198,12 +211,19 @@ int ObCheckpointExecutor::update_clog_checkpoint()
   return ret;
 }
 
+<<<<<<< HEAD
 int ObCheckpointExecutor::advance_checkpoint_by_flush(SCN recycle_scn) {
+=======
+int ObCheckpointExecutor::advance_checkpoint_by_flush(
+    SCN recycle_scn)
+{
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int ret = OB_SUCCESS;
 
-  ObSpinLockGuard guard(lock_);
+  RLockGuard guard(rwlock_);
   if (update_checkpoint_enabled_) {
     int tmp_ret = OB_SUCCESS;
+    SCN max_decided_scn;
 
     // calcu recycle_scn according to clog disk situation
     if (!recycle_scn.is_valid()) {
@@ -223,6 +243,7 @@ int ObCheckpointExecutor::advance_checkpoint_by_flush(SCN recycle_scn) {
                       K(calcu_recycle_lsn), K(ls_->get_ls_id()));
         }
       }
+<<<<<<< HEAD
       // the log of end_log_lsn and the log of clog_checkpoint_lsn may be in a block
     if (recycle_scn < ls_->get_clog_checkpoint_scn()) {
       recycle_scn.set_max();
@@ -245,9 +266,40 @@ int ObCheckpointExecutor::advance_checkpoint_by_flush(SCN recycle_scn) {
             STORAGE_LOG(WARN, "handler flush failed", K(recycle_scn), K(tmp_ret),
                         K(i), K(ls_->get_ls_id()));
           }
+=======
+    } else {
+      if (recycle_scn.is_max()) {
+      } else if (OB_FAIL(loghandler_->get_max_decided_scn(max_decided_scn))) {
+        STORAGE_LOG(WARN, "failed to get_max_decided_scn",
+                    K(recycle_scn), K(ls_->get_clog_checkpoint_scn()), K(ls_->get_ls_id()));
+      } else if (recycle_scn > max_decided_scn) {
+        ret = OB_EAGAIN;
+        STORAGE_LOG(WARN, "recycle_scn is more than max_decided_scn",
+                    KR(ret), K(recycle_scn), K(ls_->get_clog_checkpoint_scn()), K(ls_->get_ls_id()), K(max_decided_scn));
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+    } else if (recycle_scn < ls_->get_clog_checkpoint_scn()) {
+      ret = OB_NO_NEED_UPDATE;
+      STORAGE_LOG(WARN, "recycle_scn should not smaller than checkpoint_log_scn",
+                  K(recycle_scn), K(ls_->get_clog_checkpoint_scn()), K(ls_->get_ls_id()));
+    } else {
+      STORAGE_LOG(INFO, "start flush",
+                  K(recycle_scn),
+                  K(ls_->get_clog_checkpoint_scn()),
+                  K(ls_->get_ls_id()));
+      for (int i = 1; i < ObLogBaseType::MAX_LOG_BASE_TYPE; i++) {
+        if (OB_NOT_NULL(handlers_[i])
+            && OB_SUCCESS != (tmp_ret = (handlers_[i]->flush(recycle_scn)))) {
+          STORAGE_LOG(WARN, "handler flush failed", K(recycle_scn), K(tmp_ret),
+                      K(i), K(ls_->get_ls_id()));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         }
       }
     }
+  } else {
+    STORAGE_LOG(WARN, "update_checkpoint is not enabled", K(ls_->get_ls_id()));
   }
 
   return ret;
@@ -275,7 +327,7 @@ int64_t ObCheckpointExecutor::get_cannot_recycle_log_size()
   LSN end_lsn;
   if (OB_FAIL(loghandler_->get_end_lsn(end_lsn))) {
     STORAGE_LOG(WARN, "get end lsn failed", K(ret), K(ls_->get_ls_id()));
-  } else {
+  } else if (!ls_->get_data_checkpoint()->is_flushing()) {
     cannot_recycle_log_size =
       end_lsn.val_ - ls_->get_clog_base_lsn().val_;
   }
@@ -285,7 +337,7 @@ int64_t ObCheckpointExecutor::get_cannot_recycle_log_size()
 int ObCheckpointExecutor::diagnose(CheckpointDiagnoseInfo &diagnose_info) const
 {
   int ret = OB_SUCCESS;
-  ObSpinLockGuard guard(lock_);
+  RLockGuard guard(rwlock_);
   int log_type_index = 0;
   diagnose_info.checkpoint_ = ls_->get_clog_checkpoint_scn();
   diagnose_info.min_rec_scn_.set_max();
@@ -294,6 +346,22 @@ int ObCheckpointExecutor::diagnose(CheckpointDiagnoseInfo &diagnose_info) const
   diagnose_info.log_type_ = log_type;
   return ret;
 }
+
+int ObCheckpointExecutor::traversal_flush() const
+{
+  int ret = OB_SUCCESS;
+  ObLSTxService *ls_tx_ser = nullptr;
+  if (!update_checkpoint_enabled_) {
+    STORAGE_LOG(WARN, "update_checkpoint is not enabled", K(ls_->get_ls_id()));
+  } else if (OB_ISNULL(ls_tx_ser = ls_->get_tx_svr())) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "ls_tx_ser should not be null", K(ret), K(ls_->get_ls_id()));
+  } else if (OB_FAIL(ls_tx_ser->traversal_flush())) {
+    STORAGE_LOG(WARN, "ls_tx_ser flush failed", K(ret), K(ls_->get_ls_id()));
+  }
+  return ret;
+}
+
 }  // namespace checkpoint
 }  // namespace storage
 }  // namespace oceanbase

@@ -136,6 +136,8 @@ int ObCreateIndexResolver::add_new_indexkey_for_oracle_temp_table()
 // child 2 of root node, resolve index column
 int ObCreateIndexResolver::resolve_index_column_node(
     ParseNode *index_column_node,
+    const int64_t index_keyname_value,
+    ParseNode *table_option_node,
     ObCreateIndexStmt *crt_idx_stmt,
     const ObTableSchema *tbl_schema)
 {
@@ -151,6 +153,7 @@ int ObCreateIndexResolver::resolve_index_column_node(
     if (OB_FAIL(add_new_indexkey_for_oracle_temp_table())) {
       SQL_RESV_LOG(WARN, "add session id key failed", K(ret));
     }
+    bool cnt_func_index = false;
     for (int32_t i = 0; OB_SUCC(ret) && i < index_column_node->num_child_; ++i) {
       ParseNode *col_node = index_column_node->children_[i];
       ObColumnSortItem sort_item;
@@ -164,6 +167,7 @@ int ObCreateIndexResolver::resolve_index_column_node(
         //如果此node类型不是identifier,那么认为是函数索引.
         if (col_node->children_[0]->type_ != T_IDENT) {
           sort_item.is_func_index_ = true;
+          cnt_func_index = true;
         }
         sort_item.column_name_.assign_ptr(const_cast<char *>(col_node->children_[0]->str_value_),
                                           static_cast<int32_t>(col_node->children_[0]->str_len_));
@@ -180,6 +184,19 @@ int ObCreateIndexResolver::resolve_index_column_node(
       } else {
         sort_item.prefix_len_ = 0;
       }
+
+      // spatial index constraint
+      if (OB_FAIL(ret)) {
+        // do nothing
+      } else {
+        bool is_explicit_order = (NULL != col_node->children_[2]
+            && 1 != col_node->children_[2]->is_empty_);
+        if (OB_FAIL(resolve_spatial_index_constraint(*tbl_schema, sort_item.column_name_,
+            index_column_node->num_child_, index_keyname_value, is_explicit_order, sort_item.is_func_index_))) {
+          LOG_WARN("fail to resolve spatial index constraint", K(ret), K(sort_item.column_name_));
+        }
+      }
+
       // 索引排序方式
       if (OB_FAIL(ret)) {
       } else if (col_node->children_[2]
@@ -225,6 +242,21 @@ int ObCreateIndexResolver::resolve_index_column_node(
         }
       }
     }
+
+    if (OB_SUCC(ret) && lib::is_mysql_mode() && cnt_func_index) {
+      uint64_t tenant_data_version = 0;
+      if (OB_ISNULL(session_info_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null", K(ret));
+      } else if (OB_FAIL(GET_MIN_DATA_VERSION(session_info_->get_effective_tenant_id(), tenant_data_version))) {
+        LOG_WARN("get tenant data version failed", K(ret));
+      } else if (tenant_data_version < DATA_VERSION_4_2_0_0){
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("tenant version is less than 4.2, functional index is not supported in mysql mode", K(ret), K(tenant_data_version));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "version is less than 4.2, functional index in mysql mode not supported");
+      }
+    }
+
     // In oracle mode, we need to check if the new index is on the same cols with old indexes.
     CHECK_COMPATIBILITY_MODE(session_info_);
     if (OB_SUCC(ret) && lib::is_oracle_mode()) {
@@ -352,6 +384,10 @@ int ObCreateIndexResolver::resolve_index_option_node(
     }
     if (OB_FAIL(set_table_option_to_stmt(is_partitioned))) {
       LOG_WARN("fail to set table option to stmt", K(ret));
+    } else if (tbl_schema->is_partitioned_table()
+        && INDEX_TYPE_SPATIAL_GLOBAL == crt_idx_stmt->get_create_index_arg().index_type_) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "spatial global index");
     }
   }
   return ret;
@@ -460,6 +496,9 @@ int ObCreateIndexResolver::resolve(const ParseNode &parse_tree)
   } else if (OB_ISNULL(tbl_schema)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("table schema is NULL", K(ret));
+  } else if (tbl_schema->is_external_table()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "operation on external table");
   } else {
     is_oracle_temp_table_ = (tbl_schema->is_oracle_tmp_table());
     ObTableSchema &index_schema = crt_idx_stmt->get_create_index_arg().index_schema_;
@@ -469,7 +508,7 @@ int ObCreateIndexResolver::resolve(const ParseNode &parse_tree)
   if (OB_SUCC(ret) && has_synonym) {
     ObString tmp_new_db_name;
     ObString tmp_new_tbl_name;
-    // related issue : https://work.aone.alibaba-inc.com/issue/41062639
+    // related issue :
     if (OB_FAIL(deep_copy_str(new_db_name, tmp_new_db_name))) {
       LOG_WARN("failed to deep copy new_db_name", K(ret));
     } else if (OB_FAIL(deep_copy_str(new_tbl_name, tmp_new_tbl_name))) {
@@ -483,6 +522,8 @@ int ObCreateIndexResolver::resolve(const ParseNode &parse_tree)
   if (FAILEDx(resolve_index_name_node(parse_node.children_[0], crt_idx_stmt))) {
     LOG_WARN("fail to resolve index name node", K(ret));
   } else if (OB_FAIL(resolve_index_column_node(parse_node.children_[2],
+                                               parse_tree.children_[0]->value_,
+                                               parse_tree.children_[3],
                                                crt_idx_stmt,
                                                tbl_schema))) {
     LOG_WARN("fail to resolve index column node", K(ret));
@@ -620,6 +661,12 @@ int ObCreateIndexResolver::set_table_option_to_stmt(bool is_partitioned)
         index_arg.index_type_ = INDEX_TYPE_NORMAL_GLOBAL;
       } else {
         index_arg.index_type_ = INDEX_TYPE_NORMAL_LOCAL;
+      }
+    } else if (SPATIAL_KEY == index_keyname_) {
+      if (global_) {
+        index_arg.index_type_ = INDEX_TYPE_SPATIAL_GLOBAL;
+      } else {
+        index_arg.index_type_ = INDEX_TYPE_SPATIAL_LOCAL;
       }
     }
     index_arg.data_table_id_ = data_table_id_;

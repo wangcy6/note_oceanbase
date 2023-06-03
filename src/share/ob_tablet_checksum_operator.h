@@ -41,8 +41,9 @@ public:
   bool is_valid() const;
   bool is_same_tablet(const ObTabletChecksumItem &item) const;
   int compare_tablet(const ObTabletReplicaChecksumItem &replica_item) const;
-  int verify_tablet_checksum(const ObTabletReplicaChecksumItem &replica_item) const;
+  int verify_tablet_column_checksum(const ObTabletReplicaChecksumItem &replica_item) const;
   int assign(const ObTabletReplicaChecksumItem &replica_item);
+  int assign(const ObTabletChecksumItem &other);
   ObTabletChecksumItem &operator =(const ObTabletChecksumItem &other);
 
   TO_STRING_KV(K_(tenant_id), K_(tablet_id), K_(ls_id), K_(data_checksum), K_(row_count), 
@@ -79,6 +80,7 @@ public:
       common::ObISQLClient &sql_client,
       const common::ObIArray<ObTabletLSPair> &pairs,
       const uint64_t tenant_id,
+      const SCN &compaction_scn,
       common::ObIArray<ObTabletChecksumItem> &items);
   static int load_tablet_checksum_items(
       common::ObISQLClient &sql_client,
@@ -97,11 +99,23 @@ public:
       common::ObISQLClient &sql_client, 
       const uint64_t tenant_id,
       common::ObIArray<ObTabletChecksumItem> &items);
-  // delete all records whose 'snapshot_version' <= min_snapshot_version
+  // delete records whose compaction_scn <= @gc_compaction_scn and (tablet_id, ls_id) is (1, 1)
+  static int delete_special_tablet_checksum_items(
+      common::ObISQLClient &sql_client,
+      const uint64_t tenant_id,
+      const SCN &gc_compaction_scn);
+  // delete limited records whose compaction_scn <= @gc_compaction_scn
+  // , while the record of whose (tablet_id, ls_id) is (1, 1) can't be deleted.
   static int delete_tablet_checksum_items(
       common::ObISQLClient &sql_client, 
       const uint64_t tenant_id,
+<<<<<<< HEAD
       const SCN &gc_compaction_scn);
+=======
+      const SCN &gc_compaction_scn,
+      const int64_t limit_cnt,
+      int64_t &affected_rows);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   static int delete_tablet_checksum_items(
       common::ObISQLClient &sql_client, 
       const uint64_t tenant_id,
@@ -110,6 +124,14 @@ public:
       common::ObISQLClient &sql_client, 
       const uint64_t tenant_id,
       common::ObIArray<share::SCN> &compaction_scn_arr);
+<<<<<<< HEAD
+=======
+  static int is_first_tablet_in_sys_ls_exist(
+      common::ObISQLClient &sql_client,
+      const uint64_t tenant_id,
+      const SCN &compaction_scn,
+      bool &is_exist);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 private:
   static int construct_load_sql_str_(
@@ -123,15 +145,24 @@ private:
       const common::ObIArray<ObTabletLSPair> &pairs,
       const int64_t start_idx,
       const int64_t end_idx,
+      const SCN &compaction_scn,
       common::ObSqlString &sql);
   static int insert_or_update_tablet_checksum_items_(
       common::ObISQLClient &sql_client,
       const uint64_t tenant_id,
       common::ObIArray<ObTabletChecksumItem> &items,
       const bool is_update);
+  static int get_tablet_cnt(
+      ObISQLClient &sql_client,
+      const uint64_t tenant_id,
+      int64_t &tablet_cnt);
+  static int get_estimated_timeout_us(
+      ObISQLClient &sql_client,
+      const uint64_t tenant_id,
+      int64_t &estimated_timeout_us);
 
 private:
-  const static int64_t MAX_BATCH_COUNT = 999;
+  const static int64_t MAX_BATCH_COUNT = 99;
 };
 
 } // end namespace share

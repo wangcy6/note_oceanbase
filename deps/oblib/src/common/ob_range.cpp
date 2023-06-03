@@ -283,6 +283,9 @@ int64_t ObNewVersionRange::hash() const
   return hash_value;
 }
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 }
 }

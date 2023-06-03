@@ -21,6 +21,7 @@
 #include "lib/allocator/page_arena.h"
 #include "lib/mysqlclient/ob_mysql_proxy.h"
 #include "share/ob_ls_id.h"
+#include "share/backup/ob_backup_struct.h"
 #include "storage/backup/ob_backup_data_struct.h"
 #include "storage/blocksstable/ob_macro_block_id.h"
 #include "storage/ob_i_table.h"
@@ -175,12 +176,21 @@ enum ObBackupProviderItemType {
 };
 
 class ObBackupProviderItem {
+  friend class ObBackupTabletStat;
 public:
   ObBackupProviderItem();
   virtual ~ObBackupProviderItem();
+<<<<<<< HEAD
   int set(const ObBackupProviderItemType &item_type, const blocksstable::ObLogicMacroBlockId &logic_id,
       const blocksstable::MacroBlockId &macro_block_id, const storage::ObITable::TableKey &table_key,
       const common::ObTabletID &tablet_id);
+=======
+  // for tablet meta and sstable meta
+  int set_with_fake(const ObBackupProviderItemType &item_type, const common::ObTabletID &tablet_id);
+  // for macro block
+  int set(const ObBackupProviderItemType &item_type, const ObBackupMacroBlockId &backup_macro_id,
+      const storage::ObITable::TableKey &table_key, const common::ObTabletID &tablet_id);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   bool operator==(const ObBackupProviderItem &other) const;
   bool operator!=(const ObBackupProviderItem &other) const;
   ObBackupProviderItemType get_item_type() const;
@@ -188,12 +198,19 @@ public:
   blocksstable::MacroBlockId get_macro_block_id() const;
   const storage::ObITable::TableKey &get_table_key() const;
   common::ObTabletID get_tablet_id() const;
+  int64_t get_nested_offset() const;
+  int64_t get_nested_size() const;
   int64_t get_deep_copy_size() const;
   int deep_copy(const ObBackupProviderItem &src, char *buf, int64_t len, int64_t &pos);
   bool is_valid() const;
   void reset();
-  TO_STRING_KV(K_(item_type), K_(logic_id), K_(table_key), K_(tablet_id));
+  TO_STRING_KV(K_(item_type), K_(logic_id), K_(table_key), K_(tablet_id), K_(nested_offset), K_(nested_size), K_(timestamp));
   NEED_SERIALIZE_AND_DESERIALIZE;
+private:
+  // for parallel external sort serialization restriction
+  static ObITable::TableKey get_fake_table_key_();
+  static blocksstable::ObLogicMacroBlockId get_fake_logic_id_();
+  static blocksstable::MacroBlockId get_fake_macro_id_();
 
 private:
   ObBackupProviderItemType item_type_;
@@ -201,6 +218,9 @@ private:
   blocksstable::MacroBlockId macro_block_id_;
   storage::ObITable::TableKey table_key_;
   common::ObTabletID tablet_id_;  // logic_id_.tablet_id_ may not equal to tablet_id_
+  int64_t nested_offset_;
+  int64_t nested_size_;
+  int64_t timestamp_;
 };
 
 class ObBackupProviderItemCompare {
@@ -257,10 +277,11 @@ private:
       const share::ObBackupDataType &backup_data_type, int64_t &count);
   int get_tablet_handle_(const uint64_t tenant_id, const share::ObLSID &ls_id, const common::ObTabletID &tablet_id,
       storage::ObTabletHandle &tablet_handle);
-  int check_tablet_deleted_(const uint64_t tenant_id, const common::ObTabletID &tablet_id, bool &is_deleted);
-  int report_tablet_skipped_(const common::ObTabletID &tablet_id);
+  int get_tablet_skipped_type_(const uint64_t tenant_id, const share::ObLSID &ls_id,
+      const common::ObTabletID &tablet_id, share::ObBackupSkippedType &skipped_type);
+  int report_tablet_skipped_(const common::ObTabletID &tablet_id, const share::ObBackupSkippedType &skipped_type);
   int hold_tablet_handle_(const common::ObTabletID &tablet_id, storage::ObTabletHandle &tablet_handle);
-  int fetch_tablet_sstable_array_(const common::ObTabletID &tablet_id, storage::ObTabletHandle &tablet_handle,
+  int fetch_tablet_sstable_array_(const common::ObTabletID &tablet_id, const storage::ObTabletHandle &tablet_handle,
       const share::ObBackupDataType &backup_data_type, common::ObIArray<storage::ObITable *> &sstable_array);
   int prepare_tablet_logic_id_reader_(const common::ObTabletID &tablet_id, const storage::ObTabletHandle &tablet_handle,
       const storage::ObITable::TableKey &table_key, const blocksstable::ObSSTable &sstable,
@@ -268,7 +289,7 @@ private:
   int fetch_all_logic_macro_block_id_(const common::ObTabletID &tablet_id, const storage::ObTabletHandle &tablet_handle,
       const storage::ObITable::TableKey &table_key, const blocksstable::ObSSTable &sstable, int64_t &total_count);
   int add_macro_block_id_item_list_(const common::ObTabletID &tablet_id, const storage::ObITable::TableKey &table_key,
-      const common::ObIArray<ObBackupMacroBlockId> &list);
+      const common::ObIArray<ObBackupMacroBlockId> &list, int64_t &added_count);
   int add_sstable_item_(const common::ObTabletID &tablet_id);
   int add_tablet_item_(const common::ObTabletID &tablet_id);
   int remove_duplicates_(common::ObIArray<ObBackupProviderItem> &array);
@@ -281,6 +302,7 @@ private:
   int get_tenant_meta_index_retry_id_(const share::ObBackupDataType &backup_data_type, int64_t &retry_id);
   int check_tablet_replica_validity_(const uint64_t tenant_id, const share::ObLSID &ls_id,
       const common::ObTabletID &tablet_id, const share::ObBackupDataType &backup_data_type);
+  int compare_prev_item_(const ObBackupProviderItem &item);
 
 private:
   static const int64_t BATCH_SIZE = 2000;
@@ -305,6 +327,8 @@ private:
   common::ObMySQLProxy *sql_proxy_;
   ObBackupProviderItemCompare backup_item_cmp_;
   ObBackupMetaIndexStore meta_index_store_;
+  ObBackupProviderItem prev_item_;
+  bool has_prev_item_;
   DISALLOW_COPY_AND_ASSIGN(ObBackupTabletProvider);
 };
 

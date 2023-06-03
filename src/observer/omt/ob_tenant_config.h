@@ -17,6 +17,7 @@
 #include "share/config/ob_system_config.h"
 #include "share/config/ob_common_config.h"
 #include "share/config/ob_config_helper.h"
+#include "lib/lock/ob_drw_lock.h"
 
 namespace oceanbase {
 
@@ -32,6 +33,8 @@ class ObTenantConfigMgr;
 
 class ObTenantConfig : public ObCommonConfig
 {
+public:
+  static const int64_t INITIAL_TENANT_CONF_VERSION = 1;
 public:
   class TenantConfigUpdateTask : public common::ObTimerTask
   {
@@ -60,7 +63,7 @@ public:
     volatile int64_t running_task_count_;
   };
   friend class TenantConfigUpdateTask;
-
+  static const int64_t LOCK_TIMEOUT = 1 * 1000 * 1000;
 public:
   ObTenantConfig();
   ObTenantConfig(uint64_t tenant_id);
@@ -72,24 +75,25 @@ public:
   ObTenantConfig &operator=(const ObTenantConfig &)=delete;
 
   void print() const override;
-  int check_all() const override;
+  int check_all() const override { return OB_SUCCESS; }
   common::ObServerRole get_server_type() const override { return common::OB_SERVER; }
-  int rdlock();
-  int wrlock();
-  int try_rdlock();
-  int try_wrlock();
-  int unlock();
+  void ref() { ATOMIC_INC(&ref_); }
+  void unref() { ATOMIC_DEC(&ref_); }
+  bool is_ref_clear() { return 0 == ATOMIC_LOAD(&ref_); }
 
   int read_config();
+  int publish_special_config_after_dump();
   uint64_t get_tenant_id() const { return tenant_id_; }
   int64_t get_current_version() const { return current_version_; }
   const TenantConfigUpdateTask &get_update_task() const { return  update_task_; }
+  int64_t get_create_timestamp() const { return create_timestamp_; }
   int got_version(int64_t version, const bool remove_repeat);
   int update_local(int64_t expected_version, common::ObMySQLProxy::MySQLResult &result,
                    bool save2file = true);
-  int add_extra_config(char *config_str,
-                   int64_t version = 0 ,
-                   bool check_name = false);
+  int add_extra_config(const char *config_str,
+                       int64_t version = 0 ,
+                       bool check_name = false,
+                       bool check_unit = true);
 
   OB_UNIS_VERSION(1);
 private:
@@ -99,9 +103,9 @@ private:
   TenantConfigUpdateTask update_task_;
   common::ObSystemConfig system_config_;
   ObTenantConfigMgr *config_mgr_;
-  // protect this object from being deleted in OTC_MGR.del_tenant_config
-  common::ObLatch lock_;
+  int64_t ref_;
   bool is_deleting_;
+  int64_t create_timestamp_;
 
 public:
 ///////////////////////////////////////////////////////////////////////////////

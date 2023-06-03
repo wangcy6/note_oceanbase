@@ -37,7 +37,9 @@ ObAnalyzeStmt::ObAnalyzeStmt()
     parallel_degree_(1),
     is_drop_(false),
     part_ids_(),
-    subpart_ids_()
+    subpart_ids_(),
+    ref_table_type_(share::schema::ObTableType::MAX_TABLE_TYPE),
+    gather_subpart_hist_(false)
 {
 }
 
@@ -75,6 +77,7 @@ int ObAnalyzeStmt::fill_table_stat_param(ObExecContext &ctx, common::ObTableStat
 
   param.tab_name_ = table_name_;
   param.table_id_ = table_id_;
+  param.ref_table_type_ = ref_table_type_;
   param.part_level_ = part_level_;
   param.total_part_cnt_ = total_part_cnt_;
 
@@ -93,14 +96,10 @@ int ObAnalyzeStmt::fill_table_stat_param(ObExecContext &ctx, common::ObTableStat
     param.sample_info_ = sample_info_;
     param.degree_ = parallel_degree_;
     //analyze stmt default use granularity is based partition type(oracle 12c),maybe refine it later
-    param.need_global_ = partition_name_.empty();
-    param.need_approx_global_ = false;
-    param.need_part_ = !partition_infos_.empty();
-    param.need_subpart_ = !subpartition_infos_.empty();
-    // param.need_approx_global_ = false;
-    // param.need_global_ = part_level_ == share::schema::PARTITION_LEVEL_ZERO;
-    // param.need_part_ = part_level_ == share::schema::PARTITION_LEVEL_ONE;
-    // param.need_subpart_ = part_level_ == share::schema::PARTITION_LEVEL_TWO;
+    param.global_stat_param_.need_modify_ = partition_name_.empty();
+    param.part_stat_param_.need_modify_ = !partition_infos_.empty();
+    param.subpart_stat_param_.need_modify_ = !subpartition_infos_.empty();
+    param.subpart_stat_param_.gather_histogram_ = gather_subpart_hist_;
   }
 
   LOG_TRACE("link bug", K(param));

@@ -20,24 +20,12 @@
 #include "observer/ob_server_struct.h"         // GCTX
 #include "share/ob_tenant_mgr.h"
 
-int64_t get_virtual_memory_used()
-{
-  constexpr int BUFFER_SIZE = 128;
-  char filename[BUFFER_SIZE];
-  int64_t page_cnt = 0;
-  snprintf(filename, BUFFER_SIZE, "/proc/%d/statm", getpid());
-  FILE *statm = fopen(filename, "r");
-  fscanf(statm, "%ld", &page_cnt);
-  fclose(statm);
-  return page_cnt * sysconf(_SC_PAGESIZE);
-}
-
 namespace oceanbase
 {
 namespace lib
 {
   int get_max_thread_num() {
-    return 0 == GCONF._ob_max_thread_num ? INT32_MAX : GCONF._ob_max_thread_num;
+    return 0 == GCONF._ob_max_thread_num ? INT32_MAX : static_cast<int32_t>(GCONF._ob_max_thread_num);
   }
 }
 
@@ -67,22 +55,11 @@ namespace common
 {
 using namespace oceanbase::obrpc;
 
-void get_tenant_ids(uint64_t *ids, int cap, int &cnt)
-{
-  auto *instance = ObMallocAllocator::get_instance();
-  cnt = 0;
-  for (uint64_t tenant_id = 1; tenant_id <= ObMallocAllocator::get_max_used_tenant_id() && cnt < cap; ++tenant_id) {
-    if (nullptr != instance->get_tenant_ctx_allocator(tenant_id, 0)) {
-      ids[cnt++] = tenant_id;
-    }
-  }
-}
-
 ObVirtualTenantManager::ObVirtualTenantManager()
   : tenant_map_(NULL),
     tenant_pool_(),
     allocator_(ObModIds::OB_TENANT_INFO),
-    memattr_(default_memattr),
+    memattr_(OB_SERVER_TENANT_ID, ObModIds::OB_TENANT_INFO),
     is_inited_(false)
 {
 }
@@ -428,17 +405,6 @@ int ObVirtualTenantManager::print_tenant_usage_(
     mallocator->print_tenant_memory_usage(node.tenant_id_);
     mallocator->print_tenant_ctx_memory_usage(node.tenant_id_);
   }
-  if (OB_SERVER_TENANT_ID == node.tenant_id_) {
-    int64_t observer_tenant_hold = lib::get_tenant_memory_hold(node.tenant_id_);
-    int64_t system_memory = GMEMCONF.get_reserved_server_memory();
-    if (observer_tenant_hold > system_memory) {
-      if (GCONF._ignore_system_memory_over_limit_error) {
-        COMMON_LOG(WARN, "the hold of observer tenant is over the system_memory", K(observer_tenant_hold), K(system_memory));
-      } else {
-        COMMON_LOG(ERROR, "the hold of observer tenant is over the system_memory", K(observer_tenant_hold), K(system_memory));
-      }
-    }
-  }
   return ret;
 }
 
@@ -464,20 +430,18 @@ void ObVirtualTenantManager::ObTenantInfo::reset()
   is_loaded_ = false;
 }
 
-int64_t ObTenantCpuShare::calc_px_pool_share(uint64_t tenant_id, int64_t cpu_count)
+int64_t ObTenantCpuShare::calc_px_pool_share(uint64_t tenant_id, int64_t min_cpu)
 {
-  UNUSED(tenant_id);
-   /* 按照 cpu_count * concurrency * 0.1 作为默认值
-    * 但确保最少分配 3 个 线程给 px pool，
-    * 计算出的默认值小于 3 时强制设置为 3
-    *
-    * 为什么要保证至少为 3? 这是为了尽可能让 mysqltest
-    * 都能过。mysqltest 里遇到一般的右深树时，3 个线程
-    * 能够保证调度成功，2 则会超时。
-    */
-  return std::max(3L,
-      cpu_count *
-      static_cast<int64_t>(static_cast<double>(GCONF.px_workers_per_cpu_quota.get()) * 0.1));
+  int64_t share = 3;
+  int ret = OB_SUCCESS;
+  oceanbase::omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id));
+  if (!tenant_config.is_valid()) {
+    share = 3;
+    COMMON_LOG(ERROR, "fail get tenant config. share default to 3", K(share));
+  } else {
+    share = std::max(3L, min_cpu * tenant_config->px_workers_per_cpu_quota);
+  }
+  return share;
 }
 
 } // namespace common

@@ -68,7 +68,7 @@ int ObTxBaseLogCb::set_lsn(const LSN &lsn)
 }
 
 int ObTxLogCb::init(const ObLSID &key,
-    const ObTransID &trans_id, ObTransCtx *ctx)
+    const ObTransID &trans_id, ObTransCtx *ctx, const bool is_dynamic)
 {
   int ret = OB_SUCCESS;
 
@@ -83,8 +83,9 @@ int ObTxLogCb::init(const ObLSID &key,
     ls_id_ = key;
     trans_id_ = trans_id;
     ctx_ = ctx;
-    tx_data_ = nullptr;
+    tx_data_guard_.reset();
     is_callbacked_ = false;
+    is_dynamic_ = is_dynamic;
   }
 
   return ret;
@@ -98,22 +99,25 @@ void ObTxLogCb::reset()
   ls_id_.reset();
   trans_id_.reset();
   ctx_ = NULL;
-  tx_data_ = nullptr;
+  tx_data_guard_.reset();
   callbacks_.reset();
   is_callbacked_ = false;
+  is_dynamic_ = false;
   cb_arg_array_.reset();
   mds_range_.reset();
   //is_callbacking_ = false;
+  first_part_scn_.invalid_scn();
 }
 
 void ObTxLogCb::reuse()
 {
   ObTxBaseLogCb::reuse();
-  tx_data_ = nullptr;
+  tx_data_guard_.reset();
   callbacks_.reset();
   is_callbacked_ = false;
   cb_arg_array_.reset();
   mds_range_.reset();
+  first_part_scn_.invalid_scn();
 }
 
 ObTxLogType ObTxLogCb::get_last_log_type() const
@@ -134,7 +138,7 @@ void ObTxLogCb::check_warn_() const
 {
   const int64_t used_time = ObClockGenerator::getRealClock() - get_submit_ts();
   if (used_time >= ObServerConfig::get_instance().clog_sync_time_warn_threshold) {
-    TRANS_LOG(WARN, "transaction log sync use too much time", K(*this), K(used_time));
+    TRANS_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "transaction log sync use too much time", K(*this), K(used_time));
   }
 }
 

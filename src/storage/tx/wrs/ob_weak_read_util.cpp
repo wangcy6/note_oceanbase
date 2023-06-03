@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <stdarg.h>
 #include <stdint.h>
+#include "storage/tx/ob_ts_mgr.h"
 namespace oceanbase
 {
 using namespace common;
@@ -44,9 +45,15 @@ int64_t ObWeakReadUtil::replica_keepalive_interval()
 // 2. all partitions offline
 // 3. all partitions delay too much or in invalid status
 // 4. all partitions in migrating and readable snapshot version delay more than 500ms
+<<<<<<< HEAD
 SCN ObWeakReadUtil::generate_min_weak_read_version(const uint64_t tenant_id)
 {
   SCN base_version_when_no_valid_partition;
+=======
+int ObWeakReadUtil::generate_min_weak_read_version(const uint64_t tenant_id, SCN &scn)
+{
+  int ret = OB_SUCCESS;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int64_t max_stale_time = 0;
   bool tenant_config_exist = false;
   // generating min weak version version should statisfy following constraint
@@ -69,15 +76,29 @@ SCN ObWeakReadUtil::generate_min_weak_read_version(const uint64_t tenant_id)
   );
 
   max_stale_time = std::max(max_stale_time, static_cast<int64_t>(DEFAULT_REPLICA_KEEPALIVE_INTERVAL));
+<<<<<<< HEAD
   // the unit of max_stale_time is us，we should change to ns
   base_version_when_no_valid_partition.convert_from_ts(ObTimeUtility::current_time() - max_stale_time);
 
   if ((!tenant_config_exist) && REACH_TIME_INTERVAL(1 * 1000 * 1000L)) {
     TRANS_LOG(WARN, "tenant not exist when generate min weak read version, use default max stale time instead",
         K(tenant_id), K(base_version_when_no_valid_partition), K(lbt()));
+=======
+  SCN tmp_scn;
+  if (OB_FAIL(OB_TS_MGR.get_gts(tenant_id, NULL, tmp_scn))) {
+    TRANS_LOG(WARN, "get gts cache error", K(ret), K(tenant_id));
+  } else {
+    // the unit of max_stale_time is us，we should change to ns
+    scn.convert_from_ts(tmp_scn.convert_to_ts() - max_stale_time);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
 
-  return base_version_when_no_valid_partition;
+  if ((!tenant_config_exist) && REACH_TIME_INTERVAL(1 * 1000 * 1000L)) {
+    TRANS_LOG_RET(WARN, OB_ERR_UNEXPECTED, "tenant not exist when generate min weak read version, use default max stale time instead",
+        K(tenant_id), K(tmp_scn), K(lbt()));
+  }
+
+  return ret;
 }
 
 bool ObWeakReadUtil::enable_monotonic_weak_read(const uint64_t tenant_id)
@@ -93,7 +114,7 @@ bool ObWeakReadUtil::enable_monotonic_weak_read(const uint64_t tenant_id)
       /* failure */ [tenant_id, &is_monotonic]() mutable {
         is_monotonic = true;
         if (REACH_TIME_INTERVAL(1 * 1000 * 1000L)) {
-        TRANS_LOG(WARN, "tenant not exist when check enable monotonic weak read, use true as default instead",
+        TRANS_LOG_RET(WARN, OB_ERR_UNEXPECTED, "tenant not exist when check enable monotonic weak read, use true as default instead",
                   K(tenant_id), K(is_monotonic), K(lbt()));
         }
       }
@@ -115,7 +136,7 @@ int64_t ObWeakReadUtil::max_stale_time_for_weak_consistency(const uint64_t tenan
       /* failure */ [tenant_id, ignore_warn, &max_stale_time]() mutable {
         max_stale_time = DEFAULT_MAX_STALE_TIME_FOR_WEAK_CONSISTENCY;
         if (IGNORE_TENANT_EXIST_WARN != ignore_warn && REACH_TIME_INTERVAL(1 * 1000 * 1000L)) {
-        TRANS_LOG(WARN, "tenant not exist when get max stale time for weak consistency,"
+        TRANS_LOG_RET(WARN, OB_ERR_UNEXPECTED, "tenant not exist when get max stale time for weak consistency,"
                   " use default max stale time instead",
                   K(tenant_id), K(max_stale_time), K(lbt()));
         }

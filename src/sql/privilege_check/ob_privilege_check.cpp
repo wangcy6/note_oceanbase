@@ -105,7 +105,6 @@ int no_priv_needed(
 int expr_has_col_in_tab(
     const ObRawExpr *expr,
     const ObRelIds &rel_ids,
-    const int32_t expr_level,
     bool& exists)
 {
   int ret = OB_SUCCESS;
@@ -119,13 +118,12 @@ int expr_has_col_in_tab(
     ret = OB_SIZE_OVERFLOW;
     LOG_WARN("too deep recursive", K(ret), K(is_stack_overflow));
   } else if (expr->is_column_ref_expr()) {
-    if (rel_ids.is_superset(expr->get_relation_ids())
-        && expr_level == expr->get_expr_level()) {
+    if (rel_ids.is_superset(expr->get_relation_ids())) {
       exists = true;
     }
   } else if (expr->has_flag(CNT_COLUMN)) {
     for (int64_t i = 0; OB_SUCC(ret) && !exists && i < expr->get_param_count(); ++i) {
-      OZ (expr_has_col_in_tab(expr->get_param_expr(i), rel_ids, expr_level, exists));
+      OZ (expr_has_col_in_tab(expr->get_param_expr(i), rel_ids, exists));
     }
   }
   return ret;
@@ -156,7 +154,7 @@ int add_nec_sel_priv_in_dml(
     }
     for (int i = 0; OB_SUCC(ret) && (!exists) && i < dml_stmt->get_condition_size(); i++) {
       const ObRawExpr *raw_expr = dml_stmt->get_condition_expr(i);
-      OZ (expr_has_col_in_tab(raw_expr, table_ids, 0, exists));
+      OZ (expr_has_col_in_tab(raw_expr, table_ids, exists));
     }
     if (OB_SUCC(ret) && exists) {
       OZ (ObPrivPacker::append_raw_obj_priv(NO_OPTION, OBJ_PRIV_ID_SELECT, packed_privs));
@@ -599,8 +597,6 @@ int add_procs_priv_in_dml(
   if (OB_ISNULL(dml_stmt) || OB_ISNULL(dml_stmt->get_query_ctx())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected null", K(ret));
-  } else if (!dml_stmt->get_query_ctx()->has_pl_udf_) {
-    // do nothing
   } else if (dml_stmt->get_relation_exprs(relation_exprs)) {
     LOG_WARN("failed to get relation exprs", K(ret));
   }
@@ -1231,6 +1227,50 @@ int get_create_synonym_priv(
   return ret;
 }
 
+int get_create_dblink_priv(
+    const ObSessionPrivInfo &session_priv,
+    const ObStmt *basic_stmt,
+    ObIArray<ObNeedPriv> &need_privs)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(session_priv);
+  ObNeedPriv need_priv;
+  if (OB_ISNULL(basic_stmt)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Basic stmt should be not be NULL", K(ret));
+  } else if (stmt::T_CREATE_DBLINK != basic_stmt->get_stmt_type()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected stmt type", K(basic_stmt->get_stmt_type()), K(ret));
+  } else {
+    need_priv.priv_set_ = OB_PRIV_CREATE_DATABASE_LINK;
+    need_priv.priv_level_ = OB_PRIV_USER_LEVEL;
+    ADD_NEED_PRIV(need_priv);
+  }
+  return ret;
+}
+
+int get_drop_dblink_priv(
+    const ObSessionPrivInfo &session_priv,
+    const ObStmt *basic_stmt,
+    ObIArray<ObNeedPriv> &need_privs)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(session_priv);
+  ObNeedPriv need_priv;
+  if (OB_ISNULL(basic_stmt)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Basic stmt should be not be NULL", K(ret));
+  } else if (stmt::T_DROP_DBLINK != basic_stmt->get_stmt_type()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected stmt type", K(basic_stmt->get_stmt_type()), K(ret));
+  } else {
+    need_priv.priv_set_ = OB_PRIV_DROP_DATABASE_LINK;
+    need_priv.priv_level_ = OB_PRIV_USER_LEVEL;
+    ADD_NEED_PRIV(need_priv);
+  }
+  return ret;
+}
+
 int get_drop_synonym_priv(
     const ObSessionPrivInfo &session_priv,
     const ObStmt *basic_stmt,
@@ -1714,7 +1754,9 @@ int get_sys_tenant_alter_system_priv(
              stmt::T_BACKUP_DATABASE != basic_stmt->get_stmt_type() && 
              stmt::T_BACKUP_MANAGE != basic_stmt->get_stmt_type() &&
              stmt::T_BACKUP_CLEAN != basic_stmt->get_stmt_type() &&
-             stmt::T_DELETE_POLICY != basic_stmt->get_stmt_type()) {
+             stmt::T_DELETE_POLICY != basic_stmt->get_stmt_type() &&
+             stmt::T_BACKUP_KEY != basic_stmt->get_stmt_type() &&
+             stmt::T_RECOVER != basic_stmt->get_stmt_type()) {
     ret = OB_ERR_NO_PRIVILEGE;
     LOG_WARN("Only sys tenant can do this operation",
              K(ret), "stmt type", basic_stmt->get_stmt_type());
@@ -2639,11 +2681,12 @@ int sys_pkg_need_priv_check(uint64_t pkg_id, ObSchemaGetterGuard *schema_guard,
 {
   static const char *pkg_name_need_priv[] = {
     /* add package's name here, who need to be check priv, for example */
-    "dbms_plan_cache"/* dbms_plan_cache */
+    "dbms_plan_cache",
+    "dbms_resource_manager",
   };
   static const char *pkg_name_only_need_obj_priv[] = {
     /* add package's name here, who need to be check priv, for example */
-    "dbms_plan_cache"/* dbms_plan_cache */
+    "dbms_plan_cache",
   };
   int ret = OB_SUCCESS;
   int64_t compatible_mode = lib::is_oracle_mode() ? COMPATIBLE_ORACLE_MODE
@@ -2695,10 +2738,10 @@ int get_call_ora_need_privs(
   int ret = OB_SUCCESS;
   ObOraNeedPriv need_priv;
   ObPackedObjPriv packed_privs = 0;
-  const ObCallProcedureStmt * call_stmt = dynamic_cast<const ObCallProcedureStmt*>(basic_stmt);
-  if (call_stmt != NULL) {
-    need_priv.db_name_ = call_stmt->get_db_name();
-    uint64_t pkg_id = call_stmt->get_package_id();
+  ObCallProcedureStmt * call_stmt = const_cast<ObCallProcedureStmt *>(dynamic_cast<const ObCallProcedureStmt*>(basic_stmt));
+  if (call_stmt != NULL && call_stmt->get_call_proc_info() != NULL) {
+    need_priv.db_name_ = call_stmt->get_call_proc_info()->get_db_name();
+    uint64_t pkg_id = call_stmt->get_call_proc_info()->get_package_id();
     /* 对于sys库的package，不需要权限 */
     if (need_priv.db_name_ == OB_SYS_DATABASE_NAME
        && (OB_INVALID_ID == pkg_id
@@ -2727,11 +2770,11 @@ int get_call_ora_need_privs(
       }
     } else {
       need_priv.grantee_id_ = user_id;
-      if (call_stmt->get_package_id() != OB_INVALID_ID) {
-        need_priv.obj_id_ = call_stmt->get_package_id();
+      if (call_stmt->get_call_proc_info()->get_package_id() != OB_INVALID_ID) {
+        need_priv.obj_id_ = call_stmt->get_call_proc_info()->get_package_id();
         need_priv.obj_type_ = static_cast<uint64_t>(ObObjectType::PACKAGE);
       } else {
-        need_priv.obj_id_ = call_stmt->get_routine_id();
+        need_priv.obj_id_ = call_stmt->get_call_proc_info()->get_routine_id();
         need_priv.obj_type_ = static_cast<uint64_t>(ObObjectType::PROCEDURE);
       }
       need_priv.obj_level_ = OBJ_LEVEL_FOR_TAB_PRIV;
@@ -3138,7 +3181,7 @@ bool ObPrivilegeCheck::check_password_expired_time(int64_t password_last_changed
     /*do nothing*/
   } else if ((uint64_t)(timeline) > (uint64_t)password_last_changed_ts) {
     is_expired = true;
-    LOG_WARN("the password is out of date, please change the password");
+    LOG_WARN_RET(OB_SUCCESS, "the password is out of date, please change the password");
   }
   return is_expired;
 }

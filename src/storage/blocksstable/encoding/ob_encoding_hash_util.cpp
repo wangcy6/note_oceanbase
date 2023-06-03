@@ -117,9 +117,11 @@ int ObEncodingHashTableBuilder::build(const ObColDatums &col_datums, const ObCol
   } else {
     ObObjTypeStoreClass store_class = get_store_class_map()[col_desc.col_type_.get_type_class()];
     const bool need_binary_hash =
-        (store_class == ObTextSC || store_class == ObJsonSC || store_class == ObLobSC);
+        (store_class == ObTextSC || store_class == ObJsonSC || store_class == ObLobSC || store_class == ObGeometrySC);
+    bool has_lob_header = col_desc.col_type_.is_lob_storage();
     sql::ObExprBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(
-        col_desc.col_type_.get_type(), col_desc.col_type_.get_collation_type());
+        col_desc.col_type_.get_type(), col_desc.col_type_.get_collation_type(),
+        col_desc.col_type_.get_scale(), lib::is_oracle_mode(), has_lob_header);
     ObHashFunc hash_func;
     hash_func.hash_func_ = basic_funcs->murmur_hash_;
     const uint64_t mask = (bucket_num_ - 1);
@@ -136,7 +138,12 @@ int ObEncodingHashTableBuilder::build(const ObColDatums &col_datums, const ObCol
         STORAGE_LOG(WARN, "not supported extend object type",
             K(ret), K(row_id), K(datum), K(*datum.extend_obj_));
       } else {
-        int64_t pos = hash(datum, hash_func, need_binary_hash) & mask;
+        uint64_t pos = 0;
+        if (OB_FAIL(hash(datum, hash_func, need_binary_hash, pos))) {
+          STORAGE_LOG(WARN, "hash failed", K(ret));
+        } else {
+          pos = pos & mask;
+        }
         NodeList *list = buckets_[pos];
         while (OB_SUCC(ret) && nullptr != list) {
           bool is_equal = false;
@@ -199,17 +206,18 @@ int ObEncodingHashTableBuilder::equal(
   return ret;
 }
 
-uint64_t ObEncodingHashTableBuilder::hash(
+int ObEncodingHashTableBuilder::hash(
     const ObDatum &datum,
     const ObHashFunc &hash_func,
-    const bool need_binary)
+    const bool need_binary,
+    uint64_t &res)
 {
   const int64_t seed = 0;
-  uint64_t ret = 0;
+  int ret = OB_SUCCESS;
   if (need_binary) {
-    ret = xxhash64(datum.ptr_, datum.len_, seed);
+    res = xxhash64(datum.ptr_, datum.len_, seed);
   } else {
-    ret = hash_func.hash_func_(datum, seed);
+    ret = hash_func.hash_func_(datum, seed, res);
   }
   return ret;
 }
@@ -341,7 +349,8 @@ int build_column_encoding_ctx(ObEncodingHashTable *ht,
       }
       case ObStringSC:
       case ObTextSC:
-      case ObJsonSC: { // json and text storage class have the same behavior currently
+      case ObJsonSC:
+      case ObGeometrySC: { // geometry, json and text storage class have the same behavior currently
         col_ctx.fix_data_size_ = -1;
         col_ctx.max_string_size_ = -1;
         bool var_store = false;

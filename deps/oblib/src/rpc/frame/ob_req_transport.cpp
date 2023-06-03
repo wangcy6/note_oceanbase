@@ -21,6 +21,7 @@
 #include "lib/oblog/ob_log.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "lib/worker.h"
+#include "lib/net/ob_addr.h"
 #include "rpc/obrpc/ob_rpc_packet.h"
 #include "rpc/obrpc/ob_rpc_stat.h"
 #include "rpc/obrpc/ob_net_keepalive.h"
@@ -39,6 +40,27 @@ using namespace oceanbase::rpc;
 using namespace oceanbase::obrpc;
 using namespace oceanbase::rpc::frame;
 
+easy_addr_t oceanbase::rpc::frame::to_ez_addr(const ObAddr &addr)
+{
+  easy_addr_t ez;
+  if (addr.is_valid()) {
+    memset(&ez, 0, sizeof (ez));
+    ez.port   = (htons)(static_cast<uint16_t>(addr.get_port()));
+    ez.cidx   = 0;
+    if (addr.using_ipv4()) {
+      ez.family = AF_INET;
+      ez.u.addr = htonl(addr.get_ipv4());
+    } else if (addr.using_unix()) {
+      ez.family = AF_UNIX;
+      snprintf(ez.u.unix_path, UNIX_PATH_MAX, "%s", addr.get_unix_path());
+    } else {
+      ez.family = AF_INET6;
+      (void) addr.get_ipv6(&ez.u.addr6, sizeof(ez.u.addr6));
+    }
+  }
+  return ez;
+}
+
 // file private function, called when using asynchronous rpc call.
 int async_cb(easy_request_t *r)
 {
@@ -55,6 +77,7 @@ int async_cb(easy_request_t *r)
     typedef ObReqTransport::AsyncCB ACB;
     ACB *cb = reinterpret_cast<ACB*>(r->user_data);
     cb->record_stat(r->ipacket == NULL);
+    pcode = cb->get_pcode();
 
     if (!r->ipacket) {
       // 1. destination doesn't response
@@ -75,9 +98,9 @@ int async_cb(easy_request_t *r)
       ret = OB_LIBEASY_ERROR;
     } else if (OB_FAIL(cb->decode(r->ipacket))) {
       cb->on_invalid();
-      LOG_DEBUG("decode failed", K(ret));
+      LOG_WARN("decode failed", K(ret), K(pcode));
     } else if (OB_PACKET_CLUSTER_ID_NOT_MATCH == cb->get_rcode()) {
-      LOG_WARN("wrong cluster id", K(ret), K(easy_connection_str(r->ms->c)));
+      LOG_WARN("wrong cluster id", K(ret), K(easy_connection_str(r->ms->c)), K(pcode));
       cb->set_error(EASY_CLUSTER_ID_MISMATCH);
       ret = cb->on_error(EASY_CLUSTER_ID_MISMATCH);
       if (OB_ERROR == ret) {
@@ -98,7 +121,7 @@ int async_cb(easy_request_t *r)
                 pkt->get_clen() + pkt->get_header_size() + OB_NET_HEADER_LENGTH);
 
       if (OB_FAIL(cb->process())) {
-        LOG_DEBUG("process failed", K(ret));
+        LOG_WARN("process failed", K(ret), K(pcode));
       }
 
       if (cb_cloned) {
@@ -119,7 +142,7 @@ int async_cb(easy_request_t *r)
   }
 
   if (!OB_SUCC(ret)) {
-    LOG_DEBUG("process async request fail", K(r), K(ret));
+    LOG_WARN("process async request fail", K(r), K(ret), K(pcode));
   }
 
   const int64_t cur_time = ObTimeUtility::current_time();
@@ -128,8 +151,8 @@ int async_cb(easy_request_t *r)
   const int64_t process_time = after_process_time - after_decode_time;
   const int64_t session_destroy_time = cur_time - after_process_time;
   if (total_time > OB_EASY_HANDLER_COST_TIME) {
-    LOG_WARN("async_cb handler cost too much time", K(total_time), K(decode_time),
-        K(process_time), K(session_destroy_time), K(pcode));
+    LOG_WARN_RET(OB_ERR_TOO_MUCH_TIME, "async_cb handler cost too much time", K(total_time), K(decode_time),
+        K(process_time), K(session_destroy_time), K(ret), K(pcode));
   }
 
   return EASY_OK;
@@ -398,7 +421,6 @@ ObPacket *ObReqTransport::send_session(easy_session_t *s) const
 {
   int ret = OB_SUCCESS;
   ObPacket *pkt = NULL;
-  char buff[OB_SERVER_ADDR_STR_LEN] = {'\0'};
 
   if (OB_ISNULL(s)) {
     ret = OB_INVALID_ARGUMENT;
@@ -413,16 +435,18 @@ ObPacket *ObReqTransport::send_session(easy_session_t *s) const
     // Synchronous rpc always needs to return packets
     s->unneed_response = false;
     s->r.client_start_time = common::ObTimeUtility::current_time();
+    lib::Thread::loop_ts_ = s->r.client_start_time; // avoid clear_clock
     if (0 == s->addr.cidx) {
       s->addr.cidx = balance_assign(s);
     }
 
-    easy_inet_addr_to_str(&s->addr, buff, OB_SERVER_ADDR_STR_LEN);
+    IGNORE_RETURN new (&lib::Thread::rpc_dest_addr_) ObAddr(s->addr);
     pkt = reinterpret_cast<ObPacket*>(easy_client_send(eio_, s->addr, s));
+    lib::Thread::rpc_dest_addr_.reset();
     if (NULL == pkt) {
+      char buff[OB_SERVER_ADDR_STR_LEN] = {'\0'};
+      easy_inet_addr_to_str(&s->addr, buff, OB_SERVER_ADDR_STR_LEN);
       SERVER_LOG(WARN, "send packet fail", "dst", buff, KP(s));
-    } else {
-      SERVER_LOG(DEBUG, "send session successfully", "dst", buff);
     }
   }
   return pkt;
@@ -457,27 +481,6 @@ int ObReqTransport::post_session(easy_session_t *s) const
     }
   }
   return ret;
-}
-
-easy_addr_t ObReqTransport::to_ez_addr(const ObAddr &addr) const
-{
-  easy_addr_t ez;
-  memset(&ez, 0, sizeof (ez));
-  if (addr.is_valid()) {
-    ez.port   = (htons)(static_cast<uint16_t>(addr.get_port()));
-    ez.cidx   = 0;
-    if (addr.using_ipv4()) {
-      ez.family = AF_INET;
-      ez.u.addr = htonl(addr.get_ipv4());
-    } else if (addr.using_unix()) {
-      ez.family = AF_UNIX;
-      snprintf(ez.u.unix_path, UNIX_PATH_MAX, "%s", addr.get_unix_path());
-    } else {
-      ez.family = AF_INET6;
-      (void) addr.get_ipv6(&ez.u.addr6, sizeof(ez.u.addr6));
-    }
-  }
-  return ez;
 }
 
 int ObReqTransport::send(const Request &req, Result &r) const

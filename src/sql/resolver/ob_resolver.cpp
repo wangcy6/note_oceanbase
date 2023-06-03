@@ -56,6 +56,7 @@
 #include "sql/resolver/ddl/ob_drop_routine_resolver.h"
 #include "sql/resolver/ddl/ob_trigger_resolver.h"
 #include "sql/resolver/ddl/ob_optimize_resolver.h"
+#include "sql/resolver/ddl/ob_create_standby_tenant_resolver.h"
 #include "ddl/ob_create_routine_resolver.h"
 #include "ddl/ob_drop_routine_resolver.h"
 #include "ddl/ob_alter_routine_resolver.h"
@@ -200,7 +201,7 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
              K(params_.allocator_), K(params_.schema_checker_),
              K(params_.session_info_), K(params_.query_ctx_), KP(params_.expr_factory_));
   } else if (T_SP_PRE_STMTS == parse_tree.type_) {
-    pl::ObPLPackageGuard package_guard(sql::PACKAGE_RESV_HANDLE);
+    pl::ObPLPackageGuard package_guard(params_.session_info_->get_effective_tenant_id());
     pl::ObPLResolver resolver(*(params_.allocator_),
                               *(params_.session_info_),
                               *(params_.schema_checker_->get_schema_guard()),
@@ -265,6 +266,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_CREATE_TENANT: {
         REGISTER_STMT_RESOLVER(CreateTenant);
+        break;
+      }
+      case T_CREATE_STANDBY_TENANT: {
+        REGISTER_STMT_RESOLVER(CreateStandbyTenant);
         break;
       }
       case T_DROP_TENANT: {
@@ -396,6 +401,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(SwitchTenant);
         break;
       }
+      case T_RECOVER: {
+        REGISTER_STMT_RESOLVER(RecoverTenant);
+        break;
+      }
       case T_REPORT_REPLICA: {
         REGISTER_STMT_RESOLVER(ReportReplica);
         break;
@@ -486,6 +495,18 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_MIGRATE_UNIT: {
         REGISTER_STMT_RESOLVER(MigrateUnit);
+        break;
+      }
+      case T_ADD_ARBITRATION_SERVICE: {
+        REGISTER_STMT_RESOLVER(AddArbitrationService);
+        break;
+      }
+      case T_REMOVE_ARBITRATION_SERVICE: {
+        REGISTER_STMT_RESOLVER(RemoveArbitrationService);
+        break;
+      }
+      case T_REPLACE_ARBITRATION_SERVICE: {
+        REGISTER_STMT_RESOLVER(ReplaceArbitrationService);
         break;
       }
       case T_RUN_JOB: {
@@ -660,7 +681,8 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       case T_SHOW_RESTORE_PREVIEW:
       case T_SHOW_QUERY_RESPONSE_TIME:
       case T_SHOW_STATUS:
-      case T_SHOW_CREATE_TRIGGER: {
+      case T_SHOW_CREATE_TRIGGER:
+      case T_SHOW_SEQUENCES: {
         REGISTER_STMT_RESOLVER(Show);
         break;
       }
@@ -969,6 +991,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(BackupDatabase);
         break;
       }
+      case T_BACKUP_KEY: {
+        REGISTER_STMT_RESOLVER(BackupKey);
+        break;
+      }
       case T_BACKUP_MANAGE: {
         REGISTER_STMT_RESOLVER(BackupManage);
         break;
@@ -1046,12 +1072,17 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         break;
       }
       default: {
-        ret = OB_ERR_UNEXPECTED;
+        ret = OB_NOT_SUPPORTED;
         const char *type_name = get_type_name(parse_tree.type_);
         LOG_WARN("Statement not supported now", K(ret), K(type_name));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "statement type");
         break;
       }
     }  // end switch
+
+    if (OB_SUCC(ret) && stmt->is_dml_stmt()) {
+      OZ( (static_cast<ObDMLStmt*>(stmt)->disable_writing_external_table()) );
+    }
 
     if (OB_SUCC(ret)) {
       if (ObStmt::is_write_stmt(stmt->get_stmt_type(), stmt->has_global_variable())

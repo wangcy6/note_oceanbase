@@ -27,9 +27,8 @@ namespace sql
 {
 
 ObExprTime::ObExprTime(ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_TIME, N_TIME, 1, NOT_ROW_DIMENSION)
-{
-}
+    : ObFuncExprOperator(alloc, T_FUN_SYS_TIME, N_TIME, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{}
 
 ObExprTime::~ObExprTime()
 {
@@ -84,8 +83,8 @@ int ObExprTime::calc_time(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datu
 }
 
 ObExprTimeBase::ObExprTimeBase(ObIAllocator &alloc, int32_t date_type, ObExprOperatorType type,
-                              const char *name)
-    : ObFuncExprOperator(alloc, type, name, 1, NOT_ROW_DIMENSION)
+                              const char *name, ObValidForGeneratedColFlag valid_for_generated_col)
+    : ObFuncExprOperator(alloc, type, name, 1, valid_for_generated_col, NOT_ROW_DIMENSION)
 {
   dt_type_ = date_type;
 }
@@ -158,7 +157,8 @@ static int ob_expr_convert_to_time(const ObDatum &datum,
                                   bool with_date,
                                   bool is_dayofmonth,
                                   ObEvalCtx &ctx,
-                                  ObTime &ot)
+                                  ObTime &ot,
+                                  bool has_lob_header)
 {
   int ret = OB_SUCCESS;
   const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
@@ -170,14 +170,15 @@ static int ob_expr_convert_to_time(const ObDatum &datum,
     ObDateSqlMode date_sql_mode;
     date_sql_mode.init(session->get_sql_mode());
     if (OB_FAIL(ob_datum_to_ob_time_with_date(datum, type, get_timezone_info(session),
-        ot2, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), is_dayofmonth, date_sql_mode))) {
+        ot2, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), is_dayofmonth, date_sql_mode,
+        has_lob_header))) {
       LOG_WARN("cast to ob time failed", K(ret));
     } else {
       ot = ot2;
     }
   } else {
     ObTime ot2(DT_TYPE_TIME);
-    if (OB_FAIL(ob_datum_to_ob_time_without_date(datum, type, get_timezone_info(session), ot2))) {
+    if (OB_FAIL(ob_datum_to_ob_time_without_date(datum, type, get_timezone_info(session), ot2, has_lob_header))) {
       LOG_WARN("cast to ob time failed", K(ret));
     } else {
       ot = ot2;
@@ -202,7 +203,7 @@ int ObExprTimeBase::calc(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum
   } else {
     ObTime ot;
     if (OB_FAIL(ob_expr_convert_to_time(*param_datum, expr.args_[0]->datum_meta_.type_, with_date,
-                                        is_dayofmonth, ctx, ot))) {
+                                        is_dayofmonth, ctx, ot, expr.args_[0]->obj_meta_.has_lob_header()))) {
       LOG_WARN("cast to ob time failed", K(ret), K(lbt()), K(session->get_stmt_type()));
       LOG_USER_WARN(OB_ERR_CAST_VARCHAR_TO_TIME);
       uint64_t cast_mode = 0;
@@ -250,8 +251,18 @@ int ObExprTimeBase::calc(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum
   return ret;
 }
 
+int ObExprTimeBase::is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const {
+  int ret = OB_SUCCESS;
+  if (is_valid_for_generated_col_) {
+    is_valid = is_valid_for_generated_col_;
+  } else if (OB_FAIL(check_first_param_not_time(exprs, is_valid))) {
+    LOG_WARN("fail to check if first param is time", K(ret), K(exprs));
+  }
+  return ret;
+}
+
 ObExprHour::ObExprHour(ObIAllocator &alloc)
-    : ObExprTimeBase(alloc, DT_HOUR, T_FUN_SYS_HOUR, N_HOUR) {};
+    : ObExprTimeBase(alloc, DT_HOUR, T_FUN_SYS_HOUR, N_HOUR, VALID_FOR_GENERATED_COL) {};
 
 ObExprHour::~ObExprHour() {}
 
@@ -261,7 +272,7 @@ int ObExprHour::calc_hour(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datu
 }
 
 ObExprMinute::ObExprMinute(ObIAllocator &alloc)
-    : ObExprTimeBase(alloc, DT_MIN, T_FUN_SYS_MINUTE, N_MINUTE) {};
+    : ObExprTimeBase(alloc, DT_MIN, T_FUN_SYS_MINUTE, N_MINUTE, VALID_FOR_GENERATED_COL) {};
 
 ObExprMinute::~ObExprMinute() {}
 
@@ -271,7 +282,7 @@ int ObExprMinute::calc_minute(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_
 }
 
 ObExprSecond::ObExprSecond(ObIAllocator &alloc)
-    : ObExprTimeBase(alloc, DT_SEC, T_FUN_SYS_SECOND, N_SECOND) {};
+    : ObExprTimeBase(alloc, DT_SEC, T_FUN_SYS_SECOND, N_SECOND, VALID_FOR_GENERATED_COL) {};
 
 ObExprSecond::~ObExprSecond() {}
 
@@ -281,7 +292,7 @@ int ObExprSecond::calc_second(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_
 }
 
 ObExprMicrosecond::ObExprMicrosecond(ObIAllocator &alloc)
-    : ObExprTimeBase(alloc, DT_USEC, T_FUN_SYS_MICROSECOND, N_MICROSECOND) {};
+    : ObExprTimeBase(alloc, DT_USEC, T_FUN_SYS_MICROSECOND, N_MICROSECOND, VALID_FOR_GENERATED_COL) {};
 
 ObExprMicrosecond::~ObExprMicrosecond() {}
 
@@ -291,7 +302,7 @@ int ObExprMicrosecond::calc_microsecond(const ObExpr &expr, ObEvalCtx &ctx, ObDa
 }
 
 ObExprYear::ObExprYear(ObIAllocator &alloc)
-    : ObExprTimeBase(alloc, DT_YEAR, T_FUN_SYS_YEAR, N_YEAR) {};
+    : ObExprTimeBase(alloc, DT_YEAR, T_FUN_SYS_YEAR, N_YEAR, NOT_VALID_FOR_GENERATED_COL) {};
 
 ObExprYear::~ObExprYear() {}
 
@@ -301,7 +312,7 @@ int ObExprYear::calc_year(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datu
 }
 
 ObExprMonth::ObExprMonth(ObIAllocator &alloc)
-    : ObExprTimeBase(alloc, DT_MON, T_FUN_SYS_MONTH, N_MONTH) {};
+    : ObExprTimeBase(alloc, DT_MON, T_FUN_SYS_MONTH, N_MONTH, NOT_VALID_FOR_GENERATED_COL) {};
 
 ObExprMonth::~ObExprMonth() {}
 
@@ -312,7 +323,7 @@ int ObExprMonth::calc_month(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_da
 }
 
 ObExprMonthName::ObExprMonthName(ObIAllocator &alloc)
-    : ObExprTimeBase(alloc, DT_MON_NAME, T_FUN_SYS_MONTH_NAME, N_MONTH_NAME) {};
+    : ObExprTimeBase(alloc, DT_MON_NAME, T_FUN_SYS_MONTH_NAME, N_MONTH_NAME, NOT_VALID_FOR_GENERATED_COL) {};
 
 ObExprMonthName::~ObExprMonthName() {}
 

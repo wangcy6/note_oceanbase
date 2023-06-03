@@ -19,14 +19,19 @@
 #include "ob_sql_parser.h"
 #include "pl/parser/ob_pl_parser.h"
 #include "lib/utility/ob_tracepoint.h"
+#include "lib/json/ob_json_print_utils.h"
 using namespace oceanbase::pl;
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
-ObParser::ObParser(common::ObIAllocator &allocator, ObSQLMode mode, ObCollationType conn_collation)
+ObParser::ObParser(common::ObIAllocator &allocator,
+                   ObSQLMode mode,
+                   ObCollationType conn_collation,
+                   QuestionMarkDefNameCtx *ctx)
     :allocator_(&allocator),
      sql_mode_(mode),
-     connection_collation_(conn_collation)
+     connection_collation_(conn_collation),
+     def_name_ctx_(ctx)
 {}
 
 ObParser::~ObParser()
@@ -369,6 +374,8 @@ ObParser::State ObParser::transform_normal(ObString &normal)
   ELSIF(2, S_OF, "of")
   ELSIF(11, S_EDITIONABLE, "editionable")
   ELSIF(14, S_EDITIONABLE, "noneditionable")
+  ELSIF(6, S_SIGNAL, "signal")
+  ELSIF(8, S_RESIGNAL, "resignal")
   ELSE()
 
   if (S_INVALID == state
@@ -400,7 +407,9 @@ ObParser::State ObParser::transform_normal(
         case S_FUNCTION:
         case S_PACKAGE:
         case S_TRIGGER:
-        case S_TYPE: {
+        case S_TYPE:
+        case S_SIGNAL:
+        case S_RESIGNAL: {
           is_pl = true;
         } break;
         case S_CALL: {
@@ -484,7 +493,7 @@ ObParser::State ObParser::transform_normal(
     } break;
     default: {
       is_not_pl = true;
-      LOG_WARN("unexpecte state", K(state));
+      LOG_WARN_RET(common::OB_ERR_UNEXPECTED, "unexpecte state", K(state));
     } break;
   }
   return state;
@@ -640,7 +649,7 @@ int ObParser::split_multiple_stmt(const ObString &stmt,
       //first try parse part str, because it's have less length and need less memory
       if (OB_FAIL(tmp_ret = parse(part, parse_result, parse_mode, false, true))) {
         //if parser part str failed, then try parse all remain part, avoid parse many times
-        //bug: https://work.aone.alibaba-inc.com/issue/34642901
+        //bug:
         tmp_ret = OB_SUCCESS;
         tmp_ret = parse(remain_part, parse_result, parse_mode);
       }
@@ -688,6 +697,7 @@ int ObParser::check_is_insert(common::ObIArray<common::ObString> &queries, bool 
 {
   int ret = OB_SUCCESS;
   is_ins = false;
+  bool is_replace = false;
   if (queries.count() < 1) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("queries is unexpected", K(ret));
@@ -696,6 +706,8 @@ int ObParser::check_is_insert(common::ObIArray<common::ObString> &queries, bool 
   } else {
     ObString &sql_str = queries.at(0);
     is_ins = (sql_str.length() > 6 && 0 == STRNCASECMP(sql_str.ptr(), "insert", 6));
+    is_replace = (sql_str.length() > 7 && 0 == STRNCASECMP(sql_str.ptr(), "replace", 7));
+    is_ins = is_ins | is_replace;
   }
   return ret;
 }
@@ -722,7 +734,7 @@ int ObParser::reconstruct_insert_sql(const common::ObString &stmt,
     allocator_ = &allocator;
     if (OB_FAIL(parse(stmt, parse_result, parse_mode, false, true))) {
       // if parser SQL failed，then we won't rewrite it and keep it as it is
-      LOG_WARN("failed to parser insert sql", K(ret));
+      LOG_WARN("failed to parser insert sql", K(ret), K(stmt));
     } else if (parse_result.ins_multi_value_res_->values_count_ == 1) {
       // only one set of values，not need rewrite
     } else if (OB_ISNULL(bak_allocator)) {
@@ -731,6 +743,13 @@ int ObParser::reconstruct_insert_sql(const common::ObString &stmt,
     } else {
       // restore the allocator
       allocator_ = bak_allocator;
+      LOG_DEBUG("after do reconstruct sql, result is",
+          K(parse_result.ins_multi_value_res_->on_duplicate_pos_),
+          K(parse_result.ins_multi_value_res_->values_col_),
+          K(parse_result.ins_multi_value_res_->values_count_),
+          K(stmt));
+      bool is_on_duplicate = (parse_result.ins_multi_value_res_->on_duplicate_pos_ > 0);
+      int64_t on_duplicate_length = stmt.length() - parse_result.ins_multi_value_res_->on_duplicate_pos_;
       for (ParenthesesOffset *current_obj = parse_result.ins_multi_value_res_->ref_parentheses_;
              OB_SUCC(ret) && NULL != current_obj;
              current_obj = current_obj->next_) {
@@ -744,7 +763,11 @@ int ObParser::reconstruct_insert_sql(const common::ObString &stmt,
         // right_parentheses_ - left_parentheses_，not contain the length of the left parenthesis, so the length + 1
         const int64_t values_length = current_obj->right_parentheses_ - current_obj->left_parentheses_ + 1;
         // The reason for here + 1 is to add a delimiter;
-        const int64_t final_length = shared_length + values_length + 1; // 这个+1的原因是
+        int64_t final_length = shared_length + values_length + 1; // 这个+1的原因是 为了后边的';'
+        if (is_on_duplicate) {
+          // for the on_duplicate_key clause of insert_up
+          final_length = final_length + on_duplicate_length;
+        }
         if (OB_ISNULL(new_sql_buf = static_cast<char*>(allocator_->alloc(final_length)))) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("fail to alloc memory", K(ret), K(final_length));
@@ -752,11 +775,19 @@ int ObParser::reconstruct_insert_sql(const common::ObString &stmt,
           LOG_WARN("failed to deep copy new sql", K(ret), K(final_length), K(shared_length), K(pos), K(stmt));
         } else if (OB_FAIL(databuff_memcpy(new_sql_buf, final_length, pos, values_length, (stmt.ptr() + (current_obj->left_parentheses_ - 1))))) {
           LOG_WARN("failed to deep copy member list buf", K(ret), K(final_length), K(pos), K(stmt), K(values_length));
+        } else if (is_on_duplicate && OB_FAIL(databuff_memcpy(new_sql_buf,
+                                                              final_length,
+                                                              pos,
+                                                              on_duplicate_length,
+                                                              stmt.ptr() + parse_result.ins_multi_value_res_->on_duplicate_pos_))) {
+
         } else {
           new_sql_buf[final_length - 1] = ';';
           ObString part(final_length, new_sql_buf);
           if (OB_FAIL(ins_queries.push_back(part))) {
             LOG_WARN("fail to push back query str", K(ret), K(part));
+          } else {
+            LOG_DEBUG("after rebuild multi_query sql is", K(part));
           }
         }
       }
@@ -880,6 +911,7 @@ int ObParser::parse_sql(const ObString &stmt,
     // if is multi_values_parser opt not need retry
     if (lib::is_mysql_mode() && !parse_result.is_multi_values_parser_) {
       parse_result.enable_compatible_comment_ = false;
+      parse_result.mysql_compatible_comment_ = false;
       if (OB_FAIL(sql_parser.parse(stmt.ptr(), stmt.length(), parse_result))) {
         //do nothing.
       }
@@ -898,6 +930,12 @@ int ObParser::parse_sql(const ObString &stmt,
     if (OB_FAIL(ret) && !no_throw_parser_error) {
       LOG_WARN("failed to fast parameterize", K(stmt), K(ret));
     }
+  }
+  if (OB_SUCC(ret) &&
+      parse_result.enable_compatible_comment_ &&
+      parse_result.mysql_compatible_comment_) {
+    ret = OB_ERR_PARSE_SQL;
+    LOG_WARN("the sql is invalid", K(ret), K(stmt));
   }
   if (OB_FAIL(ret) && !no_throw_parser_error) {
     auto err_charge_sql_mode = lib::is_oracle_mode();
@@ -944,7 +982,8 @@ int ObParser::parse(const ObString &query,
                     ParseResult &parse_result,
                     ParseMode parse_mode,
                     const bool is_batched_multi_stmt_split_on,
-                    const bool no_throw_parser_error)
+                    const bool no_throw_parser_error,
+                    const bool is_pl_inner_parse)
 {
   int ret = OB_SUCCESS;
 
@@ -978,6 +1017,7 @@ int ObParser::parse(const ObString &query,
   parse_result.is_for_trigger_ = (TRIGGER_MODE == parse_mode);
   parse_result.is_dynamic_sql_ = (DYNAMIC_SQL_MODE == parse_mode);
   parse_result.is_dbms_sql_ = (DBMS_SQL_MODE == parse_mode);
+  parse_result.is_for_udr_ = (UDR_SQL_MODE == parse_mode);
   parse_result.is_batched_multi_enabled_split_ = is_batched_multi_stmt_split_on;
   parse_result.is_not_utf8_connection_ = ObCharset::is_valid_collation(connection_collation_) ?
         (ObCharset::charset_type_by_coll(connection_collation_) != CHARSET_UTF8MB4) : false;
@@ -995,6 +1035,13 @@ int ObParser::parse(const ObString &query,
   parse_result.connection_collation_ = connection_collation_;
   parse_result.mysql_compatible_comment_ = false;
   parse_result.enable_compatible_comment_ = true;
+  if (nullptr != def_name_ctx_) {
+    parse_result.question_mark_ctx_.by_defined_name_ = true;
+    parse_result.question_mark_ctx_.name_ = def_name_ctx_->name_;
+    parse_result.question_mark_ctx_.count_ = def_name_ctx_->count_;
+  }
+
+  parse_result.pl_parse_info_.is_inner_parse_ = is_pl_inner_parse;
 
   if (INS_MULTI_VALUES == parse_mode) {
     void *buffer = nullptr;
@@ -1057,7 +1104,7 @@ int ObParser::parse(const ObString &query,
       }
     } else {
       ObPLParser pl_parser(*(ObIAllocator*)(parse_result.malloc_pool_), connection_collation_);
-      if (OB_FAIL(pl_parser.parse(stmt, stmt, parse_result))) {
+      if (OB_FAIL(pl_parser.parse(stmt, stmt, parse_result, is_pl_inner_parse))) {
         LOG_WARN("failed to parse stmt as pl", K(stmt), K(ret));
         // may create ddl func, try it.
         if ((OB_ERR_PARSE_SQL == ret

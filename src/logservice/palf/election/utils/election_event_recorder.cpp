@@ -57,12 +57,16 @@ int EventRecorder::report_event_(ElectionEventType type, const common::ObString 
   ObAddr self_addr = self_addr_;
   ObUniqueGuard<ObStringHolder> uniq_holder;
   #define PRINT_WRAPPER KR(ret), K(*this), K(type), K(info)
-  if (CLICK_FAIL(ob_make_unique(uniq_holder))) {
+  lib::ObMemAttr attr(OB_SERVER_TENANT_ID, "EventReHolder");
+  SET_USE_500(attr);
+  if (CLICK_FAIL(ob_make_unique(uniq_holder, attr))) {
     LOG_EVENT(WARN, "fail to make unique guard");
   } else if (CLICK_FAIL(uniq_holder->assign(info))) {
     LOG_EVENT(WARN, "fail to create unique ownership of string");
   #undef PRINT_WRAPPER
   #define PRINT_WRAPPER KR(ret), K(retry_times), K(report_ts), K(self_addr), K(mtl_id), K(obj_to_string(type)), K(ls_id), KPC(uniq_holder.get_ptr())
+  } else if (!need_report_) {
+    LOG_EVENT(INFO, "event happened, but no need do report");
   } else if (CLICK_FAIL(GLOBAL_REPORT_TIMER.schedule_task_ignore_handle_repeat_and_immediately(15_s, [retry_times, report_ts, self_addr, mtl_id, type, ls_id, uniq_holder]() mutable -> bool {
     ELECT_TIME_GUARD(500_ms);
     int ret = OB_SUCCESS;
@@ -88,7 +92,7 @@ int EventRecorder::report_event_(ElectionEventType type, const common::ObString 
     }
     if (++retry_times > 12 || OB_SUCC(ret)) {
       if (retry_times > 12) {// this may happened cause inner sql may not work for a long time, but i have tried my very best, so let it miss.
-        LOG_EVENT(WARN, "fail to schedule report event task cause retry too much times");
+        LOG_EVENT_RET(WARN, OB_ERR_TOO_MUCH_TIME, "fail to schedule report event task cause retry too much times");
       }
       stop_flag = true;
     }
@@ -142,6 +146,21 @@ int EventRecorder::report_decentralized_to_be_leader_event(const MemberListWithS
   DO_IF_SUCC(report_event_(ElectionEventType::DECENTRALIZED_TO_BE_LEADER, info));
   if (CLICK_FAIL(ret)) {
     LOG_EVENT(WARN, "report DECENTRALIZED_TO_BE_LEADER event failed");
+  }
+  return ret;
+  #undef PRINT_WRAPPER
+}
+
+int EventRecorder::report_directly_change_leader_event(const ObAddr &dest_svr, const ObStringHolder &reason) {
+  ELECT_TIME_GUARD(500_ms);
+  #define PRINT_WRAPPER KR(ret), K(*this), K(info)
+  int ret = OB_SUCCESS;
+  char info[INFO_MAX_LEN] = {0};
+  int64_t pos = 0;
+  DO_IF_SUCC(databuff_printf(info, INFO_MAX_LEN, pos, "directly change leader : %s -> %s, reason : %s", to_cstring(self_addr_), to_cstring(dest_svr), to_cstring(reason)));
+  DO_IF_SUCC(report_event_(ElectionEventType::DIRECTLY_CHANGE_LEADER, info));
+  if (CLICK_FAIL(ret)) {
+    LOG_EVENT(WARN, "report DIRECTLY_CHANGE_LEADER event failed");
   }
   return ret;
   #undef PRINT_WRAPPER

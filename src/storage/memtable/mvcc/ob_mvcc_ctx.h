@@ -96,7 +96,6 @@ public: // for mvcc engine invoke
                             const share::SCN max_trans_version,
                             const transaction::ObTransID &conflict_tx_id) = 0;
   virtual void on_wlock_retry(const ObMemtableKey& key, const transaction::ObTransID &conflict_tx_id) = 0;
-  virtual bool is_can_elr() const = 0;
   virtual void inc_truncate_cnt() = 0;
   virtual void add_trans_mem_total_size(const int64_t size) = 0;
   virtual void update_max_submitted_seq_no(const int64_t seq_no) = 0;
@@ -125,7 +124,7 @@ public:
     if (INT64_MAX == min_table_version_) {
       //第一次更新，需要防御入参为INT64_MAX
       if (INT64_MAX == table_version) {
-        TRANS_LOG(WARN, "unexpected table version", K(table_version), K(*this));
+        TRANS_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "unexpected table version", K(table_version), K(*this));
       } else {
         min_table_version_ = table_version;
         max_table_version_ = table_version;
@@ -135,7 +134,7 @@ public:
       TRANS_LOG(DEBUG, "current table version lower the last one", K(table_version), K(*this));
       //非第一次更新table version，预期不会是int64_max
     } else if (INT64_MAX == table_version) {
-      TRANS_LOG(ERROR, "unexpected table version", K(table_version), K(*this));
+      TRANS_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "unexpected table version", K(table_version), K(*this));
     } else {
       max_table_version_ = table_version;
     }

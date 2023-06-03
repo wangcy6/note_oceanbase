@@ -19,8 +19,12 @@ namespace common
 
 const char *OB_STORAGE_ACCESS_TYPES_STR[] = {"reader", "overwriter", "appender", "random_write"};
 
-ObObjectDevice::ObObjectDevice() : oss_account_(), base_info_(NULL), is_started_(false), lock_()
+ObObjectDevice::ObObjectDevice() : oss_account_(), base_info_(NULL), is_started_(false), lock_(common::ObLatchIds::OBJECT_DEVICE_LOCK)
 {
+  auto attr = SET_USE_500("ObjectDevice");
+  reader_ctx_pool_.set_attr(attr);
+  appender_ctx_pool_.set_attr(attr);
+  overwriter_ctx_pool_.set_attr(attr);
 }
 
 int ObObjectDevice::init(const ObIODOpts &opts)
@@ -51,7 +55,7 @@ ObObjectDevice::~ObObjectDevice()
 }
 
 /*the app logical use call ObBackupIoAdapter::get_and_init_device*/
-/*decription: base_info just related to storage_info, 
+/*decription: base_info just related to storage_info,
   base_info is used by the reader/appender*/
 int ObObjectDevice::start(const ObIODOpts &opts)
 {
@@ -105,7 +109,7 @@ void get_opt_value(ObIODOpts *opts, const char* key, const char*& value)
     for (int i = 0; i < opts->opt_cnt_; i++) {
       if (0 == STRCMP(opts->opts_[i].key_, key)) {
         value = opts->opts_[i].value_.value_str;
-        break; 
+        break;
       }
     }
   }
@@ -131,7 +135,7 @@ int ObObjectDevice::get_access_type(ObIODOpts *opts, ObStorageAccessType& access
   ObOptValue opt_value;
   const char* access_type = NULL;
   get_opt_value(opts, "AccessType", access_type);
-  
+
   if (NULL == access_type) {
     OB_LOG(WARN, "can not find access type!");
   } else if (0 == STRCMP(access_type , OB_STORAGE_ACCESS_TYPES_STR[OB_STORAGE_ACCESS_READER])) {
@@ -163,10 +167,14 @@ int ObObjectDevice::open_for_reader(const char *pathname, void*& ctx)
       ctx = (void*)reader;
     }
   }
+  if (OB_FAIL(ret) && OB_NOT_NULL(reader)) {
+    reader_ctx_pool_.free(reader);
+    reader = nullptr;
+  }
   return ret;
 }
 
-/*ObStorageOssMultiPartWriter is not used int the current version, if we use, later, the open func of 
+/*ObStorageOssMultiPartWriter is not used int the current version, if we use, later, the open func of
   overwriter maybe need to add para(just like the open func of appender)*/
 int ObObjectDevice::open_for_overwriter(const char *pathname, void*& ctx)
 {
@@ -181,7 +189,11 @@ int ObObjectDevice::open_for_overwriter(const char *pathname, void*& ctx)
     } else {
       ctx = (void*)overwriter;
     }
-  }  
+  }
+  if (OB_FAIL(ret) && OB_NOT_NULL(overwriter)) {
+    overwriter_ctx_pool_.free(overwriter);
+    overwriter = nullptr;
+  }
   return ret;
 }
 
@@ -218,8 +230,8 @@ int ObObjectDevice::open_for_appender(const char *pathname, ObIODOpts *opts, voi
   } else {
     ret = OB_INVALID_ARGUMENT;
     OB_LOG(WARN, "Invalid open mode!", KCSTRING(open_mode), K(ret));
-  }  
-  
+  }
+
   if (NULL == append_strategy || 0 == STRCMP(append_strategy, "OB_APPEND_USE_OVERRITE")) {
     //just keep the default value
   } else if (0 == STRCMP(append_strategy, "OB_APPEND_USE_SLICE_PUT")) {
@@ -247,7 +259,11 @@ int ObObjectDevice::open_for_appender(const char *pathname, ObIODOpts *opts, voi
     } else {
       ctx = appender;
     }
-  }  
+  }
+  if (OB_FAIL(ret) && OB_NOT_NULL(appender)) {
+    appender_ctx_pool_.free(appender);
+    appender = nullptr;
+  }
   return ret;
 }
 
@@ -256,7 +272,6 @@ int ObObjectDevice::release_res(void* ctx, const ObIOFd &fd, ObStorageAccessType
   int ret = OB_SUCCESS;
   int ret_tmp = OB_SUCCESS;
   /*release the ctx*/
-  common::ObSpinLockGuard guard(lock_);
   if (OB_ISNULL(ctx)) {
     ret = OB_INVALID_ARGUMENT;
     OB_LOG(WARN, "ctx is null, invald para!");
@@ -283,7 +298,7 @@ int ObObjectDevice::release_res(void* ctx, const ObIOFd &fd, ObStorageAccessType
     } else {
       ret = OB_INVALID_ARGUMENT;
       OB_LOG(WARN, "invalid access_type!", K(access_type), K(ret));
-    }  
+    }
 
     if (OB_SUCCESS != (ret_tmp = fd_mng_.release_fd(fd))) {
       ret = (OB_SUCCESS == ret) ? ret_tmp : ret;
@@ -296,15 +311,14 @@ int ObObjectDevice::release_res(void* ctx, const ObIOFd &fd, ObStorageAccessType
 /*
 *  mode is not used in object device
 */
-int ObObjectDevice::open(const char *pathname, const int flags, const mode_t mode, 
-                         ObIOFd &fd, ObIODOpts *opts) 
+int ObObjectDevice::open(const char *pathname, const int flags, const mode_t mode,
+                         ObIOFd &fd, ObIODOpts *opts)
 {
   UNUSED(flags);
   UNUSED(mode);
   int ret = OB_SUCCESS;
   void* ctx = NULL;
   ObStorageAccessType access_type = OB_STORAGE_ACCESS_MAX_TYPE;
-  common::ObSpinLockGuard guard(lock_);
   //validate fd
   if (fd_mng_.validate_fd(fd, false)) {
     ret = OB_INIT_TWICE;
@@ -312,8 +326,8 @@ int ObObjectDevice::open(const char *pathname, const int flags, const mode_t mod
   }  else if (OB_ISNULL(pathname)) {
     ret = OB_INVALID_ARGUMENT;
     OB_LOG(WARN, "pathname is null!", K(ret));
-  } 
-  
+  }
+
   //handle open logical
   if (OB_SUCC(ret)) {
     if(OB_ISNULL(opts)) {
@@ -324,7 +338,7 @@ int ObObjectDevice::open(const char *pathname, const int flags, const mode_t mod
     } else {
       if (OB_STORAGE_ACCESS_READER == access_type) {
         ret = open_for_reader(pathname, ctx);
-      } else if (OB_STORAGE_ACCESS_APPENDER == access_type || 
+      } else if (OB_STORAGE_ACCESS_APPENDER == access_type ||
                 OB_STORAGE_ACCESS_RANDOMWRITER == access_type) {
         ret = open_for_appender(pathname, opts, ctx);
       } else if (OB_STORAGE_ACCESS_OVERWRITER == access_type) {
@@ -342,9 +356,9 @@ int ObObjectDevice::open(const char *pathname, const int flags, const mode_t mod
   if (OB_SUCC(ret)) {
     if (OB_FAIL(fd_mng_.get_fd(ctx, device_type_, access_type, fd))) {
       OB_LOG(WARN, "fail to alloc fd!", K(ret), K(fd), KCSTRING(pathname), K(access_type));
-    } 
+    }
   }
-  
+
   //handle resource free when exception happen
   if (OB_FAIL(ret) && !OB_ISNULL(ctx)) {
     int tmp_ret = OB_SUCCESS;
@@ -367,7 +381,7 @@ int ObObjectDevice::close(const ObIOFd &fd)
 
   fd_mng_.get_fd_flag(fd, flag);
   if (!fd_mng_.validate_fd(fd, true)) {
-    ret = OB_NOT_INIT; 
+    ret = OB_NOT_INIT;
     OB_LOG(WARN, "fail to close fd. since fd is invalid!", K(ret) ,K(fd.first_id_), K(fd.second_id_));
   } else if (OB_FAIL(fd_mng_.fd_to_ctx(fd, ctx))) {
     OB_LOG(WARN, "fail to get ctx accroding fd!", K(ret));
@@ -387,19 +401,19 @@ int ObObjectDevice::mkdir(const char *pathname, mode_t mode)
 int ObObjectDevice::rmdir(const char *pathname)
 {
   common::ObString uri(pathname);
-  return util_.del_dir(uri);  
+  return util_.del_dir(uri);
 }
 
 int ObObjectDevice::unlink(const char *pathname)
 {
   common::ObString uri(pathname);
-  return util_.del_file(uri);  
+  return util_.del_file(uri);
 }
 
 int ObObjectDevice::exist(const char *pathname, bool &is_exist)
 {
   common::ObString uri(pathname);
-  return util_.is_exist(uri, is_exist);  
+  return util_.is_exist(uri, is_exist);
 }
 
 /*notice: for backup, this interface only return size*/
@@ -427,7 +441,7 @@ int ObObjectDevice::scan_dir(const char *dir_name, common::ObBaseDirEntryOperato
   } else {
     ret = util_.list_files(uri, op);
   }
-  
+
   if (OB_FAIL(ret)) {
     OB_LOG(WARN, "fail to do list/dir scan!", K(ret), K(is_dir_scan), KCSTRING(dir_name));
   }
@@ -441,7 +455,7 @@ int ObObjectDevice::is_tagging(const char *pathname, bool &is_tagging)
 }
 
 int ObObjectDevice::pread(const ObIOFd &fd, const int64_t offset, const int64_t size,
-                          void *buf, int64_t &read_size, ObIODPreadChecker *checker) 
+                          void *buf, int64_t &read_size, ObIODPreadChecker *checker)
 {
   UNUSED(checker);
   int ret = OB_SUCCESS;
@@ -465,7 +479,7 @@ int ObObjectDevice::pread(const ObIOFd &fd, const int64_t offset, const int64_t 
     } else if (OB_FAIL(reader->pread((char*)buf, size, offset, read_size))) {
       OB_LOG(WARN, "fail to pread!", K(ret));
     }
-  }  
+  }
   return ret;
 }
 
@@ -477,7 +491,7 @@ int ObObjectDevice::write(const ObIOFd &fd, const void *buf, const int64_t size,
   int ret = OB_SUCCESS;
   int flag = -1;
   void* ctx = NULL;
-  
+
   fd_mng_.get_fd_flag(fd, flag);
   if (!fd_mng_.validate_fd(fd, true)) {
     ret = OB_NOT_INIT;
@@ -504,7 +518,7 @@ int ObObjectDevice::write(const ObIOFd &fd, const void *buf, const int64_t size,
   } else {
     write_size = 0;
   }
-  return ret;  
+  return ret;
 }
 
 /*object storage does not support random write, so offset is no use
@@ -517,7 +531,7 @@ int ObObjectDevice::pwrite(const ObIOFd &fd, const int64_t offset, const int64_t
   int ret = OB_SUCCESS;
   int flag = -1;
   void* ctx = NULL;
-  
+
   UNUSED(offset);
 
   fd_mng_.get_fd_flag(fd, flag);
@@ -590,21 +604,21 @@ int ObObjectDevice::rename(const char *oldpath, const char *newpath)
 {
   UNUSED(oldpath);
   UNUSED(newpath);
-  OB_LOG(WARN, "rename is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "rename is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::reconfig(const ObIODOpts &opts)
 {
   UNUSED(opts);
-  OB_LOG(WARN, "reconfig is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "reconfig is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::seal_file(const ObIOFd &fd)
 {
   UNUSED(fd);
-  OB_LOG(WARN, "seal file is not support in object device !", K(fd));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "seal file is not support in object device !", K(fd));
   return OB_NOT_SUPPORTED;
 }
 
@@ -612,14 +626,14 @@ int ObObjectDevice::scan_dir(const char *dir_name, int (*func)(const dirent *ent
 {
   UNUSED(dir_name);
   UNUSED(func);
-  OB_LOG(WARN, "scan_dir with callback is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "scan_dir with callback is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::fsync(const ObIOFd &fd)
 {
   UNUSED(fd);
-  OB_LOG(WARN, "fsync is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "fsync is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -629,7 +643,7 @@ int ObObjectDevice::fallocate(const ObIOFd &fd, mode_t mode, const int64_t offse
   UNUSED(mode);
   UNUSED(offset);
   UNUSED(len);
-  OB_LOG(WARN, "fallocate is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "fallocate is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -637,7 +651,7 @@ int ObObjectDevice::truncate(const char *pathname, const int64_t len)
 {
   UNUSED(pathname);
   UNUSED(len);
-  OB_LOG(WARN, "truncate is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "truncate is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -645,15 +659,15 @@ int ObObjectDevice::truncate(const char *pathname, const int64_t len)
 int ObObjectDevice::mark_blocks(ObIBlockIterator &block_iter)
 {
   UNUSED(block_iter);
-  OB_LOG(WARN, "mark_blocks is not support in object device !", K(device_type_));
-  return OB_NOT_SUPPORTED;  
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "mark_blocks is not support in object device !", K(device_type_));
+  return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::alloc_block(const ObIODOpts *opts, ObIOFd &block_id)
 {
   UNUSED(opts);
   UNUSED(block_id);
-  OB_LOG(WARN, "alloc_block is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "alloc_block is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -662,33 +676,33 @@ int ObObjectDevice::alloc_blocks(const ObIODOpts *opts, const int64_t count, ObI
   UNUSED(opts);
   UNUSED(count);
   UNUSED(blocks);
-  OB_LOG(WARN, "alloc_blocks is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "alloc_blocks is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 void ObObjectDevice::free_block(const ObIOFd &block_id)
 {
   UNUSED(block_id);
-  OB_LOG(WARN, "free_block is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "free_block is not support in object device !", K(device_type_));
 }
 
 int ObObjectDevice::fsync_block()
 {
-  OB_LOG(WARN, "fsync_block is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "fsync_block is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::mark_blocks(const ObIArray<ObIOFd> &blocks)
 {
   UNUSED(blocks);
-  OB_LOG(WARN, "mark_blocks is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "mark_blocks is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::get_restart_sequence(uint32_t &restart_id) const
 {
   UNUSED(restart_id);
-  OB_LOG(WARN, "get_restart_sequence is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "get_restart_sequence is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -697,14 +711,14 @@ int ObObjectDevice::io_setup(uint32_t max_events, ObIOContext *&io_context)
 {
   UNUSED(max_events);
   UNUSED(io_context);
-  OB_LOG(WARN, "io_setup is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "io_setup is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::io_destroy(ObIOContext *io_context)
 {
   UNUSED(io_context);
-  OB_LOG(WARN, "io_destroy is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "io_destroy is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -717,7 +731,7 @@ int ObObjectDevice::io_prepare_pwrite(const ObIOFd &fd, void *buf, size_t count,
   UNUSED(offset);
   UNUSED(iocb);
   UNUSED(callback);
-  OB_LOG(WARN, "io_prepare_pwrite is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "io_prepare_pwrite is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -730,7 +744,7 @@ int ObObjectDevice::io_prepare_pread(const ObIOFd &fd, void *buf, size_t count,
   UNUSED(offset);
   UNUSED(iocb);
   UNUSED(callback);
-  OB_LOG(WARN, "io_prepare_pread is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "io_prepare_pread is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -738,7 +752,7 @@ int ObObjectDevice::io_submit(ObIOContext *io_context, ObIOCB *iocb)
 {
   UNUSED(io_context);
   UNUSED(iocb);
-  OB_LOG(WARN, "io_submit is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "io_submit is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
@@ -746,8 +760,8 @@ int ObObjectDevice::io_cancel(ObIOContext *io_context, ObIOCB *iocb)
 {
   UNUSED(io_context);
   UNUSED(iocb);
-  OB_LOG(WARN, "io_cancel is not support in object device !", K(device_type_));
-  return OB_NOT_SUPPORTED;  
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "io_cancel is not support in object device !", K(device_type_));
+  return OB_NOT_SUPPORTED;
 }
 int ObObjectDevice::io_getevents(ObIOContext *io_context, int64_t min_nr,
                                  ObIOEvents *events, struct timespec *timeout)
@@ -756,59 +770,71 @@ int ObObjectDevice::io_getevents(ObIOContext *io_context, int64_t min_nr,
   UNUSED(min_nr);
   UNUSED(events);
   UNUSED(timeout);
-  OB_LOG(WARN, "io_getevents is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "io_getevents is not support in object device !", K(device_type_));
   return OB_NOT_SUPPORTED;
 }
 
 ObIOCB *ObObjectDevice::alloc_iocb()
 {
-  OB_LOG(WARN, "alloc_iocb is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "alloc_iocb is not support in object device !", K(device_type_));
   return NULL;
 }
 
 ObIOEvents *ObObjectDevice::alloc_io_events(const uint32_t max_events)
 {
   UNUSED(max_events);
-  OB_LOG(WARN, "alloc_io_events is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "alloc_io_events is not support in object device !", K(device_type_));
   return NULL;
 }
 
 void ObObjectDevice::free_iocb(ObIOCB *iocb)
 {
   UNUSED(iocb);
-  OB_LOG(WARN, "free_iocb is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "free_iocb is not support in object device !", K(device_type_));
 }
 
 void ObObjectDevice::free_io_events(ObIOEvents *io_event)
 {
   UNUSED(io_event);
-  OB_LOG(WARN, "free_io_events is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "free_io_events is not support in object device !", K(device_type_));
 }
 
   // space management interface
 int64_t ObObjectDevice::get_total_block_size() const
 {
-  OB_LOG(WARN, "get_total_block_size is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "get_total_block_size is not support in object device !", K(device_type_));
+  return -1;
+}
+
+int64_t ObObjectDevice::get_max_block_size(int64_t reserved_size) const
+{
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "get_max_block_size is not support in object device !", K(device_type_));
   return -1;
 }
 
 int64_t ObObjectDevice::get_free_block_count() const
 {
-  OB_LOG(WARN, "get_free_block_count is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "get_free_block_count is not support in object device !", K(device_type_));
   return -1;
 }
 
 int64_t ObObjectDevice::get_reserved_block_count() const
 {
-  OB_LOG(WARN, "get_reserved_block_count is not support in object device !", K(device_type_));
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "get_reserved_block_count is not support in object device !", K(device_type_));
+  return -1;
+}
+
+int64_t ObObjectDevice::get_max_block_count(int64_t reserved_size) const
+{
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "get_max_block_count is not support in object device !", K(device_type_));
   return -1;
 }
 
 int ObObjectDevice::check_space_full(const int64_t required_size) const
 {
   UNUSED(required_size);
-  OB_LOG(WARN, "check_space_full is not support in object device !", K(device_type_));
-  return OB_NOT_SUPPORTED;  
+  OB_LOG_RET(WARN, OB_NOT_SUPPORTED, "check_space_full is not support in object device !", K(device_type_));
+  return OB_NOT_SUPPORTED;
 }
 
 int ObObjectDevice::fdatasync(const ObIOFd &fd)

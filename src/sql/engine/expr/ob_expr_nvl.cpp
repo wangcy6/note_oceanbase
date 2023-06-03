@@ -76,8 +76,9 @@ int ObExprNvlUtil::calc_result_type(ObExprResType &type,
 }
 
 ObExprNvl::ObExprNvl(ObIAllocator &alloc)
- : ObFuncExprOperator(alloc, T_FUN_SYS_NVL, N_NVL, 2, NOT_ROW_DIMENSION)
-{}
+ : ObFuncExprOperator(alloc, T_FUN_SYS_NVL, N_NVL, 2, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprNvl::~ObExprNvl()
 {}
@@ -111,6 +112,16 @@ int ObExprNvl::calc_result_type2(ObExprResType &type,
       type.set_scale(static_cast<ObScale>(max(scale1, scale2)));
     } else {
       type.set_scale(-1);
+    }
+    if (lib::is_mysql_mode() && SCALE_UNKNOWN_YET != type.get_scale()) {
+      if (ob_is_real_type(type.get_type())) {
+        type.set_precision(static_cast<ObPrecision>(ObMySQLUtil::float_length(type.get_scale())));
+      } else if (ob_is_number_tc(type.get_type())) { // TODO:@zuojiao.hzj add decimal_int here
+        const int16_t intd1 = type1.get_precision() - type1.get_scale();
+        const int16_t intd2 = type2.get_precision() - type2.get_scale();
+        const int16_t prec = MAX(type.get_precision(), MAX(intd1, intd2) + type.get_scale());
+        type.set_precision(static_cast<ObPrecision>(prec));
+      }
     }
     type.set_length(MAX(type1.get_length(), type2.get_length()));
     //对于 int 和uint64的混合类型，需要提升类型至decimal
@@ -159,8 +170,9 @@ int ObExprNvl::calc_result_type2(ObExprResType &type,
 
 
 ObExprOracleNvl::ObExprOracleNvl(ObIAllocator &alloc)
- : ObFuncExprOperator(alloc, T_FUN_SYS_NVL, N_NVL, 2, NOT_ROW_DIMENSION)
-{}
+ : ObFuncExprOperator(alloc, T_FUN_SYS_NVL, N_NVL, 2, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprOracleNvl::~ObExprOracleNvl()
 {}
@@ -257,7 +269,7 @@ int ObExprOracleNvl::calc_nvl_oralce_result_type(ObExprResType &type,
       type.set_scale(0);
     }
     /*
-     * https://aone.alibaba-inc.com/issue/18763797
+     *
      * select nvl(0, 'hello') from dual;
      * the sql above will return error: ORA-01722: invalid number.
      * we must execute necessary cast operation before we determine which obj should be returned,
@@ -270,8 +282,9 @@ int ObExprOracleNvl::calc_nvl_oralce_result_type(ObExprResType &type,
 }
 
 ObExprNaNvl::ObExprNaNvl(ObIAllocator &alloc)
-  : ObFuncExprOperator(alloc, T_FUN_SYS_NANVL, T_NANVL, 2, NOT_ROW_DIMENSION)
-{}
+  : ObFuncExprOperator(alloc, T_FUN_SYS_NANVL, T_NANVL, 2, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+{
+}
 
 ObExprNaNvl::~ObExprNaNvl()
 {}
@@ -425,9 +438,7 @@ int ObExprNaNvl::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
 int ObExprNaNvl::eval_nanvl_util(const ObExpr &expr, ObDatum &expr_datum, ObDatum *param1, ObDatum *param2, bool &ret_bool)
 {
   int ret = OB_SUCCESS;
-  if (param1->is_null() || param2->is_null()) {
-    expr_datum.set_null();
-  } else if (expr.args_[0]->datum_meta_.type_ != ObFloatType
+  if (expr.args_[0]->datum_meta_.type_ != ObFloatType
              && expr.args_[0]->datum_meta_.type_ != ObDoubleType) {
     expr_datum.set_datum(*param1);
   } else {
@@ -457,7 +468,7 @@ int ObExprNaNvl::eval_nanvl(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_da
     expr_datum.set_null();
   } else if (OB_FAIL(expr.args_[1]->eval(ctx, param2))) {
     LOG_WARN("eval second param failed", K(ret));
-  } else if (param1->is_null() || param2->is_null()) {
+  } else if (param1->is_null() || (param2->is_null() && ObDoubleType != expr.args_[1]->datum_meta_.get_type())) {
     expr_datum.set_null();
   } else {
     if (OB_FAIL(eval_nanvl_util(expr, expr_datum, param1, param2, ret_bool))){
@@ -507,7 +518,9 @@ int ObExprNaNvl::eval_nanvl_batch(const ObExpr &expr,
         param1 = &expr.args_[0]->locate_expr_datum(ctx, i);
         param2 = &expr.args_[1]->locate_expr_datum(ctx, i);
         eval_flags.set(i);
-        if (OB_FAIL(eval_nanvl_util(expr, results[i], param1, param2, ret_bool))){
+        if (param1->is_null() || (param2->is_null() && ObDoubleType != expr.args_[1]->datum_meta_.get_type())) {
+          results[i].set_null();
+        } else if (OB_FAIL(eval_nanvl_util(expr, results[i], param1, param2, ret_bool))){
           LOG_WARN("eval_nanvl unexpect error", K(ret));
         } else {
           // do nothing

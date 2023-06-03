@@ -50,7 +50,7 @@ c_cmt_end        \*+\/
 identifer        (([A-Za-z0-9$_]|{UTF8_GB_CHAR})*)
 int_num          [0-9]+
 system_variable  (@@[A-Za-z_][A-Za-z0-9_]*)
-user_variable    (@[A-Za-z0-9_\.$]*)|(@[`'\"][`'\"A-Za-z0-9_\.$/%]*)
+user_variable    (@[A-Za-z0-9_\.$]*)|(@[`'\"][`'\"A-Za-z0-9_\.$/%]*)|(@%)
 
 quote         '
 sqbegin       {quote}
@@ -507,24 +507,23 @@ Timestamp{whitespace}?\"[^\"]*\" {
 
 {mysql_compatible_comment_without_version} {
   //refer to src/sql/parser/sql_parser_mysql_mode.l for more info.
-  ParseResult *p = (ParseResult *)yyextra;
-  p->mysql_compatible_comment_ = true;
+  ObParseCtx *parse_ctx = (ObParseCtx *)yyextra;
+  parse_ctx->mysql_compatible_comment_ = true;
 }
 
 {mysql_compatible_comment_with_version} {
-  ParseResult *p = (ParseResult *)yyextra;
-  p->mysql_compatible_comment_ = true;
+  ObParseCtx *parse_ctx = (ObParseCtx *)yyextra;
+  parse_ctx->mysql_compatible_comment_ = true;
 }
 
 {mysql_compatible_comment_end} {
-  ParseResult *p = (ParseResult *)yyextra;
-  if (p->mysql_compatible_comment_){
-    p->mysql_compatible_comment_ = false;
+  ObParseCtx *parse_ctx = (ObParseCtx *)yyextra;
+  if (parse_ctx->mysql_compatible_comment_) {
+    parse_ctx->mysql_compatible_comment_ = false;
     BEGIN(INITIAL);
   } else {
     char c_ret = yytext[0];
     yyless(1);
-    p->yycolumn_ = p->yycolumn_ - 1;
     return c_ret;
   }
 }

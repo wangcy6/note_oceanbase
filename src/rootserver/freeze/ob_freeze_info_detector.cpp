@@ -18,11 +18,14 @@
 #include "rootserver/ob_root_utils.h"
 #include "lib/profile/ob_trace_id.h"
 #include "share/config/ob_server_config.h"
+#include "share/ob_global_merge_table_operator.h"
 #include "share/ob_global_stat_proxy.h"
 #include "observer/ob_server_struct.h"
 #include "share/rc/ob_tenant_base.h"
 #include "rootserver/ob_thread_idling.h"
 #include "share/ob_rpc_struct.h"
+#include "share/ob_service_epoch_proxy.h"
+#include "share/ob_zone_merge_info.h"
 
 namespace oceanbase
 {
@@ -31,13 +34,20 @@ using namespace share;
 namespace rootserver
 {
 ObFreezeInfoDetector::ObFreezeInfoDetector()
+<<<<<<< HEAD
   : ObFreezeReentrantThread(), is_inited_(false),
     is_gc_scn_inited_(false), last_gc_timestamp_(0),
     freeze_info_mgr_(nullptr), major_scheduler_idling_(nullptr)
+=======
+  : ObFreezeReentrantThread(), is_inited_(false), is_primary_service_(true),
+    is_global_merge_info_adjusted_(false), is_gc_scn_inited_(false),
+    last_gc_timestamp_(0), freeze_info_mgr_(nullptr), major_scheduler_idling_(nullptr)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {}
 
 int ObFreezeInfoDetector::init(
     const uint64_t tenant_id,
+    const bool is_primary_service,
     ObMySQLProxy &sql_proxy,
     ObFreezeInfoManager &freeze_info_manager,
     ObThreadIdling &major_scheduler_idling)
@@ -48,6 +58,8 @@ int ObFreezeInfoDetector::init(
     LOG_WARN("init twice", KR(ret), K_(tenant_id));
   } else {
     tenant_id_ = tenant_id;
+    is_primary_service_ = is_primary_service;
+    is_global_merge_info_adjusted_ = false;
     last_gc_timestamp_ = ObTimeUtility::current_time();
     sql_proxy_ = &sql_proxy;
     freeze_info_mgr_ = &freeze_info_manager;
@@ -82,6 +94,7 @@ void ObFreezeInfoDetector::run3()
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret), K_(tenant_id));
   } else {
+    const int64_t start_time_us = ObTimeUtil::current_time();
     LOG_INFO("start freeze_info_detector", K_(tenant_id));
     ObThreadCondGuard guard(get_cond());
     while (!stop_) {
@@ -93,22 +106,38 @@ void ObFreezeInfoDetector::run3()
       int64_t proposal_id = 0;
       ObRole role = ObRole::INVALID_ROLE;
 
-      if (OB_FAIL(obtain_proposal_id_from_ls(proposal_id, role))) {
+      if (OB_FAIL(obtain_proposal_id_from_ls(is_primary_service_, proposal_id, role))) {
         LOG_WARN("fail to obtain proposal_id from ls", KR(ret));
+      } else if (ObRole::LEADER != role) {
+        LOG_INFO("follower should not run freeze_info_detector", K_(tenant_id), K(role),
+                 K_(is_primary_service));
       } else if (OB_FAIL(can_start_work(can_work))) {
-        LOG_WARN("fail to judge can start work", KR(ret),K_(tenant_id));
+        LOG_WARN("fail to judge can start work", KR(ret), K_(tenant_id));
       } else if (can_work) {
         // In freeze_info_mgr, we use 'select snapshot_gc_scn for update' to execute sequentially,
         // avoiding multi-writing when switch-role.
+<<<<<<< HEAD
         if (OB_FAIL(try_renew_snapshot_gc_scn())) {
           LOG_WARN("fail to renew gc snapshot", KR(ret), K_(tenant_id));
+=======
+        if (is_primary_service()) {  // only primary tenant need to renew_snapshot_gc_scn
+          if (OB_FAIL(try_renew_snapshot_gc_scn())) {
+            LOG_WARN("fail to renew gc snapshot", KR(ret), K_(tenant_id), K_(is_primary_service));
+          }
         }
-        // TODO oushen, consider STANDBY_TENANT later
+
+        // actively reload freeze_info in ObRestoreMajorFreezeService
+        ret = OB_SUCCESS; // ignore ret
+        if (OB_FAIL(try_reload_freeze_info(proposal_id))) {
+          LOG_WARN("fail to try reload freeze info", KR(ret), K_(tenant_id), K_(is_primary_service),
+                   K(proposal_id));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
+        }
 
         bool need_broadcast = false;
         ret = OB_SUCCESS; // ignore ret
-        if (OB_FAIL(check_need_broadcast(need_broadcast))) {
-          LOG_WARN("fail to check need broadcast", KR(ret), K_(tenant_id));
+        if (OB_FAIL(check_need_broadcast(need_broadcast, proposal_id))) {
+          LOG_WARN("fail to check need broadcast", KR(ret), K_(tenant_id), K(proposal_id));
         }
 
         if (need_broadcast) {
@@ -124,10 +153,18 @@ void ObFreezeInfoDetector::run3()
         }
 
         ret = OB_SUCCESS;
+<<<<<<< HEAD
         if (OB_FAIL(freeze_info_mgr_->check_snapshot_gc_scn())) {
           LOG_WARN("fail to check_snapshot_gc_ts", KR(ret), K_(tenant_id));
+=======
+        // only primary tenant need to check_snapshot_gc_scn.
+        if (is_primary_service() && need_check_snapshot_gc_scn(start_time_us)) {
+          if (OB_FAIL(freeze_info_mgr_->check_snapshot_gc_scn())) {
+            LOG_WARN("fail to check_snapshot_gc_ts", KR(ret), K_(tenant_id));
+          }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         }
-        
+
         ret = OB_SUCCESS;
         if (OB_FAIL(try_update_zone_info(proposal_id))) {
           LOG_WARN("fail to try update zone info", KR(ret), K_(tenant_id), K(proposal_id));
@@ -143,12 +180,14 @@ void ObFreezeInfoDetector::run3()
   LOG_INFO("stop freeze_info_detector", K_(tenant_id));
 }
 
-int ObFreezeInfoDetector::check_need_broadcast(bool &need_broadcast)
+int ObFreezeInfoDetector::check_need_broadcast(bool &need_broadcast, const int64_t expected_epoch)
 {
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret), K_(tenant_id));
+  } else if (OB_FAIL(try_adjust_global_merge_info(expected_epoch))) {
+    LOG_WARN("fail to try adjust global merge info", KR(ret), K_(tenant_id));
   } else if (OB_FAIL(freeze_info_mgr_->check_need_broadcast(need_broadcast))) {
     LOG_WARN("fail to check need broadcast", KR(ret), K_(tenant_id));
   }
@@ -276,6 +315,103 @@ int ObFreezeInfoDetector::signal()
     LOG_WARN("fail to signal", KR(ret));
   }
   return ret;
+}
+
+int ObFreezeInfoDetector::check_tenant_is_restore(
+    const uint64_t tenant_id,
+    bool &is_restore)
+{
+  int ret = OB_SUCCESS;
+  is_restore = false;
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(ObMultiVersionSchemaService::get_instance().check_tenant_is_restore(
+                     NULL, tenant_id, is_restore))) {
+    LOG_WARN("fail to check tenant restore", KR(ret), K(tenant_id));
+  }
+  return ret;
+}
+
+int ObFreezeInfoDetector::try_reload_freeze_info(const int64_t expected_epoch)
+{
+  int ret = OB_SUCCESS;
+  bool is_match = true;
+  if (!is_primary_service()) {
+    bool is_restore = false;
+    if (OB_FAIL(check_tenant_is_restore(tenant_id_, is_restore))) {
+      LOG_WARN("fail to check tenant is restore", KR(ret), K_(tenant_id), K_(is_primary_service));
+    } else if (is_restore) {
+      LOG_INFO("skip restoring tenant to reload freeze_info", K_(tenant_id), K(is_restore),
+               K_(is_primary_service));
+    } else if (OB_FAIL(ObServiceEpochProxy::check_service_epoch(*sql_proxy_, tenant_id_,
+                ObServiceEpochProxy::FREEZE_SERVICE_EPOCH, expected_epoch, is_match))) {
+      LOG_WARN("fail to check freeze service epoch", KR(ret), K_(tenant_id), K_(is_primary_service));
+    } else if (!is_match) {
+      ret = OB_FREEZE_SERVICE_EPOCH_MISMATCH;
+      LOG_WARN("cannot reload freeze_info now, cuz freeze_service_epoch mismatch", KR(ret),
+               K_(tenant_id), K_(is_primary_service));
+    } else if (OB_ISNULL(freeze_info_mgr_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("fail to try reload freeze info, freeze info manager is null", KR(ret),
+               K_(tenant_id), K_(is_primary_service));
+    } else if (OB_FAIL(freeze_info_mgr_->reload())) {
+      LOG_WARN("fail to reload freeze_info", KR(ret), K_(tenant_id), K_(is_primary_service));
+    }
+  }
+  return ret;
+}
+
+int ObFreezeInfoDetector::try_adjust_global_merge_info(const int64_t expected_epoch)
+{
+  int ret = OB_SUCCESS;
+  bool is_initial = false;
+  if (!is_primary_service() && !is_global_merge_info_adjusted_) {
+    bool is_restore = false;
+    if (OB_FAIL(check_tenant_is_restore(tenant_id_, is_restore))) {
+      LOG_WARN("fail to check tenant is restore", KR(ret), K_(tenant_id), K_(is_primary_service));
+    } else if (is_restore) {
+      LOG_INFO("skip restoring tenant to adjust global merge info",
+               K_(tenant_id), K(is_restore), K_(is_primary_service));
+    } else if (OB_FAIL(check_global_merge_info(is_initial))) {
+      LOG_WARN("fail to check global merge info", KR(ret), K_(tenant_id), K_(is_primary_service));
+    } else if (!is_initial) {
+      // avoid check again, e.g., when switch leader
+      is_global_merge_info_adjusted_ = true;
+    } else if (OB_ISNULL(freeze_info_mgr_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("fail to try adjust global merge info, freeze info manager is null", KR(ret),
+               K_(tenant_id), K_(is_primary_service));
+    } else if (OB_FAIL(freeze_info_mgr_->adjust_global_merge_info(expected_epoch))) {
+      LOG_WARN("fail to adjust global merge info", KR(ret), K_(tenant_id), K_(is_primary_service));
+    } else {
+      is_global_merge_info_adjusted_ = true;
+    }
+  }
+  return ret;
+}
+
+int ObFreezeInfoDetector::check_global_merge_info(bool &is_initial) const
+{
+  int ret = OB_SUCCESS;
+  is_initial = false;
+  HEAP_VAR(ObGlobalMergeInfo, global_merge_info) {
+    if (OB_FAIL(ObGlobalMergeTableOperator::load_global_merge_info(*sql_proxy_,
+                tenant_id_, global_merge_info))) {
+      LOG_WARN("fail to get global merge info", KR(ret), K_(tenant_id), K_(is_primary_service));
+    } else if ((global_merge_info.last_merged_scn_.get_scn().is_base_scn()) &&
+               (global_merge_info.global_broadcast_scn_.get_scn().is_base_scn()) &&
+               (global_merge_info.frozen_scn_.get_scn().is_base_scn())) {
+      is_initial = true;
+    }
+  }
+  return ret;
+}
+
+bool ObFreezeInfoDetector::need_check_snapshot_gc_scn(const int64_t start_time_us)
+{
+  const int64_t START_CHECK_INTERVAL_US = 10 * 60 * 1000 * 1000; // 10 min
+  return (ObTimeUtility::current_time() - start_time_us) > START_CHECK_INTERVAL_US;
 }
 
 } //end rootserver

@@ -62,7 +62,7 @@ ObAsyncTask *ObEventTableClearTask::deep_copy(char *buf, const int64_t buf_size)
 {
   ObEventTableClearTask *task = NULL;
   if (NULL == buf || buf_size < static_cast<int64_t>(sizeof(*this))) {
-    LOG_WARN("buffer not large enough", K(buf_size));
+    LOG_WARN_RET(OB_BUF_NOT_ENOUGH, "buffer not large enough", K(buf_size));
   } else {
     task = new(buf) ObEventTableClearTask(rs_event_operator_,
                                           server_event_operator_,
@@ -104,7 +104,7 @@ int64_t ObEventHistoryTableOperator::ObEventTableUpdateTask::hash() const
 {
   int64_t hash_value = 0;
   if (!this->is_valid()) {
-    LOG_WARN("invalid event table update task", "task", *this);
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid event table update task", "task", *this);
   } else {
     hash_value = reinterpret_cast<int64_t>(sql_.ptr());
   }
@@ -116,13 +116,13 @@ bool ObEventHistoryTableOperator::ObEventTableUpdateTask::operator==(
 {
   bool is_equal = false;
   if (!this->is_valid()) {
-    LOG_WARN("invalid event table update task", "task", *this);
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid event table update task", "task", *this);
   } else if (this->get_type() != other.get_type()) {
     is_equal = false;
   } else {
     const ObEventTableUpdateTask &o = static_cast<const ObEventTableUpdateTask &>(other);
     if (!o.is_valid()) {
-      LOG_WARN("invalid event table update task", "task", o);
+      LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid event table update task", "task", o);
     } else if (this == &other) {
       is_equal = true;
     } else {
@@ -138,9 +138,9 @@ IObDedupTask *ObEventHistoryTableOperator::ObEventTableUpdateTask::deep_copy(
 {
   ObEventTableUpdateTask *task = NULL;
   if (!this->is_valid()) {
-    LOG_WARN("invalid event table update task", "task", *this);
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid event table update task", "task", *this);
   } else if (NULL == buf || buf_size < get_deep_copy_size()) {
-    LOG_WARN("invalid argument", "buf", reinterpret_cast<int64_t>(buf), K(buf_size),
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid argument", "buf", reinterpret_cast<int64_t>(buf), K(buf_size),
         "need size", get_deep_copy_size());
   } else {
     task = new (buf) ObEventTableUpdateTask(table_operator_, is_delete_);
@@ -166,7 +166,9 @@ int ObEventHistoryTableOperator::ObEventTableUpdateTask::process()
 ObEventHistoryTableOperator::ObEventHistoryTableOperator()
   : inited_(false), stopped_(false), last_event_ts_(0),
     lock_(ObLatchIds::RS_EVENT_TS_LOCK), proxy_(NULL), event_queue_(),
-    event_table_name_(NULL), self_addr_(), is_rootservice_event_history_(false)
+    event_table_name_(NULL), self_addr_(), is_rootservice_event_history_(false),
+    is_server_event_history_(false),
+    timer_()
 {
 }
 
@@ -182,13 +184,17 @@ int ObEventHistoryTableOperator::init(common::ObMySQLProxy &proxy)
     LOG_WARN("init twice", K(ret));
   } else {
     const int64_t thread_count = 1;
+    const int64_t queue_size_square_of_2 = 10;
     if (OB_FAIL(event_queue_.init(thread_count, "EvtHisUpdTask", TASK_QUEUE_SIZE, TASK_MAP_SIZE,
         TOTAL_LIMIT, HOLD_LIMIT, PAGE_SIZE))) {
       LOG_WARN("task_queue_ init failed", K(thread_count), LITERAL_K(TASK_QUEUE_SIZE),
           LITERAL_K(TASK_MAP_SIZE), LITERAL_K(TOTAL_LIMIT), LITERAL_K(HOLD_LIMIT),
           LITERAL_K(PAGE_SIZE), K(ret));
+    } else if (is_server_event_history_ &&
+          OB_FAIL(timer_.init_and_start(thread_count, 5_s, "EventTimer", queue_size_square_of_2))) {
+      LOG_WARN("int global event report timer failed", KR(ret));
     } else {
-      event_queue_.set_label(ObModIds::OB_RS_EVENT_QUEUE);
+      event_queue_.set_attr(SET_USE_500(ObMemAttr(OB_SERVER_TENANT_ID, ObModIds::OB_RS_EVENT_QUEUE)));
       proxy_ = &proxy;
       inited_ = true;
       stopped_ = false;
@@ -201,6 +207,7 @@ void ObEventHistoryTableOperator::destroy()
 {
   stopped_ = true;
   event_queue_.destroy();
+  timer_.stop_and_wait();
   // allocator should destroy after event_queue_ destroy
   inited_ = false;
 }
@@ -325,5 +332,50 @@ int ObEventHistoryTableOperator::process_task(const ObString &sql, const bool is
   return ret;
 }
 
+int ObEventHistoryTableOperator::add_event_to_timer_(const common::ObSqlString &sql)
+{
+  int ret = OB_SUCCESS;
+  int retry_times = 0;
+  ObAddr self_addr = self_addr_;
+  common::ObMySQLProxy *proxy = proxy_;
+  ObUniqueGuard<ObStringHolder> uniq_holder;
+  if (OB_FAIL(ob_make_unique(uniq_holder))) {
+    SHARE_LOG(WARN, "fail to make unique guard");
+  } else if (OB_FAIL(uniq_holder->assign(sql.string()))) {
+    SHARE_LOG(WARN, "fail to create unique ownership of string");
+  } else if (OB_FAIL(timer_.schedule_task_ignore_handle_repeat_and_immediately(15_s, [retry_times, self_addr, uniq_holder, proxy]() mutable -> bool {
+    int ret = OB_SUCCESS;
+    bool stop_flag = false;
+    char ip[64] = {0};
+    int64_t affected_rows = 0;
+    const char *sql = to_cstring(uniq_holder->get_ob_string());
+    if (OB_ISNULL(proxy)) {
+      SHARE_LOG(WARN, "proxy_ is NULL", KP(proxy));
+    } else if (!self_addr.ip_to_string(ip, sizeof(ip))) {
+      ret = OB_ERR_UNEXPECTED;
+      SHARE_LOG(WARN, "ip to string failed");
+    } else if (OB_FAIL(proxy->write(sql, affected_rows))) {
+      SHARE_LOG(WARN, "sync execute sql failed", K(sql), K(ret));
+    } else if (!is_single_row(affected_rows)) {
+      ret = OB_ERR_UNEXPECTED;
+      SHARE_LOG(WARN, "affected_rows expected to be one", K(affected_rows), K(ret));
+    } else {
+      ObTaskController::get().allow_next_syslog();
+      SHARE_LOG(INFO, "event table sync add event success", K(ret), K(sql));
+    }
+    if (++retry_times > MAX_RETRY_COUNT || OB_SUCC(ret)) {
+      // this may happened cause inner sql may not work for a long time,
+      // but i have tried my very best, so let it miss.
+      if (retry_times > MAX_RETRY_COUNT) {
+        SHARE_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "fail to schedule report event task cause retry too much times");
+      }
+      stop_flag = true;
+    }
+    return stop_flag;
+  }))) {
+    SHARE_LOG(ERROR, "fail to schedule report event task");
+  }
+  return ret;
+}
 }//end namespace rootserver
 }//end namespace oceanbase

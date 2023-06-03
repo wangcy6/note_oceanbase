@@ -28,7 +28,16 @@ class ObLogExprValues : public ObLogicalOperator
     {}
     virtual ~ObLogExprValues() {}
     int add_values_expr(const common::ObIArray<ObRawExpr *> &value_exprs);
+    int add_values_desc(const common::ObIArray<ObColumnRefRawExpr *> &value_desc);
 
+    const common::ObIArray<ObColumnRefRawExpr *> &get_value_desc() const
+    {
+      return value_desc_;
+    }
+    common::ObIArray<ObColumnRefRawExpr *> &get_value_desc()
+    {
+      return value_desc_;
+    }
     const common::ObIArray<ObRawExpr *> &get_value_exprs() const
     {
       return value_exprs_;
@@ -45,26 +54,31 @@ class ObLogExprValues : public ObLogicalOperator
     const ObErrLogDefine &get_err_log_define() const { return err_log_define_; }
 
     virtual int est_cost() override;
+    virtual int do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost);
     virtual int compute_op_ordering() override;
     virtual int compute_equal_set() override;
     virtual int compute_table_set() override;
     virtual int compute_fd_item_set() override;
     virtual int compute_one_row_info() override;
     virtual int compute_sharding_info() override;
+    virtual int compute_op_parallel_and_server_info() override;
     virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
+    virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
     virtual int allocate_expr_post(ObAllocExprContext &ctx) override;
     int extract_err_log_info();
     int mark_probably_local_exprs();
     int allocate_dummy_output();
+    virtual int inner_replace_op_exprs(
+        const common::ObIArray<std::pair<ObRawExpr *, ObRawExpr*>> &to_replace_exprs) override;
+
+    virtual int get_plan_item_info(PlanText &plan_text,
+                                ObSqlPlanItem &plan_item) override;
   private:
     int construct_array_binding_values();
     int construct_sequence_values();
-    virtual int print_my_plan_annotation(char *buf,
-                                         int64_t &buf_len,
-                                         int64_t &pos,
-                                         ExplainType type);
   private:
     common::ObSEArray<ObRawExpr*, 4, common::ModulePageAllocator, true> value_exprs_;
+    common::ObSEArray<ObColumnRefRawExpr*, 4, common::ModulePageAllocator, true> value_desc_;
     //add for error_logging
     ObErrLogDefine err_log_define_;
 

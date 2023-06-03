@@ -27,8 +27,6 @@ class ObMutex;
 }
 namespace rootserver 
 {
-  
-class ObServerManager;
 class ObZoneManager;
 class ObBackupTaskScheduler;
 class ObBackupService;
@@ -43,8 +41,7 @@ public:
   virtual ~ObBackupTaskSchedulerQueue();
 
   int init(ObTenantBackupScheduleTaskStatMap &tenant_stat_map,
-           ObServerBackupScheduleTaskStatMap &server_stat_map, 
-           ObServerManager &server_manager,
+           ObServerBackupScheduleTaskStatMap &server_stat_map,
            ObZoneManager &zone_manager,
 	         ObBackupService &backup_mgr,
            const int64_t bucket_num, 
@@ -63,7 +60,7 @@ public:
   // get one task from wait_list_, for per task choosing a server to execute,
   // then set to scheduler state and move to schedule_list;
   // return OB_SUCCESS or assign NULL to task, if no task can be scheduled
-  int pop_task(ObBackupScheduleTask *&task);
+  int pop_task(ObBackupScheduleTask *&output_task, common::ObArenaAllocator &allocator);
   int execute_over(const ObBackupScheduleTask &task, const int execute_ret);
   // remove task 
   // When finished, task memory will be released and %task can not be used again.
@@ -129,7 +126,6 @@ private:
   TaskMap task_map_;
   obrpc::ObSrvRpcProxy *rpc_proxy_;
   ObBackupTaskScheduler *task_scheduler_;
-  ObServerManager *server_mgr_;
   ObZoneManager *zone_mgr_;
   ObBackupService *backup_service_;
   common::ObMySQLProxy *sql_proxy_; 
@@ -155,8 +151,7 @@ public:
 public:
   ObBackupTaskScheduler();
 
-  int init(ObServerManager *server_mgr, 
-           ObZoneManager *zone_mgr_,
+  int init(ObZoneManager *zone_mgr_,
            obrpc::ObSrvRpcProxy *rpc_proxy,
            ObBackupService *backup_mgr,
            common::ObMySQLProxy &sql_proxy,
@@ -184,8 +179,6 @@ public:
   int reload_task_(int64_t &last_reload_task_ts, bool &reload_flag);
   share::schema::ObMultiVersionSchemaService &get_schema_service() { return *schema_service_; }
 private:
-  // Return OB_SUCCESS or assign NULL to %task, if no task can be scheduled
-  int pop_task_(ObBackupScheduleTask *&task);
   // Send task to execute.
   int execute_task_(const ObBackupScheduleTask &task);
   int do_execute_(const ObBackupScheduleTask &task);
@@ -204,7 +197,6 @@ private:
   ObBackupTaskSchedulerQueue queue_;
   // scheduler's self server addr
   common::ObAddr self_;
-  ObServerManager *server_mgr_;
   ObZoneManager *zone_mgr_;
   obrpc::ObSrvRpcProxy *rpc_proxy_;
   ObBackupService *backup_service_;

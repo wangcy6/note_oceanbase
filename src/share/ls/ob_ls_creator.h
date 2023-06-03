@@ -45,7 +45,10 @@ namespace share
 {
 
 class SCN;
+<<<<<<< HEAD
 class ObServerManager;
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 struct ObLSReplicaAddr
 {
   common::ObAddr addr_;
@@ -113,25 +116,39 @@ public:
       const common::ObIArray<share::ObUnit> &unit_array);
   bool is_valid();
 private:
- int do_create_ls_(const ObLSAddr &addr, const share::ObLSStatusInfo &info,
+ int do_create_ls_(const ObLSAddr &addr,
+                   ObMember &arbitration_service,
+                   const share::ObLSStatusInfo &info,
                    const int64_t paxos_replica_num,
                    const SCN &create_scn,
                    const common::ObCompatibilityMode &compat_mode,
                    common::ObMemberList &member_list,
                    const bool create_with_palf,
-                   const palf::PalfBaseInfo &palf_base_info);
+                   const palf::PalfBaseInfo &palf_base_info,
+                   common::GlobalLearnerList &learner_list);
  int process_after_has_member_list_(const common::ObMemberList &member_list,
-                                    const int64_t paxos_replica_num);
+                                    const common::ObMember &arbitration_service,
+                                    const int64_t paxos_replica_num,
+                                    const common::GlobalLearnerList &learner_list);
  int create_ls_(const ObILSAddr &addr, const int64_t paxos_replica_num,
                 const share::ObAllTenantInfo &tenant_info,
                 const SCN &create_scn,
                 const common::ObCompatibilityMode &compat_mode,
                 const bool create_with_palf,
                 const palf::PalfBaseInfo &palf_base_info,
-                common::ObMemberList &member_list);
+                common::ObMemberList &member_list,
+                common::ObMember &arbitration_service,
+                common::GlobalLearnerList &learner_list);
+ int check_member_list_and_learner_list_all_in_meta_table_(
+                const common::ObMemberList &member_list,
+                const common::GlobalLearnerList &learner_list);
  int set_member_list_(const common::ObMemberList &member_list,
-                      const int64_t paxos_replica_num);
- int persist_ls_member_list_(const common::ObMemberList &member_list);
+                      const common::ObMember &arbitration_service,
+                      const int64_t paxos_replica_num,
+                      const common::GlobalLearnerList &learner_list);
+ int persist_ls_member_list_(const common::ObMemberList &member_list,
+                             const ObMember &arb_member,
+                             const common::GlobalLearnerList &learner_list);
 
  // interface for oceanbase 4.0
  int alloc_sys_ls_addr(const uint64_t tenant_id,
@@ -149,9 +166,32 @@ private:
                         ObLSReplicaAddr &ls_replica_addr);
  int check_create_ls_result_(const int64_t rpc_count,
                             const int64_t paxos_replica_num,
-                            common::ObMemberList &member_list);
+                            const ObIArray<int> &return_code_array,
+                            common::ObMemberList &member_list,
+                            common::GlobalLearnerList &learner_list);
  int check_set_memberlist_result_(const int64_t rpc_count,
+                            const ObIArray<int> &return_code_array,
                             const int64_t paxos_replica_num);
+
+  // alloc ls addr for duplicate log stream
+  // @params[in]  tenant_id, which tenant's log stream
+  // @params[in]  zone_locality_array, locality describtion
+  // @params[out] ls_addr, which server to create this log stream
+  int alloc_duplicate_ls_addr_(
+      const uint64_t tenant_id,
+      const share::schema::ZoneLocalityIArray &zone_locality_array,
+      ObILSAddr &ls_addr);
+
+  // compensate readonly replica for duplicate ls
+  // @params[in]  zlocality, locality describtion in one zone
+  // @params[in]  exclude_replica, already allocated-replica in locality
+  // @params[in]  unit_info_array, tenant's all unit
+  // @params[out] ls_addr, which server to create this lpg stream
+  int compensate_zone_readonly_replica_(
+      const share::ObZoneReplicaAttrSet &zlocality,
+      const ObLSReplicaAddr &exclude_replica,
+      const common::ObIArray<share::ObUnit> &unit_info_array,
+      ObILSAddr &ls_addr);
 
 private:
   rootserver::ObLSCreatorProxy create_ls_proxy_;

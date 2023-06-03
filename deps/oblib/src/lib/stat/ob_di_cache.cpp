@@ -13,6 +13,7 @@
 #include "lib/stat/ob_di_cache.h"
 #include "lib/random/ob_random.h"
 #include "lib/stat/ob_session_stat.h"
+#include "lib/ob_lib_config.h"
 
 namespace oceanbase
 {
@@ -76,7 +77,7 @@ ObDISessionCache &ObDISessionCache::get_instance()
 int ObDISessionCache::get_node(uint64_t session_id, ObDISessionCollect *&session_collect)
 {
   int ret = OB_SUCCESS;
-  ObRandom *random = ObDITls<ObRandom>::get_instance();
+  thread_local ObRandom random;
   ObSessionBucket &bucket = di_map_[session_id % OB_MAX_SERVER_SESSION_CNT];
   while (1) {
     bucket.lock_.rdlock();
@@ -90,7 +91,7 @@ int ObDISessionCache::get_node(uint64_t session_id, ObDISessionCollect *&session
       bucket.lock_.unlock();
       int64_t pos = 0;
       while (1) {
-        pos = random->get(0, OB_MAX_SERVER_SESSION_CNT-1);
+        pos = random.get(0, OB_MAX_SERVER_SESSION_CNT-1);
         if (OB_SUCCESS == (ret = collects_[pos].lock_.try_wrlock())) {
           break;
         }
@@ -220,17 +221,23 @@ ObDIThreadTenantCache::ObDIThreadTenantCache()
 ObDIThreadTenantCache::~ObDIThreadTenantCache()
 {
   ObDIGlobalTenantCache::get_instance().unlink(this);
+  lib::ObDisableDiagnoseGuard disable_diagnose_guard;
+  if (extend_tenant_cache_ != nullptr) {
+    ob_delete(extend_tenant_cache_);
+    extend_tenant_cache_ = nullptr;
+  }
 }
 
 int ObDIThreadTenantCache::get_node(uint64_t tenant_id, ObDITenantCollect *&tenant_collect)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(tenant_collect = tenant_cache_.get_node(tenant_id, tenant_collect))) {
+  if (OB_ISNULL(tenant_collect = tenant_cache_.get_node(tenant_id))) {
     if (nullptr == extend_tenant_cache_) {
-      extend_tenant_cache_ = ObDITls<ObDIBaseTenantCache<MAX_TENANT_NUM_PER_SERVER>>::get_instance();
+      extend_tenant_cache_ = OB_NEW(ObDIBaseTenantCache<MAX_TENANT_NUM_PER_SERVER>,
+                                    SET_USE_500("di_tenant_cache"));
     }
     if (nullptr != extend_tenant_cache_) {
-      tenant_collect = extend_tenant_cache_->get_node(tenant_id, tenant_collect);
+      tenant_collect = extend_tenant_cache_->get_node(tenant_id, true /*replace*/);
     }
     if (nullptr == tenant_collect) {
       ret = OB_TENANT_NOT_EXIST;

@@ -124,10 +124,10 @@ typedef ObFixedSizeBlockMemoryContext<OB_DEFAULT_MACRO_BLOCK_SIZE> ObMacroBlockS
 template<int64_t SIZE>
 ObFixedSizeBlockAllocator<SIZE>::ObFixedSizeBlockAllocator() :
     is_inited_(false),
-    lock_(),
+    lock_(common::ObLatchIds::FIXED_SIZE_ALLOCATOR_LOCK),
     total_block_num_(0),
     max_block_num_(0),
-    allocator_(ObModIds::OB_FIXED_SIZE_BLOCK_ALLOCATOR),
+    allocator_(SET_USE_500(ObMemAttr(OB_SERVER_TENANT_ID, ObModIds::OB_FIXED_SIZE_BLOCK_ALLOCATOR))),
     free_blocks_(),
     block_buf_list_(allocator_)
 {
@@ -146,12 +146,14 @@ int ObFixedSizeBlockAllocator<SIZE>::init(const int64_t block_num, const lib::Ob
   } else if (OB_FAIL(init_max_block_num())) {
     COMMON_LOG(WARN, "init max block number fail", K(ret));
   } else {
+    ObMemAttr attr(OB_SERVER_TENANT_ID, label);
+    SET_USE_500(attr);
     ObSpinLockGuard guard(lock_);
     if (IS_NOT_INIT) {
-      if (OB_FAIL(free_blocks_.init(max_block_num_))) {
+      if (OB_FAIL(free_blocks_.init(max_block_num_, global_default_allocator, attr))) {
         COMMON_LOG(WARN, "fail to init free blocks queue", K(ret));
       } else {
-        allocator_.set_label(label);
+        allocator_.set_attr(attr);
         if (OB_FAIL(expand(block_num))) {
           COMMON_LOG(WARN, "fail to init cached block buffer", K(ret), K(block_num));
         }
@@ -406,7 +408,7 @@ template<int64_t SIZE>
 void ObFixedSizeBlockMemoryContext<SIZE>::destroy()
 {
   if (0 != used_block_num_) {
-    COMMON_LOG(ERROR, "not all block be freed, potential memory leak!", K(used_block_num_));
+    COMMON_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "not all block be freed, potential memory leak!", K(used_block_num_));
   }
   used_block_num_ = 0;
   is_inited_ = false;

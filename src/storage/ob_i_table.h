@@ -24,7 +24,10 @@
 #include "storage/ob_i_store.h"
 #include "storage/access/ob_table_read_info.h"
 #include "storage/meta_mem/ob_tenant_meta_obj_pool.h"
+<<<<<<< HEAD
 #include "share/leak_checker/obj_leak_checker.h"
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 #include "share/ob_table_range.h"
 #include "share/scn.h"
 
@@ -68,6 +71,7 @@ struct ObTableAccessParam;
 struct ObTableAccessContext;
 struct ObRowsInfo;
 class ObStoreRowIterator;
+struct ObStoreCtx;
 
 class ObITable
 {
@@ -86,9 +90,10 @@ public:
     MAJOR_SSTABLE = 10,
     MINOR_SSTABLE = 11,
     MINI_SSTABLE = 12,
-    BUF_MINOR_SSTABLE = 13,
-    KV_DUMP_SSTABLE = 14,
+    META_MAJOR_SSTABLE = 13,
+    DDL_DUMP_SSTABLE = 14,
     REMOTE_LOGICAL_MINOR_SSTABLE = 15,
+    DDL_MEM_SSTABLE = 16,
     // < add new sstable before here, See is_sstable()
     MAX_TABLE_TYPE
   };
@@ -102,6 +107,7 @@ public:
     TableKey();
 
     uint64_t hash() const;
+    int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
     void reset();
     OB_INLINE bool is_valid() const;
     OB_INLINE bool operator ==(const TableKey &table_key) const;
@@ -117,9 +123,14 @@ public:
     OB_INLINE bool is_minor_sstable() const { return ObITable::is_minor_sstable(table_type_); }
     OB_INLINE bool is_mini_sstable() const { return ObITable::is_mini_sstable(table_type_); }
     OB_INLINE bool is_major_sstable() const { return ObITable::is_major_sstable(table_type_); }
-    OB_INLINE bool is_buf_minor_sstable() const { return ObITable::is_buf_minor_sstable(table_type_); }
+    OB_INLINE bool is_meta_major_sstable() const { return ObITable::is_meta_major_sstable(table_type_); }
     OB_INLINE bool is_multi_version_table() const { return ObITable::is_multi_version_table(table_type_); }
     OB_INLINE bool is_ddl_sstable() const { return ObITable::is_ddl_sstable(table_type_); }
+<<<<<<< HEAD
+=======
+    OB_INLINE bool is_ddl_dump_sstable() const { return ObITable::is_ddl_dump_sstable(table_type_); }
+    OB_INLINE bool is_ddl_mem_sstable() const { return ObITable::is_ddl_mem_sstable(table_type_); }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     OB_INLINE bool is_table_with_scn_range() const { return ObITable::is_table_with_scn_range(table_type_); }
     OB_INLINE bool is_remote_logical_minor_sstable() const { return ObITable::is_remote_logical_minor_sstable(table_type_); }
 
@@ -128,7 +139,7 @@ public:
     OB_INLINE share::SCN get_end_scn() const { return scn_range_.end_scn_; }
     OB_INLINE int64_t get_snapshot_version() const
     {
-      OB_ASSERT(is_major_sstable());
+      OB_ASSERT(is_major_sstable() || is_meta_major_sstable());
       return version_range_.snapshot_version_;
     }
     OB_INLINE TableKey& operator=(const TableKey &key)
@@ -156,6 +167,7 @@ public:
 
   int init(const TableKey &table_key);
   void reset();
+  virtual int safe_to_destroy(bool &is_safe);
   OB_INLINE const TableKey &get_key() const { return key_; }
   void set_scn_range(share::ObScnRange scn_range) { key_.scn_range_ = scn_range; }
   void set_table_type(ObITable::TableType table_type) { key_.table_type_ = table_type; }
@@ -226,11 +238,18 @@ public:
   virtual bool is_lock_memtable() const { return is_lock_memtable(key_.table_type_); }
   virtual bool is_frozen_memtable() const { return false; }
   virtual bool is_active_memtable() const { return false; }
+<<<<<<< HEAD
   virtual bool is_buf_minor_sstable() const { return is_buf_minor_sstable(key_.table_type_); }
+=======
+  virtual bool is_meta_major_sstable() const { return is_meta_major_sstable(key_.table_type_); }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   OB_INLINE bool is_table_with_scn_range() const { return is_table_with_scn_range(key_.table_type_); }
   virtual OB_INLINE int64_t get_timestamp() const { return 0; }
   virtual bool is_ddl_sstable() const { return is_ddl_sstable(key_.table_type_); }
+  virtual bool is_ddl_dump_sstable() const { return is_ddl_dump_sstable(key_.table_type_); }
+  virtual bool is_ddl_mem_sstable() const { return is_ddl_mem_sstable(key_.table_type_); }
   virtual bool is_remote_logical_minor_sstable() const { return is_remote_logical_minor_sstable(key_.table_type_); }
+  virtual bool is_empty() const = 0;
   DECLARE_VIRTUAL_TO_STRING;
 
   static bool is_sstable(const TableType table_type)
@@ -245,7 +264,6 @@ public:
   {
     return ObITable::TableType::MINOR_SSTABLE == table_type
       || ObITable::TableType::MINI_SSTABLE == table_type
-      || ObITable::TableType::BUF_MINOR_SSTABLE == table_type
       || ObITable::TableType::REMOTE_LOGICAL_MINOR_SSTABLE == table_type;
   }
   static bool is_multi_version_minor_sstable(const TableType table_type)
@@ -308,17 +326,30 @@ public:
     return ObITable::TableType::LOCK_MEMTABLE == table_type;
   }
 
-  static bool is_buf_minor_sstable(const TableType table_type)
+  static bool is_meta_major_sstable(const TableType table_type)
   {
-    return ObITable::TableType::BUF_MINOR_SSTABLE == table_type;
+    return ObITable::TableType::META_MAJOR_SSTABLE == table_type;
   }
   static bool is_ddl_sstable(const TableType table_type)
   {
-    return ObITable::TableType::KV_DUMP_SSTABLE == table_type;
+    return ObITable::TableType::DDL_DUMP_SSTABLE == table_type
+      || ObITable::TableType::DDL_MEM_SSTABLE == table_type;
+  }
+<<<<<<< HEAD
+  static bool is_table_with_scn_range(const TableType table_type)
+=======
+  static bool is_ddl_dump_sstable(const TableType table_type)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
+  {
+    return ObITable::TableType::DDL_DUMP_SSTABLE == table_type;
+  }
+  static bool is_ddl_mem_sstable(const TableType table_type)
+  {
+    return ObITable::TableType::DDL_MEM_SSTABLE == table_type;
   }
   static bool is_table_with_scn_range(const TableType table_type)
   {
-    return is_multi_version_table(table_type) || is_buf_minor_sstable(table_type);
+    return is_multi_version_table(table_type) || is_meta_major_sstable(table_type);
   }
   OB_INLINE static const char* get_table_type_name(const TableType &table_type)
   {
@@ -387,7 +418,6 @@ private:
   ObTenantMetaMemMgr *t3m_;
   common::ObIAllocator *allocator_;
   ObITable::TableType table_type_;
-  DEFINE_OBJ_LEAK_DEBUG_NODE(node_);
 };
 
 class ObTablesHandleArray final

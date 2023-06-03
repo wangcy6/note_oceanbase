@@ -25,6 +25,7 @@
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
 #include "lib/function/ob_function.h"
 #include "logservice/ob_server_log_block_mgr.h"
+#include "storage/blocksstable/ob_shared_macro_block_manager.h"
 
 namespace oceanbase
 {
@@ -51,7 +52,7 @@ int ObDiskUsageReportTask::init(ObMySQLProxy &sql_proxy)
   if (is_inited_) {
     ret = OB_INIT_TWICE;
     STORAGE_LOG(WARN, "init twice", K(ret));
-  } else if (OB_FAIL(result_map_.create(OB_MAX_SERVER_TENANT_CNT * 5, lib::ObLabel("OB_DISK_REP")))) {
+  } else if (OB_FAIL(result_map_.create(OB_MAX_SERVER_TENANT_CNT * 5, SET_USE_500("OB_DISK_REP")))) {
     STORAGE_LOG(WARN, "Failed to create result_map_", K(ret));
   } else if (OB_FAIL(disk_usage_table_operator_.init(sql_proxy))) {
     STORAGE_LOG(WARN, "failed to init disk_usage_table_operator_", K(ret));
@@ -219,7 +220,7 @@ int ObDiskUsageReportTask::count_tenant_data(const uint64_t tenant_id)
       if (OB_UNLIKELY(!tablet_handle.is_valid())) {
         ret = OB_ERR_UNEXPECTED;
         STORAGE_LOG(WARN, "unexpected invalid tablet", K(ret), K(tablet_handle));
-      } else if (OB_FAIL(tablet_handle.get_obj()->get_sstables_size(sstable_size))) {
+      } else if (OB_FAIL(tablet_handle.get_obj()->get_sstables_size(sstable_size, true /*ignore shared block*/))) {
         STORAGE_LOG(WARN, "failed to get new tablet's disk usage", K(ret), K(sstable_size));
       } else {
         data_size += sstable_size;
@@ -228,6 +229,7 @@ int ObDiskUsageReportTask::count_tenant_data(const uint64_t tenant_id)
     }
     if (OB_ITER_END == ret || OB_SUCCESS == ret) {
       ret = OB_SUCCESS;
+      data_size += MTL(ObSharedMacroBlockMgr*)->get_shared_block_cnt() * OB_DEFAULT_MACRO_BLOCK_SIZE;
       report_key.tenant_id_ = tenant_id;
       report_key.file_type_ = ObDiskReportFileType::OB_DISK_REPORT_TENANT_DATA;
       if (OB_FAIL(result_map_.set_refactored(report_key, data_size, 1))) {
@@ -382,18 +384,18 @@ int ObDiskUsageReportTask::count_server_clog()
   ObDiskUsageReportKey report_key;
   logservice::ObServerLogBlockMgr *log_block_mgr = GCTX.log_block_mgr_;
 
-  int64_t clog_free_size_byte = 0;
+  int64_t clog_in_use_size_byte = 0;
   int64_t clog_total_size_byte = 0;
 
   if (OB_ISNULL(log_block_mgr)) {
     ret = OB_NOT_INIT;
     SERVER_LOG(ERROR, "log_block_mgr is null", KR(ret), K(GCTX.log_block_mgr_));
-  } else if (OB_FAIL(log_block_mgr->get_disk_usage(clog_free_size_byte, clog_total_size_byte))) {
+  } else if (OB_FAIL(log_block_mgr->get_disk_usage(clog_in_use_size_byte, clog_total_size_byte))) {
     STORAGE_LOG(ERROR, "Failed to get clog stat ", KR(ret));
   } else {
     report_key.file_type_ = ObDiskReportFileType::OB_DISK_REPORT_TENANT_CLOG_DATA;
     report_key.tenant_id_ = OB_SERVER_TENANT_ID;
-    int64_t clog_space = clog_total_size_byte - clog_free_size_byte;
+    int64_t clog_space = clog_in_use_size_byte;
     if (OB_FAIL(result_map_.set_refactored(report_key, clog_space, 1))) {
       STORAGE_LOG(WARN, "failed to set result_map_", K(ret), K(report_key), K(clog_space));
     }
@@ -570,4 +572,3 @@ int ObDiskUsageReportTask::delete_tenant_usage_stat(const uint64_t tenant_id)
 
 } // namespace storage
 } // namespace oceanbase
-

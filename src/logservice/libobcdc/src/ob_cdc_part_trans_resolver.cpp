@@ -16,7 +16,7 @@
 
 #include "ob_cdc_part_trans_resolver.h"
 #include "ob_log_cluster_id_filter.h"     // ClusterIdFilter
-#include "ob_log_part_serve_info.h"       // PartServeInfo
+#include "logservice/logfetcher/ob_log_part_serve_info.h"       // PartServeInfo
 
 namespace oceanbase
 {
@@ -124,7 +124,8 @@ int64_t IObCDCPartTransResolver::MissingLogInfo::get_total_misslog_cnt() const
 
 int IObCDCPartTransResolver::MissingLogInfo::sort_and_unique_missing_log_lsn()
 {
-  return sort_and_unique_lsn_arr(miss_redo_or_state_lsn_arr_);
+  auto fn = [](palf::LSN &lsn1, palf::LSN &lsn2) { return lsn1 < lsn2; };
+  return sort_and_unique_array(miss_redo_or_state_lsn_arr_, fn);
 }
 
 // ***************  ObCDCPartTransResolver public functions ***************** //
@@ -146,7 +147,7 @@ ObCDCPartTransResolver::~ObCDCPartTransResolver()
 
 
 int ObCDCPartTransResolver::init(
-    const TenantLSID &tls_id,
+    const logservice::TenantLSID &tls_id,
     const int64_t start_commit_version)
 {
   tls_id_ = tls_id;
@@ -161,9 +162,9 @@ int ObCDCPartTransResolver::read(
     const int64_t pos_after_log_header,
     const palf::LSN &lsn,
     const int64_t submit_ts,
-    const PartServeInfo &serve_info,
+    const logfetcher::PartServeInfo &serve_info,
     MissingLogInfo &missing_info,
-    TransStatInfo &tsi)
+    logfetcher::TransStatInfo &tsi)
 {
   int ret = OB_SUCCESS;
   int pos = pos_after_log_header;
@@ -275,7 +276,7 @@ int ObCDCPartTransResolver::read_trans_log_(
     const transaction::ObTxLogHeader &tx_log_header,
     const palf::LSN &lsn,
     const int64_t submit_ts,
-    const PartServeInfo &serve_info,
+    const logfetcher::PartServeInfo &serve_info,
     MissingLogInfo &missing_info,
     bool &has_redo_in_cur_entry)
 {
@@ -705,7 +706,7 @@ int ObCDCPartTransResolver::handle_commit_(
     const transaction::ObTransID &tx_id,
     const palf::LSN &lsn,
     const int64_t submit_ts,
-    const PartServeInfo &serve_info,
+    const logfetcher::PartServeInfo &serve_info,
     MissingLogInfo &missing_info,
     transaction::ObTxLogBlock &tx_log_block,
     bool &is_served)
@@ -804,7 +805,8 @@ int ObCDCPartTransResolver::handle_commit_(
       (transaction::TransType)commit_log.get_trans_type(),
       commit_log.get_ls_log_info_arr(),
       lsn,
-      submit_ts))) {
+      submit_ts,
+      part_trans_dispatcher_.is_data_dict_dispatcher()))) {
     LOG_ERROR("commit PartTransTask failed", KR(ret), K_(tls_id), K(tx_id), K(trans_commit_version),
         K(lsn), K(submit_ts), K(commit_log), KPC(part_trans_task));
   }

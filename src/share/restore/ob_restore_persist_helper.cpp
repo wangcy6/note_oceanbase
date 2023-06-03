@@ -314,7 +314,7 @@ int ObLSRestoreProgressPersistInfo::parse_from(common::sqlclient::ObMySQLResult 
   EXTRACT_INT_FIELD_MYSQL(result, OB_STR_FINISH_TABLET_COUNT, finish_tablet_count_, int64_t);
   EXTRACT_INT_FIELD_MYSQL(result, OB_STR_TOTAL_BYTES, total_bytes_, int64_t);
   EXTRACT_INT_FIELD_MYSQL(result, OB_STR_FINISH_BYTES, finish_bytes_, int64_t);
-  EXTRACT_INT_FIELD_MYSQL(result, OB_STR_RESULT, result_, int64_t);
+  EXTRACT_INT_FIELD_MYSQL(result, OB_STR_RESULT, result_, int32_t);
 
   EXTRACT_STRBUF_FIELD_MYSQL(result, OB_STR_TRACE_ID, trace_id, OB_MAX_TRACE_ID_BUFFER_SIZE, real_length);
   EXTRACT_STRBUF_FIELD_MYSQL(result, OB_STR_COMMENT, comment, MAX_TABLE_COMMENT_LENGTH, real_length);
@@ -395,7 +395,7 @@ const char *ObHisRestoreJobPersistInfo::get_status_str() const
 int ObHisRestoreJobPersistInfo::get_status(const ObString &str_str) const
 {
   int status = -1;
-  for (int64_t i = 0; i < ARRAYSIZEOF(STATUS_STR); ++i) {
+  for (int32_t i = 0; i < ARRAYSIZEOF(STATUS_STR); ++i) {
     if (0 == str_str.case_compare(STATUS_STR[i])) {
       status = i;
       break;
@@ -788,7 +788,7 @@ int ObRestorePersistHelper::insert_initial_ls_restore_progress(
     LOG_WARN("ObRestorePersistHelper not init", K(ret));
   } else if (OB_FAIL(ls_restore_progress_table_operator.init(OB_ALL_LS_RESTORE_PROGRESS_TNAME, *this))) {
     LOG_WARN("failed to init ls restore progress table", K(ret));
-  } else if (OB_FAIL(ls_restore_progress_table_operator.insert_row(proxy, persist_info, affected_rows))) {
+  } else if (OB_FAIL(ls_restore_progress_table_operator.insert_or_update_row(proxy, persist_info, affected_rows))) {
     LOG_WARN("failed to insert initial ls restore progress", K(ret));
   }
 
@@ -979,6 +979,9 @@ int ObRestorePersistHelper::update_ls_restore_status(
   } else if (OB_FAIL(ls_restore_progress_table_operator.update_string_column(proxy, ls_key, OB_STR_COMMENT, 
       comment, affected_rows))) {
     LOG_WARN("fail to update comment", K(ret), K(ls_key), KP(comment));
+  } else if (affected_rows == 0) {
+    ret = OB_ENTRY_NOT_EXIST;
+    LOG_WARN("update row not exist", K(ret), K(ls_key));
   }
   return ret;
 }

@@ -174,7 +174,7 @@ REG_SER_FUNC_ARRAY(OB_SFA_SQL_EXPR_NEG_EVAL, eval_neg_funcs, ARRAYSIZEOF(eval_ne
 
 
 ObExprNeg::ObExprNeg(ObIAllocator &alloc)
-  : ObExprOperator(alloc, T_OP_NEG, N_NEG, 1, NOT_ROW_DIMENSION) {};
+  : ObExprOperator(alloc, T_OP_NEG, N_NEG, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION) {};
 int ObExprNeg::calc_result_type1(ObExprResType &type, ObExprResType &type1, ObExprTypeCtx &type_ctx) const
 {
   UNUSED(type_ctx);
@@ -214,7 +214,8 @@ int ObExprNeg::calc_result_type1(ObExprResType &type, ObExprResType &type1, ObEx
           if (type1.get_type() == ObUNumberType) {
             type.set_precision(static_cast<int16_t>(type1.get_precision()));
           } else {
-            type.set_precision(static_cast<int16_t>(type1.get_precision() + NEG_PRECISION_OFFSET));
+            type.set_precision(static_cast<int16_t>(
+              MIN(type1.get_precision() + NEG_PRECISION_OFFSET, OB_MAX_INTEGER_DISPLAY_WIDTH)));
           }
         }
       }

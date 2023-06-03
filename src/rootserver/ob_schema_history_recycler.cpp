@@ -24,6 +24,7 @@
 #include "share/ob_freeze_info_proxy.h"
 #include "share/ob_global_merge_table_operator.h"
 #include "share/ob_zone_merge_info.h"
+#include "share/ob_all_server_tracer.h"
 
 namespace oceanbase
 {
@@ -87,8 +88,7 @@ int64_t ObSchemaHistoryRecyclerIdling::get_idle_interval_us()
 
 ObSchemaHistoryRecycler::ObSchemaHistoryRecycler()
   : inited_(false), idling_(stop_), schema_service_(NULL),
-    /*freeze_info_mgr_(NULL),*/ zone_mgr_(NULL), sql_proxy_(NULL),
-    server_mgr_(NULL), recycle_schema_versions_()
+    /*freeze_info_mgr_(NULL),*/ zone_mgr_(NULL), sql_proxy_(NULL), recycle_schema_versions_()
 {
 }
 
@@ -104,8 +104,7 @@ int ObSchemaHistoryRecycler::init(
     ObMultiVersionSchemaService &schema_service,
     //ObFreezeInfoManager &freeze_info_manager,
     ObZoneManager &zone_manager,
-    ObMySQLProxy &sql_proxy,
-    ObServerManager &server_mgr)
+    ObMySQLProxy &sql_proxy)
 {
   int ret = OB_SUCCESS;
   const int schema_history_recycler_thread_cnt = 1;
@@ -122,7 +121,6 @@ int ObSchemaHistoryRecycler::init(
     //freeze_info_mgr_ = &freeze_info_manager;
     zone_mgr_ = &zone_manager;
     sql_proxy_ = &sql_proxy;
-    server_mgr_ = &server_mgr;
     inited_ = true;
   }
   return ret;
@@ -143,7 +141,7 @@ int ObSchemaHistoryRecycler::idle()
 void ObSchemaHistoryRecycler::wakeup()
 {
   if (!inited_) {
-    LOG_WARN("not init");
+    LOG_WARN_RET(common::OB_NOT_INIT, "not init");
   } else {
     idling_.wakeup();
   }
@@ -359,15 +357,13 @@ int ObSchemaHistoryRecycler::get_recycle_schema_version_by_server(
   int ret = OB_SUCCESS;
   ObArray<ObAddr> server_list;
   obrpc::ObGetMinSSTableSchemaVersionArg arg;
+  ObZone zone;
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("fail to check inner stat", KR(ret));
-  } else if (OB_ISNULL(server_mgr_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("ptr is null", KR(ret), KP_(server_mgr));
   } else if (OB_FAIL(arg.tenant_id_arg_list_.assign(tenant_ids))) {
     LOG_WARN("fail to assign arg", KR(ret));
-  } else if (OB_FAIL(server_mgr_->get_all_server_list(server_list))) {
-    LOG_WARN("fail to get all server list", KR(ret));
+  } else if (OB_FAIL(SVR_TRACER.get_servers_of_zone(zone, server_list))) {
+    LOG_WARN("fail to get server_list", KR(ret));
   } else {
     rootserver::ObGetMinSSTableSchemaVersionProxy proxy_batch(
         *(GCTX.srv_rpc_proxy_), &obrpc::ObSrvRpcProxy::get_min_sstable_schema_version);
@@ -942,6 +938,17 @@ int ObSchemaHistoryRecycler::try_recycle_schema_history(
       ret = OB_SUCCESS;
     }
 
+    // --------------------------- rls ---------------------------------------------------
+    RECYCLE_FIRST_SCHEMA(RECYCLE_AND_COMPRESS, rls_policy, OB_ALL_RLS_POLICY_HISTORY_TNAME,
+                         rls_policy_id);
+    RECYCLE_SECOND_SCHEMA(rls_sec_column, OB_ALL_RLS_SECURITY_COLUMN_HISTORY_TNAME,
+                          rls_policy_id, column_id);
+    RECYCLE_FIRST_SCHEMA(RECYCLE_AND_COMPRESS, rls_group, OB_ALL_RLS_GROUP_HISTORY_TNAME,
+                         rls_group_id);
+    RECYCLE_FIRST_SCHEMA(RECYCLE_AND_COMPRESS, rls_context, OB_ALL_RLS_CONTEXT_HISTORY_TNAME,
+                         rls_context_id);
+    ret = OB_SUCCESS; // overwrite ret
+
 #undef RECYCLE_FIRST_SCHEMA
     int64_t cost_ts = ObTimeUtility::current_time() - start_ts;
     ROOTSERVICE_EVENT_ADD("schema_recycler", "batch_recycle_by_tenant",
@@ -1240,7 +1247,7 @@ bool ObRecycleSchemaExecutor::is_valid() const
       || OB_ISNULL(recycler_)
       || NONE == mode_) {
     bret = false;
-    LOG_WARN("invalid argument", K(bret), K_(tenant_id), K_(schema_version), K_(mode),
+    LOG_WARN_RET(common::OB_INVALID_ARGUMENT, "invalid argument", K(bret), K_(tenant_id), K_(schema_version), K_(mode),
              KP_(table_name), KP_(schema_key_name), KP_(sql_proxy), KP_(recycler));
   }
   return bret;
@@ -1733,7 +1740,7 @@ bool ObSecondRecycleSchemaExecutor::is_valid() const
       || OB_ISNULL(sql_proxy_)
       || OB_ISNULL(recycler_)) {
     bret = false;
-    LOG_WARN("invalid argument", K(bret), K_(tenant_id), K_(schema_version),
+    LOG_WARN_RET(common::OB_INVALID_ARGUMENT, "invalid argument", K(bret), K_(tenant_id), K_(schema_version),
              KP_(table_name), KP_(schema_key_name), KP_(second_schema_key_name),
              KP_(sql_proxy), KP_(recycler));
   }
@@ -1849,7 +1856,7 @@ bool ObThirdRecycleSchemaExecutor::is_valid() const
       || OB_ISNULL(sql_proxy_)
       || OB_ISNULL(recycler_)) {
     bret = false;
-    LOG_WARN("invalid argument", K(bret), K_(tenant_id), K_(schema_version),
+    LOG_WARN_RET(common::OB_INVALID_ARGUMENT, "invalid argument", K(bret), K_(tenant_id), K_(schema_version),
              KP_(table_name), KP_(schema_key_name), KP_(second_schema_key_name),
              KP_(third_schema_key_name), KP_(sql_proxy), KP_(recycler));
   }
@@ -2035,7 +2042,7 @@ bool ObSystemVariableRecycleSchemaExecutor::is_valid() const
       || OB_ISNULL(sql_proxy_)
       || OB_ISNULL(recycler_)) {
     bret = false;
-    LOG_WARN("invalid argument", K(bret), K_(tenant_id), K_(schema_version),
+    LOG_WARN_RET(common::OB_INVALID_ARGUMENT, "invalid argument", K(bret), K_(tenant_id), K_(schema_version),
              KP_(table_name), KP_(sql_proxy), KP_(recycler));
   }
   return bret;
@@ -2272,7 +2279,7 @@ bool ObObjectPrivRecycleSchemaExecutor::is_valid() const
       || OB_ISNULL(sql_proxy_)
       || OB_ISNULL(recycler_)) {
     bret = false;
-    LOG_WARN("invalid argument", K(bret), K_(tenant_id), K_(schema_version),
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid argument", K(bret), K_(tenant_id), K_(schema_version),
              KP_(table_name), KP_(sql_proxy), KP_(recycler));
   }
   return bret;

@@ -18,12 +18,21 @@
 #include "lib/string/ob_string.h"
 #include "lib/charset/ob_charset.h"
 #include "lib/ash/ob_active_session_guard.h"
+#include "sql/parser/parse_malloc.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 extern int obpl_parser_init(ObParseCtx *parse_ctx);
 extern int obpl_parser_parse(ObParseCtx *parse_ctx);
+int obpl_parser_check_stack_overflow() {
+  int ret = OB_SUCCESS;
+  bool is_overflow = true;
+  if (OB_FAIL(check_stack_overflow(is_overflow))) {
+    LOG_WARN("failed to check stack overflow status", K(ret));
+  }
+  return is_overflow;
+}
 #ifdef __cplusplus
 }
 #endif
@@ -33,6 +42,80 @@ namespace oceanbase
 using namespace common;
 namespace pl
 {
+
+#define ISSPACE(c) ((c) == ' ' || (c) == '\n' || (c) == '\r' || (c) == '\t' || (c) == '\f' || (c) == '\v')
+int ObPLParser::fast_parse(const ObString &query,
+                      ParseResult &parse_result)
+{
+  ObActiveSessionGuard::get_stat().in_pl_parse_ = true;
+  int ret = OB_SUCCESS;
+  // 删除SQL语句末尾的空格
+  int64_t len = query.length();
+  while (len > 0 && ISSPACE(query[len - 1])) {
+    --len;
+  }
+  const ObString stmt_block(len, query.ptr());
+  ObParseCtx parse_ctx;
+  memset(&parse_ctx, 0, sizeof(ObParseCtx));
+  parse_ctx.global_errno_ = OB_SUCCESS;
+  parse_ctx.is_pl_fp_ = true;
+  parse_ctx.mem_pool_ = &allocator_;
+  parse_ctx.stmt_str_ = stmt_block.ptr();
+  parse_ctx.stmt_len_ = stmt_block.length();
+  parse_ctx.orig_stmt_str_ = query.ptr();
+  parse_ctx.orig_stmt_len_ = query.length();
+  parse_ctx.comp_mode_ = lib::is_oracle_mode();
+  parse_ctx.is_for_trigger_ = 0;
+  parse_ctx.is_dynamic_ = 0;
+  parse_ctx.is_inner_parse_ = 1;
+  parse_ctx.charset_info_ = ObCharset::get_charset(connection_collation_);
+  parse_ctx.is_not_utf8_connection_ = ObCharset::is_valid_collation(connection_collation_) ?
+        (ObCharset::charset_type_by_coll(connection_collation_) != CHARSET_UTF8MB4) : false;
+  parse_ctx.connection_collation_ = connection_collation_;
+  parse_ctx.mysql_compatible_comment_ = false;
+  int64_t new_length = stmt_block.length() + 1;
+  char *buf = (char *)parse_malloc(new_length, parse_ctx.mem_pool_);
+  if (OB_UNLIKELY(NULL == buf)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_ERROR("no memory for parser");
+  } else {
+    parse_ctx.no_param_sql_ = buf;
+    parse_ctx.no_param_sql_buf_len_ = new_length;
+  }
+  ret = parse_stmt_block(parse_ctx, parse_result.result_tree_);
+  if (OB_ERR_PARSE_SQL == ret) {
+    int err_len = 0;
+    const char *err_str = "", *global_errmsg = "";
+    int err_line = 0;
+    if (parse_ctx.cur_error_info_ != NULL) {
+      int first_column = parse_ctx.cur_error_info_->stmt_loc_.first_column_;
+      int last_column = parse_ctx.cur_error_info_->stmt_loc_.last_column_;
+      err_len = last_column - first_column + 1;
+      err_str = parse_ctx.stmt_str_ + first_column;
+      err_line = parse_ctx.cur_error_info_->stmt_loc_.last_line_ + 1;
+      global_errmsg = parse_ctx.global_errmsg_;
+    }
+    ObString stmt(parse_ctx.stmt_len_, parse_ctx.stmt_str_);
+    LOG_WARN("failed to parser pl stmt",
+             K(ret), K(err_line), K(global_errmsg), K(stmt));
+    LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX, false),
+                   err_len, err_str, err_line);
+  } else {
+    memmove(parse_ctx.no_param_sql_ + parse_ctx.no_param_sql_len_,
+                    parse_ctx.stmt_str_ + parse_ctx.copied_pos_,
+                    parse_ctx.stmt_len_ - parse_ctx.copied_pos_);
+    parse_ctx.no_param_sql_len_ += parse_ctx.stmt_len_ - parse_ctx.copied_pos_;
+    parse_result.no_param_sql_ = parse_ctx.no_param_sql_;
+    parse_result.no_param_sql_len_ = parse_ctx.no_param_sql_len_;
+    parse_result.no_param_sql_buf_len_ = parse_ctx.no_param_sql_buf_len_;
+    parse_result.param_node_num_ = parse_ctx.param_node_num_;
+    parse_result.param_nodes_ = parse_ctx.param_nodes_;
+    parse_result.tail_param_node_ = parse_ctx.tail_param_node_;
+  }
+  ObActiveSessionGuard::get_stat().in_pl_parse_ = false;
+  return ret;
+}
+
 int ObPLParser::parse(const ObString &stmt_block,
                       const ObString &orig_stmt_block, // for preprocess
                       ParseResult &parse_result,
@@ -49,8 +132,7 @@ int ObPLParser::parse(const ObString &stmt_block,
                               parse_result.is_for_trigger_,
                               parse_result.is_dynamic_sql_,
                               is_inner_parse,
-                              is_include_old_new_in_trigger,
-                              parse_result.mysql_compatible_comment_))) {
+                              is_include_old_new_in_trigger))) {
     LOG_WARN("parse stmt block failed", K(ret), K(stmt_block), K(orig_stmt_block));
   } else if (OB_ISNULL(parse_result.result_tree_)) {
     ret = OB_ERR_PARSE_SQL;
@@ -75,8 +157,7 @@ int ObPLParser::parse_procedure(const ObString &stmt_block,
                                 bool is_for_trigger,
                                 bool is_dynamic,
                                 bool is_inner_parse,
-                                bool &is_include_old_new_in_trigger,
-                                bool mysql_compatible_comment)
+                                bool &is_include_old_new_in_trigger)
 {
   int ret = OB_SUCCESS;
   ObParseCtx parse_ctx;
@@ -95,7 +176,6 @@ int ObPLParser::parse_procedure(const ObString &stmt_block,
   parse_ctx.is_not_utf8_connection_ = ObCharset::is_valid_collation(connection_collation_) ?
         (ObCharset::charset_type_by_coll(connection_collation_) != CHARSET_UTF8MB4) : false;
   parse_ctx.connection_collation_ = connection_collation_;
-  parse_ctx.mysql_compatible_comment_ = mysql_compatible_comment;
 
   ret = parse_stmt_block(parse_ctx, multi_stmt);
   if (OB_ERR_PARSE_SQL == ret) {
@@ -115,6 +195,9 @@ int ObPLParser::parse_procedure(const ObString &stmt_block,
              K(ret), K(err_line), K(global_errmsg), K(stmt));
     LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX, false),
                    err_len, err_str, err_line);
+  } else if (parse_ctx.mysql_compatible_comment_) {
+    ret = OB_ERR_PARSE_SQL;
+    LOG_WARN("the sql is invalid", K(ret), K(stmt_block));
   } else {
     question_mark_ctx = parse_ctx.question_mark_ctx_;
     is_include_old_new_in_trigger = parse_ctx.is_include_old_new_in_trigger_;
@@ -246,6 +329,9 @@ int ObPLParser::parse_stmt_block(ObParseCtx &parse_ctx, ObStmtNodeTree *&multi_s
                K_(parse_ctx.is_dynamic),
                K_(parse_ctx.is_for_preprocess),
                K(ret));
+      if (OB_NOT_SUPPORTED == ret) {
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, parse_ctx.global_errmsg_);
+      }
     }
   } else {
     multi_stmt = parse_ctx.stmt_tree_;
@@ -322,17 +408,17 @@ int ObPLParser::reconstruct_trigger_package(ObStmtNodeTree *&package_stmt,
       if (trg_info->is_simple_dml_type() || trg_info->is_instead_dml_type()) {
         OV (T_TG_SIMPLE_DML == trigger_source_node->children_[1]->type_
             || T_TG_INSTEAD_DML == trigger_source_node->children_[1]->type_);
-        CK (4 == trigger_source_node->children_[1]->num_child_);
-        CK (OB_NOT_NULL(trigger_source_node->children_[1]->children_[3])); // simple/instead trigger body
+        CK (5 == trigger_source_node->children_[1]->num_child_);
+        CK (OB_NOT_NULL(trigger_source_node->children_[1]->children_[4])); // simple/instead trigger body
 
         CK (5 == pkg_body->num_child_); // 5 routines predefined in trigger_package
 
-        if (OB_SUCC(ret) && NULL != trigger_source_node->children_[1]->children_[2]) {
+        if (OB_SUCC(ret) && NULL != trigger_source_node->children_[1]->children_[3]) {
           // replace routine `calc_when` with trigger's `when_condition`
           // opt_when_condition
-          OV (T_TG_WHEN_CONDITION == trigger_source_node->children_[1]->children_[2]->type_);
-          OV (1 == trigger_source_node->children_[1]->children_[2]->num_child_);
-          OV (OB_NOT_NULL(trigger_source_node->children_[1]->children_[2]->children_[0])); // bool expr
+          OV (T_TG_WHEN_CONDITION == trigger_source_node->children_[1]->children_[3]->type_);
+          OV (1 == trigger_source_node->children_[1]->children_[3]->num_child_);
+          OV (OB_NOT_NULL(trigger_source_node->children_[1]->children_[3]->children_[0])); // bool expr
 
           OV (OB_NOT_NULL(pkg_body->children_[0]->children_[1])); // T_SP_BLOCK_CONTENT
           OV (1 == pkg_body->children_[0]->children_[1]->num_child_);
@@ -346,9 +432,9 @@ int ObPLParser::reconstruct_trigger_package(ObStmtNodeTree *&package_stmt,
           OV (OB_NOT_NULL(pkg_body->children_[0]->children_[1]->children_[0]->children_[0]->children_[0])); // bool expr
 
           OV (pkg_body->children_[0]->children_[1]->children_[0]->children_[0]->children_[0]->type_
-              == trigger_source_node->children_[1]->children_[2]->children_[0]->type_);
+              == trigger_source_node->children_[1]->children_[3]->children_[0]->type_);
           OX (pkg_body->children_[0]->children_[1]->children_[0]->children_[0]->children_[0]
-              = trigger_source_node->children_[1]->children_[2]->children_[0]);
+              = trigger_source_node->children_[1]->children_[3]->children_[0]);
         }
 
         if (OB_SUCC(ret)) {
@@ -368,27 +454,27 @@ int ObPLParser::reconstruct_trigger_package(ObStmtNodeTree *&package_stmt,
           CK (T_SP_BLOCK_CONTENT == pkg_body->children_[proc_pos]->children_[1]->type_);
 
           if (OB_FAIL(ret)) {
-          } else if (T_SP_BLOCK_CONTENT == trigger_source_node->children_[1]->children_[3]->type_) {
-            pkg_body->children_[proc_pos]->children_[1] = trigger_source_node->children_[1]->children_[3];
-          } else if (T_SP_LABELED_BLOCK == trigger_source_node->children_[1]->children_[3]->type_) {
+          } else if (T_SP_BLOCK_CONTENT == trigger_source_node->children_[1]->children_[4]->type_) {
+            pkg_body->children_[proc_pos]->children_[1] = trigger_source_node->children_[1]->children_[4];
+          } else if (T_SP_LABELED_BLOCK == trigger_source_node->children_[1]->children_[4]->type_) {
             pkg_body->children_[proc_pos]->children_[1] =
-              trigger_source_node->children_[1]->children_[3]->children_[1];
+              trigger_source_node->children_[1]->children_[4]->children_[1];
           }
         }
       } else if (trg_info->is_compound_dml_type()) {
         ObStmtNodeTree *trg_com_body = NULL;
         OV (T_TG_COMPOUND_DML == trigger_source_node->children_[1]->type_);
-        OV (4 == trigger_source_node->children_[1]->num_child_);
-        OV (OB_NOT_NULL(trg_com_body = trigger_source_node->children_[1]->children_[3])); // compoud trigger body
+        OV (5 == trigger_source_node->children_[1]->num_child_);
+        OV (OB_NOT_NULL(trg_com_body = trigger_source_node->children_[1]->children_[4])); // compoud trigger body
         OV (T_TG_COMPOUND_BODY == trg_com_body->type_ && 3 == trg_com_body->num_child_);
         OV (OB_NOT_NULL(trg_com_body->children_[1]));// timing_point_section_list
         OV (T_TG_TIMPING_POINT_SECTION_LIST == trg_com_body->children_[1]->type_);
 
-        if (OB_SUCC(ret) && NULL != trigger_source_node->children_[1]->children_[2]) {
+        if (OB_SUCC(ret) && NULL != trigger_source_node->children_[1]->children_[3]) {
           // replace `calc_when` routine with trigger's `when_condition`
           // opt_when_condition
-          OV (T_TG_WHEN_CONDITION == trigger_source_node->children_[1]->children_[2]->type_);
-          OV (OB_NOT_NULL(trigger_source_node->children_[1]->children_[2]->children_[0])); // bool expr
+          OV (T_TG_WHEN_CONDITION == trigger_source_node->children_[1]->children_[3]->type_);
+          OV (OB_NOT_NULL(trigger_source_node->children_[1]->children_[3]->children_[0])); // bool expr
 
           OV (OB_NOT_NULL(pkg_body->children_[0]) && 2 == pkg_body->children_[0]->num_child_); // T_SUB_FUNC_DEF
           
@@ -404,9 +490,9 @@ int ObPLParser::reconstruct_trigger_package(ObStmtNodeTree *&package_stmt,
           OV (OB_NOT_NULL(pkg_body->children_[0]->children_[1]->children_[0]->children_[0]->children_[0])); // bool expr
 
           OV (pkg_body->children_[0]->children_[1]->children_[0]->children_[0]->children_[0]->type_
-              == trigger_source_node->children_[1]->children_[2]->children_[0]->type_);
+              == trigger_source_node->children_[1]->children_[3]->children_[0]->type_);
           OX (pkg_body->children_[0]->children_[1]->children_[0]->children_[0]->children_[0]
-              = trigger_source_node->children_[1]->children_[2]->children_[0]);
+              = trigger_source_node->children_[1]->children_[3]->children_[0]);
         }
 
         if (OB_SUCC(ret) && NULL != trg_com_body->children_[0]) {

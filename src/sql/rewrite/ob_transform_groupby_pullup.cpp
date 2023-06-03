@@ -15,6 +15,8 @@
 #include "sql/rewrite/ob_transform_utils.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/optimizer/ob_optimizer_util.h"
+#include "sql/optimizer/ob_log_subplan_scan.h"
+#include "sql/optimizer/ob_log_table_scan.h"
 #include "common/ob_smart_call.h"
 
 using namespace oceanbase::sql;
@@ -51,6 +53,7 @@ int ObTransformGroupByPullup::transform_one_stmt(common::ObIArray<ObParentDMLStm
 {
   int ret = OB_SUCCESS;
   ObSEArray<PullupHelper, 4> valid_views;
+  ObCostBasedPullupCtx pullup_ctx;
   ObTryTransHelper try_trans_helper;
   if (OB_ISNULL(stmt) || OB_ISNULL(ctx_)) {
     ret = OB_ERR_UNEXPECTED;
@@ -66,7 +69,6 @@ int ObTransformGroupByPullup::transform_one_stmt(common::ObIArray<ObParentDMLStm
     int64_t view_id = valid_views.at(i).table_id_;
     TableItem *view = NULL;
     LOG_DEBUG("begin pull up", K(valid_views.count()), K(valid_views.at(i).need_merge_));
-    
     if (OB_FAIL(ObTransformUtils::deep_copy_stmt(*ctx_->stmt_factory_,
                                                  *ctx_->expr_factory_,
                                                  stmt,
@@ -75,13 +77,14 @@ int ObTransformGroupByPullup::transform_one_stmt(common::ObIArray<ObParentDMLStm
     } else if (OB_ISNULL(view = trans_stmt->get_table_item_by_id(view_id))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("view is null", K(ret));
+    } else if (OB_FALSE_IT(pullup_ctx.view_talbe_id_ = valid_views.at(i).table_id_)) {
     } else if (OB_FAIL(get_trans_view(trans_stmt, view_stmt))) {
       LOG_WARN("failed to get transform view", K(ret));
     } else if (OB_FAIL(do_groupby_pull_up(view_stmt, valid_views.at(i)))) {
       LOG_WARN("failed to do pull up group by", K(ret));
     } else if (OB_FAIL(accept_transform(parent_stmts, stmt, trans_stmt,
-                                        valid_views.at(i).need_merge_,
-                                        trans_happened))) {
+                                        valid_views.at(i).need_merge_, true,
+                                        trans_happened, &pullup_ctx))) {
       LOG_WARN("failed to accept transform", K(ret));
     } else if (!trans_happened) {
       LOG_DEBUG("pull up not happen", K(trans_happened));
@@ -220,13 +223,14 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
   } else if (OB_FAIL(stmt->check_if_contain_select_for_update(has_for_update))) {
     LOG_WARN("failed to check if contain for update", K(ret));
   } else if (has_for_update) {
-    // do nothing
+    OPT_TRACE("stmt contain for update, can not transform");
   } else if (OB_FAIL(stmt->check_if_contain_inner_table(contain_inner_table))) {
     LOG_WARN("failed to check if contain inner table", K(ret));
   } else if (OB_FAIL(ObTransformUtils::check_can_set_stmt_unique(stmt, has_unique_keys))) {
     LOG_WARN("failed to check stmt has unique keys", K(ret));
   } else if (!has_unique_keys) {
     //如果当前stmt不能生成唯一键，do nothing
+    OPT_TRACE("stmt can not generate unique keys, can not transform");
   } else {
     is_valid = true;
   }
@@ -297,24 +301,40 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
     ObSelectStmt *sub_stmt = NULL;
     ObString dummy_str;
     const ObViewMergeHint *myhint = NULL;
-    if (OB_ISNULL(sub_stmt = table->ref_query_)) {
+    ObSQLSessionInfo *session_info = NULL;
+    bool enable_group_by_placement_transform = false;
+    OPT_TRACE("try", table);
+    if (OB_ISNULL(ctx_) ||
+        OB_ISNULL(session_info = ctx_->session_info_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpect null param", K(ctx_), K(ret));
+    } else if (OB_FAIL(session_info->is_groupby_placement_transformation_enabled(enable_group_by_placement_transform))) {
+      LOG_WARN("failed to check group by placement transform enabled", K(ret));
+    } else if (OB_ISNULL(sub_stmt = table->ref_query_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("invalid generated table item", K(ret), K(*table));
     } else if (OB_FAIL(check_hint_valid(*stmt, *table->ref_query_, hint_valid))) {
       LOG_WARN("check hint failed", K(ret));
     } else if (!hint_valid) {
-      is_valid = false;
+      // can not set is_valid as false, may pullup other table
+      OPT_TRACE("hint reject transform");
     } else if (OB_FALSE_IT(myhint = static_cast<const ObViewMergeHint*>(sub_stmt->get_stmt_hint().get_normal_hint(T_MERGE_HINT)))) {
+    } else if (!enable_group_by_placement_transform && (NULL == myhint || myhint->enable_no_group_by_pull_up())) {
+      OPT_TRACE("system var disable group by placemebt");
     } else if (ignore_tables.has_member(stmt->get_table_bit_index(table->table_id_))) {
       // skip the generated table
+      OPT_TRACE("ignore this table");
     } else if (contain_inner_table && (NULL == myhint || myhint->enable_no_group_by_pull_up())) {
       // do not rewrite inner table stmt with a cost-based rule
+      OPT_TRACE("stmt contain inner table, can not transform");
     } else if (OB_FAIL(is_valid_group_stmt(sub_stmt, is_valid_group))) {
       LOG_WARN("failed to check is valid group stmt", K(ret));
     } else if (!is_valid_group) {
       // do nothing
+      OPT_TRACE("not a valid group stmt");
     } else if (helper.need_check_having_ && sub_stmt->get_having_expr_size() > 0) {
       //do nothing
+      OPT_TRACE("view can not have having exprs");
     } else if (OB_FALSE_IT(helper.table_id_ = table->table_id_)) {
     } else if (OB_FAIL(check_null_propagate(stmt, sub_stmt, helper, can_pullup))) {
       LOG_WARN("failed to check null propagate select expr", K(ret));
@@ -322,9 +342,10 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
       //do nothing
     } else if (OB_FAIL(sub_stmt->has_rand(has_rand))) {
       LOG_WARN("failed to check stmt has rand func", K(ret));
-      //stmt不能包含rand函数 https://work.aone.alibaba-inc.com/issue/35875561
+      //stmt不能包含rand函数
     } else if (!(can_pullup = !has_rand)) {
       // do nothing
+      OPT_TRACE("view has rand expr, can not transform");
     } else if (OB_FALSE_IT(helper.need_merge_ = (NULL != myhint 
                           && myhint->enable_group_by_pull_up(ctx_->src_qb_name_)))) {
     } else if (OB_FAIL(valid_views.push_back(helper))) {
@@ -336,6 +357,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
     JoinedTable *joined_table = static_cast<JoinedTable*>(table);
     PullupHelper left_helper = helper;
     PullupHelper right_helper = helper;
+    bool check_left = true;
+    bool check_right = true;
     left_helper.parent_table_ = joined_table;
     right_helper.parent_table_ = joined_table;
     if (LEFT_OUTER_JOIN == joined_table->joined_type_) {
@@ -343,10 +366,12 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
       //LEFT OUTER JOIN的右表上拉group by要求不能有having条件
       right_helper.need_check_having_ = true;
       right_helper.need_check_null_propagate_ = true;
+      check_left = false;
     } else if (RIGHT_OUTER_JOIN == joined_table->joined_type_) {
       //RIGHT OUTER JOIN的左表上拉group by要求不能有having条件
       left_helper.need_check_having_ = true;
       left_helper.need_check_null_propagate_ = true;
+      check_right = false;
       //LEFT OUTER JOIN的右表行为跟parent table相同
     } else if (INNER_JOIN == joined_table->joined_type_) {
       //INNER JOIN的左表行为跟parent table相同
@@ -361,6 +386,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
         //full join要求两侧至少有一个basic table，否则不能保证能够生成严格唯一键
         is_valid = false;
       } else {
+        check_left = false;
+        check_right = false;
         left_helper.need_check_having_ = true;
         left_helper.need_check_null_propagate_ = true;
         right_helper.need_check_having_ = true;
@@ -371,7 +398,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
       //do nothing
     } else if (!is_valid) {
       //do nothing
-    } else if (OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
+    } else if (check_left &&
+               OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
                                                                 joined_table->left_table_,
                                                                 left_helper,
                                                                 contain_inner_table,
@@ -379,7 +407,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
                                                                 valid_views,
                                                                 is_valid)))) {
       LOG_WARN("failed to check group by pull up validity", K(ret));
-    } else if (OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
+    } else if (check_right &&
+               OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
                                                                 joined_table->right_table_,
                                                                 right_helper,
                                                                 contain_inner_table,
@@ -674,12 +703,9 @@ int ObTransformGroupByPullup::get_trans_view(ObDMLStmt *stmt, ObSelectStmt *&vie
 int ObTransformGroupByPullup::do_groupby_pull_up(ObSelectStmt *stmt, PullupHelper &helper)
 {
   int ret = OB_SUCCESS;
-  ObSEArray<ObRawExpr *, 4> view_columns;
-  ObSEArray<ObRawExpr *, 4> stmt_columns;
   ObSEArray<ObRawExpr *, 4> unique_exprs;
   ObSEArray<ObRawExpr *, 4> aggr_column;
   ObSEArray<ObRawExpr *, 4> aggr_select;
-  ObSEArray<ObRawExpr *, 4> pullup_exprs;
   TableItem *table_item = NULL;
   ObSelectStmt *subquery = NULL;
   ObSqlBitSet<> ignore_tables;
@@ -734,58 +760,10 @@ int ObTransformGroupByPullup::do_groupby_pull_up(ObSelectStmt *stmt, PullupHelpe
   }
 
   if (OB_SUCC(ret)) {
-    //提取select item、group by expr、having condition的column expr，在视图内创建select item
-    //在stmt内创建对应的column expr
     if (OB_FAIL(wrap_case_when_if_necessary(*subquery, helper, aggr_select))) {
       LOG_WARN("failed to wrap case when", K(ret));
-    } else if (OB_FAIL(append(pullup_exprs, aggr_select))) {
-      LOG_WARN("failed to append pullup exprs", K(ret));
-    } else if (OB_FAIL(append(pullup_exprs, subquery->get_group_exprs()))) {
-      LOG_WARN("failed to append pullup exprs", K(ret));
-    } else if (OB_FAIL(append(pullup_exprs, subquery->get_aggr_items()))) {
-      LOG_WARN("failed to append pullup exprs", K(ret));
-    } else if (OB_FAIL(append(pullup_exprs, subquery->get_having_exprs()))) {
-      LOG_WARN("failed to append pullup exprs", K(ret));
-    } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(pullup_exprs, view_columns))) {
-      LOG_WARN("failed to extract column exprs", K(ret));
-    } else if (OB_FAIL(ObTransformUtils::create_columns_for_view(ctx_,
-                                                                *table_item,
-                                                                stmt,
-                                                                view_columns,
-                                                                stmt_columns))) {
-      LOG_WARN("failed to create view columns", K(ret));
-    }
-  }
-  if (OB_SUCC(ret)) {
-    ObRawExprCopier copier(*ctx_->expr_factory_);
-    ObArray<ObRawExpr *> uncopy_list;
-    //拉出select aggr items, group by exprs、aggr items、having exprs
-    if (OB_FAIL(copier.add_replaced_expr(view_columns, stmt_columns))) {
-      LOG_WARN("failed to add replaced expr", K(ret));
-    } else if (OB_FAIL(append(uncopy_list, subquery->get_subquery_exprs()))) {
-      LOG_WARN("failed to append uncopy list", K(ret));
-    } else if (OB_FAIL(copier.copy_on_replace(subquery->get_group_exprs(),
-                                              subquery->get_group_exprs(),
-                                              NULL,
-                                              &uncopy_list))) {
-      LOG_WARN("failed to copy on replace group exprs", K(ret));
-    } else if (OB_FAIL(copier.copy_on_replace(subquery->get_aggr_items(),
-                                              subquery->get_aggr_items(),
-                                              NULL,
-                                              &uncopy_list))) {
-      LOG_WARN("failed to copy on replace aggr items", K(ret));
-    } else if (OB_FAIL(copier.copy_on_replace(subquery->get_having_exprs(),
-                                              subquery->get_having_exprs(),
-                                              NULL,
-                                              &uncopy_list))) {
-      LOG_WARN("failed to copy on replace having exprs", K(ret));
-    } else if (OB_FAIL(copier.copy_on_replace(aggr_select, 
-                                              aggr_select,
-                                              NULL,
-                                              &uncopy_list))) {
-      LOG_WARN("failed to copy on replace aggr select", K(ret));
-    } else if (OB_FAIL(stmt->replace_inner_stmt_expr(aggr_column, aggr_select))) {
-      LOG_WARN("failed to replace inner stmt exprs", K(ret));
+    } else if (OB_FAIL(stmt->replace_relation_exprs(aggr_column, aggr_select))) {
+      LOG_WARN("failed to replace inner stmt expr", K(ret));
     } else if (OB_FAIL(append(stmt->get_group_exprs(), subquery->get_group_exprs()))) {
       LOG_WARN("failed to append group exprs", K(ret));
     } else if (OB_FAIL(append(stmt->get_aggr_items(), subquery->get_aggr_items()))) {
@@ -804,14 +782,10 @@ int ObTransformGroupByPullup::do_groupby_pull_up(ObSelectStmt *stmt, PullupHelpe
       subquery->get_having_exprs().reset();
       if (OB_FAIL(subquery->adjust_subquery_list())) {
         LOG_WARN("failed to adjust subquery list", K(ret));
-      } else if (OB_FAIL(stmt->adjust_subquery_list())) {
-        LOG_WARN("failed to adjust subquery list", K(ret));
-      } else if (OB_FAIL(stmt->adjust_subquery_stmt_parent(subquery, stmt))) {
-        LOG_WARN("failed to adjust sbuquery stmt parent", K(ret));
+      } else if (OB_FAIL(ObTransformUtils::generate_select_list(ctx_, stmt, table_item))) {
+        LOG_WARN("failed to generate select list", K(ret));
       } else if (OB_FAIL(stmt->formalize_stmt(ctx_->session_info_))) {
         LOG_WARN("failed to formalize stmt", K(ret));
-      } else {
-        //do nothing
       }
     }
   }
@@ -923,64 +897,38 @@ int ObTransformGroupByPullup::wrap_case_when(ObSelectStmt &child_stmt,
                                                               case_when_expr,
                                                               ctx_))) {
       LOG_WARN("failed to build case when expr", K(ret));
-    } else {
-      expr = case_when_expr;
+    } else if (OB_ISNULL(case_when_expr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("case when expr is null", K(ret));
+    } else if (OB_FAIL(ObRawExprUtils::try_add_cast_expr_above(ctx_->expr_factory_,
+                                                               ctx_->session_info_,
+                                                               *case_when_expr,
+                                                               expr->get_result_type(),
+                                                               expr))) {
+      LOG_WARN("failed to add cast expr", K(ret));
     }
   }
   return ret;
 }
 
 
-int ObTransformGroupByPullup::is_expected_plan(ObLogPlan *plan, void *check_ctx, bool &is_valid)
+int ObTransformGroupByPullup::is_expected_plan(ObLogPlan *plan, void *check_ctx, bool is_trans_plan, bool &is_valid)
 {
   int ret = OB_SUCCESS;
-  ObCostBasedPushDownCtx *push_down_ctx = static_cast<ObCostBasedPushDownCtx *>(check_ctx);
-  if (OB_ISNULL(plan) || OB_ISNULL(push_down_ctx)) {
+  ObCostBasedPullupCtx *ctx = static_cast<ObCostBasedPullupCtx*>(check_ctx);
+  if (OB_ISNULL(ctx) || OB_ISNULL(plan)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpect null param", K(ret));
-  } else if (OB_FAIL(check_nl_operator(plan->get_plan_root(), push_down_ctx, is_valid))) {
-    LOG_WARN("check nl operator failed", K(ret));
-  } 
-  return ret;
-}
-
-int ObTransformGroupByPullup::check_nl_operator(ObLogicalOperator *op, ObCostBasedPushDownCtx *push_down_ctx, bool &is_valid)
-{
-  int ret = OB_SUCCESS;
-  const int64_t stmt_id = push_down_ctx->stmt_id_;
-  ObLogJoin *join = NULL;
-  if (OB_ISNULL(op) || OB_ISNULL(op->get_stmt())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("op is null", K(ret));
-  } else if (stmt_id == op->get_stmt()->get_stmt_id()) {
-    if (log_op_def::LOG_JOIN == op->get_type()) {
-      if (OB_ISNULL(join = static_cast<ObLogJoin *>(op))) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("static cast failed", K(ret));
-      } else if (JoinAlgo::NESTED_LOOP_JOIN == join->get_join_algo() && join->get_nl_params().count() > 0) {
-        ObLogicalOperator *right_table = join->get_right_table();
-        bool exist_group_by_op = false;
-        if (OB_ISNULL(right_table)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("right table is null", K(ret));
-        } else if (push_down_ctx->new_table_relids_.overlap(right_table->get_table_set())) {
-          if (OB_FAIL(has_group_by_op(right_table, exist_group_by_op))) {
-            LOG_WARN("has group by op failed", K(ret));
-          } else {
-            is_valid = !exist_group_by_op;
-          }
-        }
-      } else {}
-    } else {}
-  } else {}
-
-  for (int64_t i = 0; OB_SUCC(ret) && is_valid && i < op->get_num_of_child(); i++) {
-    if (OB_FAIL(SMART_CALL(check_nl_operator(op->get_child(i), push_down_ctx, is_valid)))) {
-      LOG_WARN("check nl operator failed", K(ret));
-    }
+  } else if (is_trans_plan) {
+    //do nothing
+  } else if (OB_FAIL(check_original_plan_validity(plan->get_plan_root(),
+                                                  ctx->view_talbe_id_,
+                                                  is_valid))) {
+    LOG_WARN("failed to check plan validity", K(ret));
   }
   return ret;
 }
+
 
 int ObTransformGroupByPullup::has_group_by_op(ObLogicalOperator *op, bool &bret)
 {
@@ -1114,7 +1062,291 @@ int ObTransformGroupByPullup::need_transform(const common::ObIArray<ObParentDMLS
         LOG_DEBUG("need trans pullup0", K(need_trans));
       }
     }
+    if (OB_SUCC(ret) && !need_trans) {
+      OPT_TRACE("outline reject transform");
+    }
   }
   LOG_DEBUG("need trans pullup", K(need_trans));
+  return ret;
+}
+
+int ObTransformGroupByPullup::check_original_plan_validity(ObLogicalOperator* root,
+                                                           uint64_t view_table_id,
+                                                           bool &is_valid)
+{
+  int ret = OB_SUCCESS;
+  TableItem *table_item = NULL;
+  ObSEArray<ObLogicalOperator*, 4> parent_ops;
+  ObLogicalOperator *subplan = NULL;
+  ObSEArray<ObRawExpr*, 4> column_exprs;
+  ObSEArray<ObRawExpr*, 4> select_exprs;
+  ObSEArray<ObRawExpr*, 4> group_exprs;
+  uint64_t groupby_nopushdown_cut_ratio = 1;
+  double group_ndv = 1.0;
+  double card = 1.0;
+  bool has_stats = true;
+  const ObSelectStmt *child_stmt = NULL;
+  if (OB_ISNULL(root) ||
+      OB_ISNULL(ctx_) ||
+      OB_ISNULL(ctx_->session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(root), K(ret));
+  } else if (OB_FAIL(find_operator(root, parent_ops, view_table_id, subplan))) {
+    LOG_WARN("failed to find subplan scan operator", K(root), K(view_table_id), K(ret));
+  } else if (OB_ISNULL(subplan) || parent_ops.empty()) {
+    //do nothing
+  } else if (OB_UNLIKELY(subplan->get_num_of_child() == 0) ||
+             OB_ISNULL(subplan = subplan->get_child(ObLogicalOperator::first_child)) ||
+             OB_ISNULL(subplan->get_stmt()) ||
+             OB_UNLIKELY(!subplan->get_stmt()->is_select_stmt())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (OB_FALSE_IT(child_stmt = static_cast<const ObSelectStmt*>(subplan->get_stmt()))) {
+    // do nothing
+  } else if (OB_FAIL(check_all_table_has_statistics(subplan, has_stats))) {
+    LOG_WARN("failed to check all table has statistics", K(ret));
+  } else if (!has_stats) {
+    is_valid = false;
+    RESUME_OPT_TRACE
+    OPT_TRACE("check original plan has statistics:", has_stats);
+    STOP_OPT_TRACE
+  } else if (OB_FAIL(extract_columns_in_join_conditions(parent_ops,
+                                                        view_table_id,
+                                                        column_exprs))) {
+    LOG_WARN("failed to extract columns in join conditions", K(ret));
+  } else if (OB_FAIL(ObTransformUtils::convert_column_expr_to_select_expr(column_exprs,
+                                                                          *child_stmt,
+                                                                          select_exprs))) {
+    LOG_WARN("failed to convert column exprs to select exprs", K(ret));
+  } else if (OB_FAIL(get_group_by_subset(select_exprs,
+                                         child_stmt->get_group_exprs(),
+                                         group_exprs))) {
+    LOG_WARN("failed to get group by subset", K(ret));
+  } else if (OB_FAIL(ctx_->session_info_->get_sys_variable(share::SYS_VAR__GROUPBY_NOPUSHDOWN_CUT_RATIO,
+                                                           groupby_nopushdown_cut_ratio))) {
+    LOG_WARN("failed to get session variable", K(ret));
+  } else if (OB_FAIL(calc_group_exprs_ndv(group_exprs, subplan, group_ndv, card))) {
+      LOG_WARN("failed to check group exprs", K(ret));
+  } else {
+    double expansion_rate = card / group_ndv;
+    is_valid = expansion_rate < groupby_nopushdown_cut_ratio;
+    LOG_TRACE("check original plan", K(is_valid), K(group_exprs), K(group_ndv), K(expansion_rate));
+    RESUME_OPT_TRACE
+    OPT_TRACE("check original plan group by exprs:", group_exprs);
+    OPT_TRACE("check original plan group by ndv:", group_ndv);
+    OPT_TRACE("check original plan expansion rate:", expansion_rate);
+    STOP_OPT_TRACE
+  }
+  return ret;
+}
+
+int ObTransformGroupByPullup::find_operator(ObLogicalOperator* root,
+                                            ObIArray<ObLogicalOperator*> &parents,
+                                            uint64_t view_table_id,
+                                            ObLogicalOperator *&subplan_root)
+{
+  int ret = OB_SUCCESS;
+  subplan_root = NULL;
+  if (OB_ISNULL(root)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null logical operator", K(ret));
+  } else if (log_op_def::LOG_SUBPLAN_SCAN == root->get_type() &&
+             static_cast<ObLogSubPlanScan *>(root)->get_subquery_id() == view_table_id) {
+    subplan_root = root;
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && NULL == subplan_root && i < root->get_num_of_child(); ++i) {
+      ObLogicalOperator *child = root->get_child(i);
+      if (OB_FAIL(SMART_CALL(find_operator(child, parents, view_table_id, subplan_root)))) {
+        LOG_WARN("failed to find operator", K(ret));
+      } else if (NULL == subplan_root) {
+        //do nothing
+      } else if (parents.empty() ||
+                 parents.at(0)->get_stmt() == root->get_stmt()) {
+        if (OB_FAIL(parents.push_back(root))) {
+          LOG_WARN("failed to push back operator", K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTransformGroupByPullup::calc_group_exprs_ndv(const ObIArray<ObRawExpr*> &group_exprs,
+                                                   ObLogicalOperator *subplan_root,
+                                                   double &group_ndv,
+                                                   double &card)
+{
+  int ret = OB_SUCCESS;
+  ObLogPlan *plan = NULL;
+  ObLogicalOperator *child_op = subplan_root;
+  group_ndv = 1.0;
+  if (OB_ISNULL(subplan_root) ||
+      OB_ISNULL(plan = subplan_root->get_plan())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null logical operator", K(ret));
+  } else if (OB_FAIL(find_base_operator(child_op))) {
+    LOG_WARN("failed to find base operator", K(ret));
+  } else if (OB_ISNULL(child_op)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null logical operator", K(ret));
+  } else {
+    card = child_op->get_card();
+    plan->get_selectivity_ctx().init_op_ctx(&child_op->get_output_equal_sets(), card);
+    if (group_exprs.empty()) {
+      group_ndv = 1.0;
+    } else if (OB_FAIL(ObOptSelectivity::calculate_distinct(plan->get_update_table_metas(),
+                                                            plan->get_selectivity_ctx(),
+                                                            group_exprs,
+                                                            card,
+                                                            group_ndv))) {
+      LOG_WARN("failed to calculate distinct", K(ret));
+    } else { /* do nothing */ }
+  }
+  return ret;
+}
+
+int ObTransformGroupByPullup::find_base_operator(ObLogicalOperator *&root)
+{
+  int ret = OB_SUCCESS;
+  while (OB_SUCC(ret) && root != NULL &&
+         (root->get_type() ==log_op_def::LOG_GROUP_BY ||
+          root->get_type() == log_op_def::LOG_EXCHANGE)) {
+    if (OB_UNLIKELY(root->get_num_of_child() != 1) ||
+        OB_ISNULL(root = root->get_child(ObLogicalOperator::first_child))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpect null logical operator", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObTransformGroupByPullup::extract_columns_in_join_conditions(
+                              ObIArray<ObLogicalOperator*> &parent_ops,
+                              uint64_t table_id,
+                              ObIArray<ObRawExpr*> &column_exprs)
+{
+  int ret = OB_SUCCESS;
+  ObLogicalOperator *parent = NULL;
+  ObSEArray<ObRawExpr*, 4> tmp_column_exprs;
+  for (int64_t i = 0; OB_SUCC(ret) && i < parent_ops.count(); ++i) {
+    if (OB_ISNULL(parent = parent_ops.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected null", K(parent), K(ret));
+    } else if (log_op_def::LOG_JOIN == parent->get_type()) {
+      ObLogJoin *join_op = static_cast<ObLogJoin*>(parent);
+
+      if (HASH_JOIN == join_op->get_join_algo() ||
+          MERGE_JOIN == join_op->get_join_algo()) {
+        tmp_column_exprs.reuse();
+        if (OB_FAIL(ObRawExprUtils::extract_column_exprs(join_op->get_equal_join_conditions(),
+                                                         table_id,
+                                                         tmp_column_exprs))) {
+          LOG_WARN("failed to extract column exprs", K(ret));
+        } else if (OB_FAIL(append_array_no_dup(column_exprs, tmp_column_exprs))) {
+          LOG_WARN("failed to append array no dup", K(ret));
+        }
+      } else if (NESTED_LOOP_JOIN == join_op->get_join_algo()) {
+        for (int64_t i = 0; OB_SUCC(ret) && i < join_op->get_other_join_conditions().count(); ++i) {
+          ObRawExpr *cond = NULL;
+          if (OB_ISNULL(cond = join_op->get_other_join_conditions().at(i))) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("get unexpected null", K(ret));
+          } else if (!cond->has_flag(IS_JOIN_COND)) {
+            // do nothing
+          } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(cond,
+                                                                  table_id,
+                                                                  tmp_column_exprs))) {
+            LOG_WARN("failed to extract column exprs", K(ret));
+          } else if (OB_FAIL(append_array_no_dup(column_exprs, tmp_column_exprs))) {
+            LOG_WARN("failed to append array no dup", K(ret));
+          }
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < join_op->get_nl_params().count(); ++i) {
+          tmp_column_exprs.reuse();
+          if (OB_ISNULL(join_op->get_nl_params().at(i))) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("nl param is null", K(ret));
+          } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(join_op->get_nl_params().at(i)->get_ref_expr(),
+                                                                  table_id,
+                                                                  tmp_column_exprs))) {
+            LOG_WARN("failed to extract column exprs", K(ret));
+          } else if (OB_FAIL(append_array_no_dup(column_exprs, tmp_column_exprs))) {
+            LOG_WARN("failed to append array no dup", K(ret));
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTransformGroupByPullup::get_group_by_subset(ObRawExpr *expr,
+                                                  const ObIArray<ObRawExpr *> &group_exprs,
+                                                  ObIArray<ObRawExpr *> &subset_group_exprs)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(expr)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("expr is null", K(ret));
+  } else {
+    int64_t idx = -1;
+    if (expr->has_flag(IS_AGG) || expr->has_flag(IS_CONST)) {
+      //do nothing
+    } else if (OB_FAIL(ObTransformUtils::get_expr_idx(group_exprs, expr, idx))) {
+      LOG_WARN("get expr idx failed", K(ret));
+    } else if (idx == -1) { //not found
+      for (int64_t i = 0; OB_SUCC(ret) && i < expr->get_param_count(); i++) {
+        if (OB_FAIL(SMART_CALL(get_group_by_subset(expr->get_param_expr(i), group_exprs, subset_group_exprs)))) {
+          LOG_WARN("check group by subset faield", K(ret));
+        }
+      }
+    } else if (OB_FAIL(add_var_to_array_no_dup(subset_group_exprs, expr))) {
+      LOG_WARN("failed to add var to array no dump", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObTransformGroupByPullup::get_group_by_subset(ObIArray<ObRawExpr *> &exprs,
+                                                  const ObIArray<ObRawExpr *> &group_exprs,
+                                                  ObIArray<ObRawExpr *> &subset_group_exprs)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < exprs.count(); ++i) {
+    if (OB_FAIL(get_group_by_subset(exprs.at(i), group_exprs,
+                                    subset_group_exprs))) {
+      LOG_WARN("check group by exprs failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObTransformGroupByPullup::check_all_table_has_statistics(ObLogicalOperator *op, bool &has_stats)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(op)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (op->get_type() == log_op_def::LOG_TABLE_SCAN) {
+    ObLogTableScan *table_scan = static_cast<ObLogTableScan*>(op);
+    ObLogPlan *plan = table_scan->get_plan();
+    OptTableMeta* meta = NULL;
+    if (OB_ISNULL(plan)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected null", K(ret));
+    } else if (OB_ISNULL(meta = plan->get_basic_table_metas()
+                                     .get_table_meta_by_table_id(table_scan->get_table_id()))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected null", K(ret));
+    } else {
+      has_stats = meta->get_version() > 0;
+    }
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && has_stats && i < op->get_num_of_child(); ++i) {
+      if (OB_FAIL(SMART_CALL(check_all_table_has_statistics(op->get_child(i), has_stats)))) {
+        LOG_WARN("failed to check all table has statistics", K(ret));
+      }
+    }
+  }
   return ret;
 }

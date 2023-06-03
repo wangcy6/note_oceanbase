@@ -47,8 +47,7 @@ public:
                           const common::ObIArray<ObObjectID> *part_ids,
                           const common::ObDataTypeCastParams &dtc_params,
                           const bool is_dml_table,
-                          common::ObIArray<ObRawExpr *> *sort_exprs = NULL,
-                          bool is_link = false);
+                          common::ObIArray<ObRawExpr *> *sort_exprs = NULL);
 
   int get_not_insert_dml_part_sort_expr(const ObDMLStmt &stmt,
                                         common::ObIArray<ObRawExpr *> *sort_exprs) const;
@@ -56,12 +55,6 @@ public:
   int calculate_phy_table_location_info(ObExecContext &exec_ctx,
                                         const ParamStore &params,
                                         const common::ObDataTypeCastParams &dtc_params);
-
-  int calculate_phy_table_location_info(ObExecContext &exec_ctx,
-                                        const ParamStore &params,
-                                        const common::ObDataTypeCastParams &dtc_params,
-                                        const common::ObIArray<ObTabletID> &tablet_ids,
-                                        const common::ObIArray<ObObjectID> &partition_ids);
 
   int calc_phy_table_loc_and_select_leader(ObExecContext &exec_ctx,
                                            const ParamStore &params,

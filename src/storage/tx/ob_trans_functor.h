@@ -30,6 +30,7 @@
 #include "storage/tx/ob_tx_stat.h"
 #include "storage/tx/ob_trans_service.h"
 #include "storage/tx/ob_keep_alive_ls_handler.h"
+#include "storage/tx/ob_xa_service.h"
 
 namespace oceanbase
 {
@@ -168,10 +169,10 @@ public:
     int tmp_ret = common::OB_SUCCESS;
 
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
       tmp_ret = common::OB_INVALID_ARGUMENT;
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
     } else if (common::OB_SUCCESS != (tmp_ret = tx_ctx->switch_to_follower_forcedly(cb_array_))) {
-      TRANS_LOG(ERROR, "leader revoke failed", K(tx_id), K(*tx_ctx));
+      TRANS_LOG_RET(ERROR, tmp_ret, "leader revoke failed", K(tx_id), K(*tx_ctx));
     }
 
     return true;
@@ -184,7 +185,11 @@ private:
 class SwitchToLeaderFunctor
 {
 public:
+<<<<<<< HEAD
   explicit SwitchToLeaderFunctor(share::SCN &start_working_ts)
+=======
+  explicit SwitchToLeaderFunctor(share::SCN &start_working_ts) : ret_(common::OB_SUCCESS)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   {
     start_working_ts_ = start_working_ts;
 
@@ -197,17 +202,22 @@ public:
     int tmp_ret = common::OB_SUCCESS;
 
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
+      TRANS_LOG_RET(WARN, common::OB_INVALID_ARGUMENT, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
     } else if (OB_TMP_FAIL(tx_ctx->switch_to_leader(start_working_ts_))) {
-      TRANS_LOG(WARN, "switch_to_leader error", "ret", tmp_ret, K(*tx_ctx));
+      TRANS_LOG_RET(WARN, tmp_ret, "switch_to_leader error", "ret", tmp_ret, K(*tx_ctx));
+      ret_ = tmp_ret;
     } else {
       bool_ret = true;
     }
     return bool_ret;
   }
-
+  int get_ret() const { return ret_; }
 private:
   share::SCN start_working_ts_;
+<<<<<<< HEAD
+=======
+  int ret_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 
 class SwitchToFollowerGracefullyFunctor
@@ -359,19 +369,26 @@ class StopLSFunctor
 public:
   StopLSFunctor() {}
   ~StopLSFunctor() {}
-  bool operator()(const share::ObLSID &ls_id, ObLSTxCtxMgr *ls_tx_ctx_mgr)
+  bool operator()(ObLSTxCtxMgr *ls_tx_ctx_mgr)
   {
     int tmp_ret = common::OB_SUCCESS;
     bool bool_ret = false;
     const bool graceful = false;
 
-    if (!ls_id.is_valid() || OB_ISNULL(ls_tx_ctx_mgr)) {
-      TRANS_LOG(WARN, "invalid argument", K(ls_id), KP(ls_tx_ctx_mgr));
+    if (OB_ISNULL(ls_tx_ctx_mgr)) {
       tmp_ret = OB_INVALID_ARGUMENT;
-    } else if (OB_TMP_FAIL(ls_tx_ctx_mgr->stop(graceful))) {
-      TRANS_LOG(WARN, "ObLSTxCtxMgr stop error", K(tmp_ret), K(ls_id));
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", KP(ls_tx_ctx_mgr));
     } else {
-      bool_ret = true;
+      const share::ObLSID &ls_id = ls_tx_ctx_mgr->get_ls_id();
+
+      if (!ls_id.is_valid()) {
+        tmp_ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, tmp_ret, "invalid ls id", K(ls_id), KP(ls_tx_ctx_mgr));
+      } else if (OB_TMP_FAIL(ls_tx_ctx_mgr->stop(graceful))) {
+        TRANS_LOG_RET(WARN, tmp_ret, "ObLSTxCtxMgr stop error", K(tmp_ret), K(ls_id));
+      } else {
+        bool_ret = true;
+      }
     }
 
     return bool_ret;
@@ -383,23 +400,30 @@ class WaitLSFunctor
 public:
   explicit WaitLSFunctor(int64_t &retry_count) : retry_count_(retry_count) {}
   ~WaitLSFunctor() {}
-  bool operator()(const share::ObLSID &ls_id, ObLSTxCtxMgr *ls_tx_ctx_mgr)
+  bool operator()(ObLSTxCtxMgr *ls_tx_ctx_mgr)
   {
     int tmp_ret = common::OB_SUCCESS;
     bool bool_ret = true;
 
-    if (!ls_id.is_valid() || OB_ISNULL(ls_tx_ctx_mgr)) {
-      TRANS_LOG(WARN, "invalid argument", K(ls_id), KP(ls_tx_ctx_mgr));
+    if (OB_ISNULL(ls_tx_ctx_mgr)) {
       tmp_ret = OB_INVALID_ARGUMENT;
-    } else if (!ls_tx_ctx_mgr->is_stopped()) {
-      TRANS_LOG(WARN, "ls_id has not been stopped", K(ls_id));
-      tmp_ret = OB_PARTITION_IS_NOT_STOPPED;
-    } else if (ls_tx_ctx_mgr->get_tx_ctx_count() > 0) {
-      // if there are unfinished transactions at the ls_id,
-      // increase retry_count by 1
-      ++retry_count_;
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", KP(ls_tx_ctx_mgr));
     } else {
-      // do nothing
+      const share::ObLSID &ls_id = ls_tx_ctx_mgr->get_ls_id();
+
+      if (!ls_id.is_valid()) {
+        tmp_ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, tmp_ret, "invalid ls id", K(ls_id), KP(ls_tx_ctx_mgr));
+      } else if (!ls_tx_ctx_mgr->is_stopped()) {
+        tmp_ret = OB_PARTITION_IS_NOT_STOPPED;
+        TRANS_LOG_RET(WARN, tmp_ret, "ls_id has not been stopped", K(ls_id));
+      } else if (ls_tx_ctx_mgr->get_tx_ctx_count() > 0) {
+        // if there are unfinished transactions at the ls_id,
+        // increase retry_count by 1
+        ++retry_count_;
+      } else {
+        // do nothing
+      }
     }
 
     if (common::OB_SUCCESS != tmp_ret) {
@@ -417,24 +441,31 @@ class RemoveLSFunctor
 public:
   RemoveLSFunctor() {}
   ~RemoveLSFunctor() {}
-  bool operator()(const share::ObLSID &ls_id, ObLSTxCtxMgr *ls_tx_ctx_mgr)
+  bool operator()(ObLSTxCtxMgr *ls_tx_ctx_mgr)
   {
     int tmp_ret = common::OB_SUCCESS;
     bool bool_ret = false;
 
-    if (!ls_id.is_valid() || OB_ISNULL(ls_tx_ctx_mgr)) {
-      TRANS_LOG(WARN, "invalid argument", K(ls_id), KP(ls_tx_ctx_mgr));
+    if (OB_ISNULL(ls_tx_ctx_mgr)) {
       tmp_ret = OB_INVALID_ARGUMENT;
-    } else if (!ls_tx_ctx_mgr->is_stopped()) {
-      TRANS_LOG(WARN, "ls_tx_ctx_mgr has not been stopped", K(ls_id));
-      tmp_ret = OB_PARTITION_IS_NOT_STOPPED;
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", KP(ls_tx_ctx_mgr));
     } else {
-      // Release all ctx memory on the ls_id
-      ls_tx_ctx_mgr->destroy();
-      ls_tx_ctx_mgr = NULL;
-      bool_ret = true;
+      const share::ObLSID ls_id = ls_tx_ctx_mgr->get_ls_id();
+
+      if (!ls_id.is_valid()) {
+        tmp_ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, tmp_ret, "invalid ls id", K(ls_id), KP(ls_tx_ctx_mgr));
+      } else if (!ls_tx_ctx_mgr->is_stopped()) {
+        tmp_ret = OB_PARTITION_IS_NOT_STOPPED;
+        TRANS_LOG_RET(WARN, tmp_ret, "ls_tx_ctx_mgr has not been stopped", K(ls_id));
+      } else {
+        // Release all ctx memory on the ls_id
+        ls_tx_ctx_mgr->destroy();
+        ls_tx_ctx_mgr = NULL;
+        bool_ret = true;
+      }
+      TRANS_LOG_RET(INFO, tmp_ret, "remove ls", K(ls_id), KP(ls_tx_ctx_mgr));
     }
-    UNUSED(tmp_ret);
     return bool_ret;
   }
 };
@@ -443,18 +474,25 @@ class IterateLSIDFunctor
 {
 public:
   explicit IterateLSIDFunctor(ObLSIDIterator &ls_id_iter) : ls_id_iter_(ls_id_iter) {}
-  bool operator()(const share::ObLSID &ls_id, ObLSTxCtxMgr *ls_tx_ctx_mgr)
+  bool operator()(ObLSTxCtxMgr *ls_tx_ctx_mgr)
   {
     int tmp_ret = common::OB_SUCCESS;
     bool bool_ret = false;
 
-    if (!ls_id.is_valid() || OB_ISNULL(ls_tx_ctx_mgr)) {
-      TRANS_LOG(WARN, "invalid argument", K(ls_id), KP(ls_tx_ctx_mgr));
+    if (OB_ISNULL(ls_tx_ctx_mgr)) {
       tmp_ret = OB_INVALID_ARGUMENT;
-    } else if (OB_TMP_FAIL(ls_id_iter_.push(ls_id))) {
-      TRANS_LOG(WARN, "ObLSIDIterator push ls_id error", K(tmp_ret), K(ls_id));
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", KP(ls_tx_ctx_mgr));
     } else {
-      bool_ret = true;
+      const share::ObLSID &ls_id = ls_tx_ctx_mgr->get_ls_id();
+
+      if (!ls_id.is_valid()) {
+        tmp_ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, tmp_ret, "invalid ls id", K(ls_id), KP(ls_tx_ctx_mgr));
+      } else if (OB_TMP_FAIL(ls_id_iter_.push(ls_id))) {
+        TRANS_LOG_RET(WARN, tmp_ret, "ObLSIDIterator push ls_id error", K(tmp_ret), K(ls_id));
+      } else {
+        bool_ret = true;
+      }
     }
     return bool_ret;
   }
@@ -467,34 +505,42 @@ class IterateLSTxCtxMgrStatFunctor
 public:
   IterateLSTxCtxMgrStatFunctor(const ObAddr &addr, ObTxCtxMgrStatIterator &tx_ctx_mgr_stat_iter)
       : tx_ctx_mgr_stat_iter_(tx_ctx_mgr_stat_iter), addr_(addr) {}
-  bool operator()(const share::ObLSID &ls_id, ObLSTxCtxMgr *ls_tx_ctx_mgr)
+  bool operator()(ObLSTxCtxMgr *ls_tx_ctx_mgr)
   {
     int tmp_ret = common::OB_SUCCESS;
     bool bool_ret = false;
     ObLSTxCtxMgrStat ls_tx_ctx_mgr_stat;
 
-    if (!ls_id.is_valid() || OB_ISNULL(ls_tx_ctx_mgr)) {
-      TRANS_LOG(WARN, "invalid argument", K(ls_id), KP(ls_tx_ctx_mgr));
+    if (OB_ISNULL(ls_tx_ctx_mgr)) {
       tmp_ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", KP(ls_tx_ctx_mgr));
     } else {
-      uint64_t mgr_state = ls_tx_ctx_mgr->get_state_();
-      tmp_ret = ls_tx_ctx_mgr_stat.init(addr_,
-                                        ls_tx_ctx_mgr->ls_id_,
-                                        ls_tx_ctx_mgr->is_master_(mgr_state),
-                                        ls_tx_ctx_mgr->is_stopped_(mgr_state),
-                                        mgr_state,
-                                        ObLSTxCtxMgr::State::state_str(mgr_state),
-                                        ls_tx_ctx_mgr->total_tx_ctx_count_,
-                                        (int64_t)(&(*ls_tx_ctx_mgr)));
-      if (OB_SUCCESS != tmp_ret) {
-        TRANS_LOG(WARN, "ObLSTxCtxMgrStat init error", K_(addr), "ls_tx_ctx_mgr", *ls_tx_ctx_mgr);
-      } else if (OB_TMP_FAIL(tx_ctx_mgr_stat_iter_.push(ls_tx_ctx_mgr_stat))) {
-        TRANS_LOG(WARN, "ObTxCtxMgrStatIterator push error",
-            K(tmp_ret), K(ls_id), "ls_tx_ctx_mgr", *ls_tx_ctx_mgr);
+      const share::ObLSID &ls_id = ls_tx_ctx_mgr->get_ls_id();
+
+      if (!ls_id.is_valid()) {
+        tmp_ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, tmp_ret, "invalid ls id", K(ls_id), KP(ls_tx_ctx_mgr));
       } else {
-        bool_ret = true;
+        uint64_t mgr_state = ls_tx_ctx_mgr->get_state_();
+        tmp_ret = ls_tx_ctx_mgr_stat.init(addr_,
+                                          ls_tx_ctx_mgr->ls_id_,
+                                          ls_tx_ctx_mgr->is_master_(mgr_state),
+                                          ls_tx_ctx_mgr->is_stopped_(mgr_state),
+                                          mgr_state,
+                                          ObLSTxCtxMgr::State::state_str(mgr_state),
+                                          ls_tx_ctx_mgr->total_tx_ctx_count_,
+                                          (int64_t)(&(*ls_tx_ctx_mgr)));
+        if (OB_SUCCESS != tmp_ret) {
+          TRANS_LOG_RET(WARN, tmp_ret, "ObLSTxCtxMgrStat init error", K_(addr), "ls_tx_ctx_mgr", *ls_tx_ctx_mgr);
+        } else if (OB_TMP_FAIL(tx_ctx_mgr_stat_iter_.push(ls_tx_ctx_mgr_stat))) {
+          TRANS_LOG_RET(WARN, tmp_ret, "ObTxCtxMgrStatIterator push error",
+              K(tmp_ret), K(ls_id), "ls_tx_ctx_mgr", *ls_tx_ctx_mgr);
+        } else {
+          bool_ret = true;
+        }
       }
     }
+
     return bool_ret;
   }
 private:
@@ -517,8 +563,8 @@ public:
     bool bool_ret = false;
 
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
       ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG(WARN, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
     } else {
       if (OB_FAIL(tx_ctx->check_modify_schema_elapsed(tablet_id_,
                                                       schema_version_))) {
@@ -605,12 +651,12 @@ public:
 
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
       tmp_ret = OB_INVALID_ARGUMENT;
-      TRANS_LOG(WARN, "invalid argument", K(tmp_ret), K(tx_id), "ctx", OB_P(tx_ctx));
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", K(tmp_ret), K(tx_id), "ctx", OB_P(tx_ctx));
     } else {
       bool is_prepared = false;
       share::SCN prepare_version;
       if (OB_TMP_FAIL(tx_ctx->get_prepare_version_if_prepared(is_prepared, prepare_version))) {
-        TRANS_LOG(WARN, "get prepare version if prepared failed", K(tmp_ret), K(*tx_ctx));
+        TRANS_LOG_RET(WARN, tmp_ret, "get prepare version if prepared failed", K(tmp_ret), K(*tx_ctx));
       } else if (!is_prepared || prepare_version >= min_prepare_version_) {
         // do nothing
       } else {
@@ -653,24 +699,37 @@ private:
 class IterateAllLSTxStatFunctor
 {
 public:
-  explicit IterateAllLSTxStatFunctor(ObTxStatIterator &tx_stat_iter): tx_stat_iter_(tx_stat_iter) {}
-  bool operator()(const share::ObLSID &ls_id, ObLSTxCtxMgr *ls_tx_ctx_mgr)
+  explicit IterateAllLSTxStatFunctor(ObTxStatIterator &tx_stat_iter): tx_stat_iter_(tx_stat_iter),
+                                                                      ret_(OB_SUCCESS) {}
+  bool operator()(ObLSTxCtxMgr *ls_tx_ctx_mgr)
   {
-    int tmp_ret = common::OB_SUCCESS;
+    int ret = common::OB_SUCCESS;
     bool bool_ret = false;
 
-    if (!ls_id.is_valid() || OB_ISNULL(ls_tx_ctx_mgr)) {
-      TRANS_LOG(WARN, "invalid argument", K(ls_id), KP(ls_tx_ctx_mgr));
-      tmp_ret = OB_INVALID_ARGUMENT;
-    } else if (OB_TMP_FAIL(ls_tx_ctx_mgr->iterate_tx_ctx_stat(tx_stat_iter_))) {
-      TRANS_LOG(WARN, "iterate_tx_ctx_stat error", K(tmp_ret), K(ls_id));
+    if (OB_ISNULL(ls_tx_ctx_mgr)) {
+      ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG_RET(WARN, ret, "invalid argument", KP(ls_tx_ctx_mgr));
     } else {
-      bool_ret = true;
+      const share::ObLSID &ls_id = ls_tx_ctx_mgr->get_ls_id();
+
+      if (!ls_id.is_valid()) {
+        ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, ret, "invalid ls id", K(ls_id), KP(ls_tx_ctx_mgr));
+      } else if (OB_FAIL(ls_tx_ctx_mgr->iterate_tx_ctx_stat(tx_stat_iter_))) {
+        TRANS_LOG_RET(WARN, ret, "iterate_tx_ctx_stat error", K(ret), K(ls_id));
+      } else {
+        bool_ret = true;
+      }
+    }
+    if (OB_FAIL(ret)) {
+      ret_ = ret;
     }
     return bool_ret;
   }
+  int get_ret() const { return ret_; }
 private:
   ObTxStatIterator &tx_stat_iter_;
+  int ret_;
 };
 
 class IteratorTxIDFunctor
@@ -683,8 +742,8 @@ public:
     bool bool_ret = false;
 
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
       tmp_ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
       // If you encounter a situation where tx_ctx has not been init yet,
       // skip it directly, there will be a background thread retry
     } else if (!tx_ctx->is_inited()) {
@@ -704,15 +763,18 @@ private:
 class IterateTxStatFunctor
 {
 public:
-  explicit IterateTxStatFunctor(ObTxStatIterator &tx_stat_iter) : tx_stat_iter_(tx_stat_iter) {}
+  explicit IterateTxStatFunctor(ObTxStatIterator &tx_stat_iter) : tx_stat_iter_(tx_stat_iter),
+                                                                  ret_(OB_SUCCESS){}
   OPERATOR_V4(IterateTxStatFunctor)
   {
-    int tmp_ret = common::OB_SUCCESS;
+    int ret = common::OB_SUCCESS;
     bool bool_ret = false;
+    // threshold for primary tenant inserting inner table
+    int64_t INSERT_INTERNAL_FOR_PRIMARY = 10 * 60 * 1000 * 1000L;
 
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
-      tmp_ret = OB_INVALID_ARGUMENT;
+      ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG_RET(WARN, ret, "invalid argument", K(tx_id), "ctx", OB_P(tx_ctx));
       // If you encounter a situation where tx_ctx has not been init yet,
       // skip it directly, there will be a background thread retry
     } else if (!tx_ctx->is_inited()) {
@@ -728,11 +790,11 @@ public:
         // If the transaction has not completed in 600 seconds, print its trace log
         tx_ctx->print_trace_log();
       }
-      if (OB_SUCCESS == tmp_ret) {
+      if (OB_SUCC(ret)) {
         share::ObLSArray participants_arr;
-        if (OB_TMP_FAIL(tx_ctx->get_2pc_participants_copy(participants_arr))) {
-          TRANS_LOG(WARN, "ObTxStat get participants copy error", K(tmp_ret));
-        } else if (OB_TMP_FAIL(tx_stat.init(tx_ctx->addr_,
+        if (OB_FAIL(tx_ctx->get_2pc_participants_copy(participants_arr))) {
+          TRANS_LOG_RET(WARN, ret, "ObTxStat get participants copy error", K(ret));
+        } else if (OB_FAIL(tx_stat.init(tx_ctx->addr_,
                                             tx_id,
                                             tx_ctx->tenant_id_,
                                             has_decided,
@@ -752,23 +814,36 @@ public:
                                             tx_ctx->role_state_,
                                             tx_ctx->session_id_,
                                             tx_ctx->exec_info_.scheduler_,
-                                            tx_ctx->is_exiting_))) {
-          TRANS_LOG(WARN, "ObTxStat init error", K(tmp_ret), KPC(tx_ctx));
-        } else if (OB_TMP_FAIL(tx_stat_iter_.push(tx_stat))) {
-          TRANS_LOG(WARN, "ObTxStatIterator push trans stat error", K(tmp_ret));
-        } else {
-          // do nothing
+                                            tx_ctx->is_exiting_,
+                                            tx_ctx->exec_info_.xid_,
+                                            tx_ctx->exec_info_.upstream_,
+                                            tx_ctx->last_request_ts_))) {
+          TRANS_LOG_RET(WARN, ret, "ObTxStat init error", K(ret), KPC(tx_ctx));
+        } else if (OB_FAIL(tx_stat_iter_.push(tx_stat))) {
+          TRANS_LOG_RET(WARN, ret, "ObTxStatIterator push trans stat error", K(ret));
+        } else if (!tx_stat.xid_.empty() && tx_stat.coord_ == tx_stat.ls_id_ && (int64_t)ObTxState::REDO_COMPLETE == tx_stat.state_
+                   && (!MTL_IS_PRIMARY_TENANT() || (TxCtxRoleState::LEADER == tx_stat.role_state_
+                   && tx_stat.last_request_ts_ < ObClockGenerator::getClock() - INSERT_INTERNAL_FOR_PRIMARY))) {
+          MTL(ObXAService *)->insert_record_for_standby(tx_stat.tenant_id_,
+                                                        tx_stat.xid_,
+                                                        tx_stat.tx_id_,
+                                                        tx_stat.coord_,
+                                                        tx_stat.scheduler_addr_);
         }
       }
     }
-    if (OB_SUCCESS == tmp_ret) {
+    if (OB_SUCC(ret)) {
       bool_ret = true;
+    } else {
+      ret_ = ret;
     }
 
     return bool_ret;
   }
+  int get_ret() const { return ret_; }
 private:
   ObTxStatIterator &tx_stat_iter_;
+  int ret_;
 };
 
 class GetRecLogTSFunctor
@@ -882,6 +957,16 @@ public:
       } else if (OB_FAIL(tx_ctx->get_memtable_key_arr(memtable_key_info_arr))) {
         TRANS_LOG(WARN, "get memtable key arr fail", KR(ret), K(memtable_key_info_arr));
       } else {
+        // If the row has been dumped into sstable, we can not get the
+        // memtable key info since the callback of it has been dropped.
+        // So we need to judge whether the transaction has been dumped
+        // into sstable here. Futhermore, we need to fitler out ratain
+        // transactions by !tx_ctx->is_exiting().
+        if (memtable_key_info_arr.empty() && !tx_ctx->is_exiting()
+            && tx_ctx->get_memtable_ctx()->maybe_has_undecided_callback()) {
+          ObMemtableKeyInfo key_info;
+          memtable_key_info_arr.push_back(key_info);
+        }
         int64_t count = memtable_key_info_arr.count();
         for (int i = 0; OB_SUCC(ret) && i < count; i++) {
           ObTxLockStat tx_lock_stat;
@@ -930,7 +1015,7 @@ public:
   {
     bool bool_ret = false;
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), KP(tx_ctx));
+      TRANS_LOG_RET(WARN, common::OB_INVALID_ARGUMENT, "invalid argument", K(tx_id), KP(tx_ctx));
     } else if (print_count_++ < max_print_count_) {
       TRANS_LOG(INFO, "hashmap item", K(tx_id), "context", *tx_ctx);
       bool_ret = true;
@@ -953,18 +1038,25 @@ class PrintAllLSTxCtxFunctor
 public:
   PrintAllLSTxCtxFunctor() {}
   ~PrintAllLSTxCtxFunctor() {}
-  bool operator()(const share::ObLSID &ls_id, ObLSTxCtxMgr *ls_tx_ctx_mgr)
+  bool operator()(ObLSTxCtxMgr *ls_tx_ctx_mgr)
   {
     int tmp_ret = common::OB_SUCCESS;
     bool bool_ret = false;
     const bool verbose = true;
 
-    if (!ls_id.is_valid() || OB_ISNULL(ls_tx_ctx_mgr)) {
-      TRANS_LOG(WARN, "invalid argument", K(ls_id), KP(ls_tx_ctx_mgr));
+    if (OB_ISNULL(ls_tx_ctx_mgr)) {
       tmp_ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", KP(ls_tx_ctx_mgr));
     } else {
-      ls_tx_ctx_mgr->print_all_tx_ctx(ObLSTxCtxMgr::MAX_HASH_ITEM_PRINT, verbose);
-      bool_ret = true;
+      const share::ObLSID &ls_id = ls_tx_ctx_mgr->get_ls_id();
+
+      if (!ls_id.is_valid()) {
+        tmp_ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, tmp_ret, "invalid ls id", K(ls_id), KP(ls_tx_ctx_mgr));
+      } else {
+        ls_tx_ctx_mgr->print_all_tx_ctx(ObLSTxCtxMgr::MAX_HASH_ITEM_PRINT, verbose);
+        bool_ret = true;
+      }
     }
     UNUSED(tmp_ret);
     return bool_ret;
@@ -980,7 +1072,7 @@ public:
   {
     bool bool_ret = false;
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), KP(tx_ctx));
+      TRANS_LOG_RET(WARN, common::OB_INVALID_ARGUMENT, "invalid argument", K(tx_id), KP(tx_ctx));
     } else {
       bool_ret = true;
     }
@@ -991,18 +1083,20 @@ public:
 class ObRemoveCallbackFunctor
 {
 public:
-  explicit ObRemoveCallbackFunctor(memtable::ObMemtable *mt) : mt_(mt) {}
+  explicit ObRemoveCallbackFunctor(
+    const memtable::ObMemtableSet *memtable_set)
+    : memtable_set_(memtable_set) {}
   ~ObRemoveCallbackFunctor() {}
   OPERATOR_V4(ObRemoveCallbackFunctor)
   {
     bool bool_ret = true;
     int tmp_ret = OB_SUCCESS;
 
-    if (!tx_id.is_valid() || OB_ISNULL(tx_ctx) || OB_ISNULL(mt_)) {
+    if (!tx_id.is_valid() || OB_ISNULL(tx_ctx) || OB_ISNULL(memtable_set_)) {
       tmp_ret = OB_ERR_UNEXPECTED;
-      TRANS_LOG(WARN, "invalid argument", K(tx_id));
-    } else if (OB_TMP_FAIL(tx_ctx->remove_callback_for_uncommited_txn(mt_))) {
-      TRANS_LOG(WARN, "remove callback for unncommitted tx failed",
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument", K(tx_id));
+    } else if (OB_TMP_FAIL(tx_ctx->remove_callback_for_uncommited_txn(memtable_set_))) {
+      TRANS_LOG_RET(WARN, tmp_ret, "remove callback for unncommitted tx failed",
         K(tmp_ret), K(tx_id), KP(tx_ctx));
     }
 
@@ -1013,7 +1107,7 @@ public:
     return bool_ret;
   }
 private:
-  memtable::ObMemtable *mt_;
+  const memtable::ObMemtableSet *memtable_set_;
 };
 
 class ObTxSubmitLogFunctor
@@ -1081,7 +1175,7 @@ public:
   {
     bool bool_ret = false;
     if (!tx_id.is_valid() || OB_ISNULL(tx_ctx)) {
-      TRANS_LOG(WARN, "invalid argument", K(tx_id), KP(tx_ctx));
+      TRANS_LOG_RET(WARN, common::OB_INVALID_ARGUMENT, "invalid argument", K(tx_id), KP(tx_ctx));
     } else {
       share::SCN start_scn = tx_ctx->get_start_log_ts();
       if (start_scn < min_start_scn_) {
@@ -1153,6 +1247,77 @@ public:
 
 private:
   share::SCN min_start_scn_;
+<<<<<<< HEAD
+=======
+};
+
+class IterateTxSchedulerFunctor
+{
+public:
+  explicit IterateTxSchedulerFunctor(ObTxSchedulerStatIterator &tx_scheduler_stat_iter)
+   : tx_scheduler_stat_iter_(tx_scheduler_stat_iter) {}
+  bool operator()(ObTxDesc *tx_desc)
+  {
+    int tmp_ret = common::OB_SUCCESS;
+    bool bool_ret = false;
+
+    if (OB_ISNULL(tx_desc)) {
+      tmp_ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG_RET(WARN, tmp_ret, "invalid argument tx_desc", KP(tx_desc));
+    } else {
+      ObTransID &tx_id = tx_desc->tx_id_;
+      if (!tx_id.is_valid()) {
+        tmp_ret = OB_INVALID_ARGUMENT;
+        TRANS_LOG_RET(WARN, tmp_ret, "invalid argument tx_id", K(tx_id), KP(tx_desc));
+      }
+    }
+
+    if (OB_SUCCESS == tmp_ret) {
+      ObTxSchedulerStat tx_scheduler_stat;
+      ObTxPartList copy_parts;
+      ObTxSavePointList copy_savepoints;
+      if (OB_TMP_FAIL(tx_desc->get_parts_copy(copy_parts))) {
+        TRANS_LOG_RET(WARN, tmp_ret, "ObTxSchedulerStat get participants copy error", K(tmp_ret));
+      } else if (OB_TMP_FAIL(tx_desc->get_savepoints_copy(copy_savepoints))) {
+        TRANS_LOG_RET(WARN, tmp_ret, "ObTxSchedulerStat get savepoints copy error", K(tmp_ret));
+      } else if (OB_TMP_FAIL(tx_scheduler_stat.init(tx_desc->tenant_id_,
+                                                    tx_desc->addr_,
+                                                    tx_desc->sess_id_,
+                                                    tx_desc->tx_id_,
+                                                    (int64_t)tx_desc->state_,
+                                                    tx_desc->cluster_id_,
+                                                    tx_desc->xid_,
+                                                    tx_desc->coord_id_,
+                                                    copy_parts,
+                                                    tx_desc->isolation_,
+                                                    tx_desc->snapshot_version_,
+                                                    tx_desc->access_mode_,
+                                                    tx_desc->op_sn_,
+                                                    tx_desc->flags_.v_,
+                                                    tx_desc->active_ts_,
+                                                    tx_desc->expire_ts_,
+                                                    tx_desc->timeout_us_,
+                                                    tx_desc->ref_,
+                                                    tx_desc,
+                                                    copy_savepoints,
+                                                    tx_desc->abort_cause_,
+                                                    tx_desc->can_elr_))) {
+        TRANS_LOG_RET(WARN, tmp_ret, "ObTxSchedulerStat init error", K(tmp_ret), KPC(tx_desc));
+      } else if (OB_TMP_FAIL(tx_scheduler_stat_iter_.push(tx_scheduler_stat))) {
+        TRANS_LOG_RET(WARN, tmp_ret, "ObTxSchedulerStatIterator push trans scheduler error", K(tmp_ret));
+      } else {
+        // do nothing
+      }
+    }
+
+    if (OB_SUCCESS == tmp_ret) {
+      bool_ret = true;
+    }
+    return bool_ret;
+  }
+private:
+  ObTxSchedulerStatIterator &tx_scheduler_stat_iter_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 
 } // transaction

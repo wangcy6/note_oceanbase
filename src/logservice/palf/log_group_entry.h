@@ -38,16 +38,20 @@ public:
   bool is_valid() const;
   void reset();
   bool check_integrity() const;
+  bool check_integrity(int64_t &data_checksum) const;
   int64_t get_header_size() const { return header_.get_serialize_size(); }
-  int64_t get_payload_offset() const { return header_.get_serialize_size() +
-    (header_.is_padding_log() ? header_.get_data_len() : 0); }
+  int64_t get_payload_offset() const { return header_.get_serialize_size(); }
   int64_t get_data_len() const { return header_.get_data_len(); }
   // return total size of header and body, including the length of padding log
   int64_t get_group_entry_size() const { return header_.get_serialize_size() +
     header_.get_data_len(); }
+<<<<<<< HEAD
   // used for fetch_log, ignore the data len of padding entry
   int64_t get_group_size_without_padding_data() const { return header_.get_serialize_size() +
     (header_.is_padding_log() ? 0 : header_.get_data_len()); }
+=======
+  int get_log_min_scn(share::SCN &min_scn) const;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   const share::SCN get_scn() const { return header_.get_max_scn(); }
   LSN get_committed_end_lsn() const { return header_.get_committed_end_lsn(); }
   const LogGroupEntryHeader &get_header() const { return header_; }

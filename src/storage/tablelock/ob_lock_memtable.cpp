@@ -49,10 +49,15 @@ ObLockMemtable::ObLockMemtable()
     freeze_scn_(SCN::min_scn()),
     flushed_scn_(SCN::min_scn()),
     rec_scn_(SCN::max_scn()),
+<<<<<<< HEAD
     pre_rec_scn_(),
+=======
+    pre_rec_scn_(SCN::max_scn()),
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     max_committed_scn_(),
     is_frozen_(false),
-    freezer_(nullptr)
+    freezer_(nullptr),
+    flush_lock_(common::ObLatchIds::CLOG_CKPT_LOCK)
 {
 }
 
@@ -97,6 +102,10 @@ int ObLockMemtable::init(
 void ObLockMemtable::reset()
 {
   rec_scn_.set_max();
+<<<<<<< HEAD
+=======
+  pre_rec_scn_.set_max();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   max_committed_scn_.reset();
   ls_id_.reset();
   ObITable::reset();
@@ -145,6 +154,7 @@ int ObLockMemtable::lock_(
   } else if (OB_FAIL(mem_ctx->check_lock_exist(lock_op.lock_id_,
                                                lock_op.owner_id_,
                                                lock_op.lock_mode_,
+                                               lock_op.op_type_,
                                                lock_exist,
                                                lock_mode_in_same_trans))) {
     LOG_WARN("failed to check lock exist ", K(ret), K(lock_op));
@@ -199,6 +209,7 @@ int ObLockMemtable::lock_(
       LOG_WARN("recheck function construct failed", K(tmp_ret));
     } else if (OB_SUCCESS != (tmp_ret = post_obj_lock_conflict_(ctx.mvcc_acc_ctx_,
                                                                 lock_op.lock_id_,
+                                                                lock_op.lock_mode_,
                                                                 *(conflict_tx_set.begin()),
                                                                 recheck_f))) {
       LOG_WARN("post obj lock conflict failed", K(tmp_ret));
@@ -217,6 +228,8 @@ int ObLockMemtable::unlock_(
 {
   int ret = OB_SUCCESS;
   ObMemtableCtx *mem_ctx = NULL;
+  bool lock_op_exist = false;
+  ObTableLockMode unused_lock_mode_in_same_trans = 0x0;
   ObLockStep succ_step = STEP_BEGIN;
   ObMvccWriteGuard guard(true);
 
@@ -226,6 +239,16 @@ int ObLockMemtable::unlock_(
   if (OB_FAIL(guard.write_auth(ctx))) {
     LOG_WARN("not allow unlock table.", K(ret), K(ctx));
   } else if (FALSE_IT(mem_ctx = static_cast<ObMemtableCtx *>(ctx.mvcc_acc_ctx_.mem_ctx_))) {
+    // check whether the unlock op exist already
+  } else if (OB_FAIL(mem_ctx->check_lock_exist(unlock_op.lock_id_,
+                                               unlock_op.owner_id_,
+                                               unlock_op.lock_mode_,
+                                               unlock_op.op_type_,
+                                               lock_op_exist,
+                                               unused_lock_mode_in_same_trans))) {
+    LOG_WARN("failed to check lock exist ", K(ret), K(unlock_op));
+  } else if (lock_op_exist) {
+    // do nothing
   } else if (OB_FAIL(obj_lock_map_.unlock(unlock_op,
                                           is_try_lock,
                                           expired_time))) {
@@ -303,6 +326,7 @@ int ObLockMemtable::replay_lock_(
 // wait lock at lock wait mgr.
 int ObLockMemtable::post_obj_lock_conflict_(ObMvccAccessCtx &acc_ctx,
                                             const ObLockID &lock_id,
+                                            const ObTableLockMode &lock_mode,
                                             const ObTransID &conflict_tx_id,
                                             ObFunction<int(bool &need_wait)> &recheck_f)
 {
@@ -333,11 +357,11 @@ int ObLockMemtable::post_obj_lock_conflict_(ObMvccAccessCtx &acc_ctx,
                                        lock_id,
                                        lock_wait_expire_ts,
                                        remote_tx,
-                                       mem_ctx->is_can_elr(),
                                        -1,
                                        -1, // total_trans_node_cnt
                                        tx_id,
                                        conflict_tx_id,
+                                       lock_mode,
                                        recheck_f);
     if (OB_SUCCESS != tmp_ret) {
       LOG_WARN("post_lock after tx conflict failed",
@@ -372,6 +396,7 @@ int ObLockMemtable::check_lock_conflict(
   } else if (OB_FAIL(mem_ctx->check_lock_exist(lock_op.lock_id_,
                                                lock_op.owner_id_,
                                                lock_op.lock_mode_,
+                                               lock_op.op_type_,
                                                lock_exist,
                                                lock_mode_in_same_trans))) {
     LOG_WARN("failed to check lock exist ", K(ret), K(lock_op));
@@ -504,7 +529,18 @@ int ObLockMemtable::update_lock_status(
   } else if ((OUT_TRANS_LOCK == op_info.op_type_ || OUT_TRANS_UNLOCK == op_info.op_type_)
              && LOCK_OP_COMPLETE == status) {
     RLockGuard guard(flush_lock_);
+<<<<<<< HEAD
     rec_scn_.dec_update(commit_scn);
+=======
+    if (commit_scn <= freeze_scn_) {
+      LOG_INFO("meet disordered replay, will dec_update pre_rec_scn_", K(ret),
+               K(op_info), K(commit_scn), K(rec_scn_), K(pre_rec_scn_),
+               K(freeze_scn_), K(ls_id_));
+      pre_rec_scn_.dec_update(commit_scn);
+    } else {
+      rec_scn_.dec_update(commit_scn);
+    }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     max_committed_scn_.inc_update(commit_scn);
     LOG_INFO("out_trans update_lock_status", K(ret), K(op_info), K(commit_scn), K(status), K(rec_scn_), K(ls_id_));
   }
@@ -568,6 +604,18 @@ int ObLockMemtable::get_lock_op_iter(const ObLockID &lock_id,
   return ret;
 }
 
+int ObLockMemtable::check_and_clear_obj_lock(const bool force_compact)
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    TABLELOCK_LOG(WARN, "ObLockMemtable not inited.", K(ret));
+  } else if (OB_FAIL(obj_lock_map_.check_and_clear_obj_lock(force_compact))) {
+    TABLELOCK_LOG(WARN, "check and clear obj lock failed", K(ret));
+  }
+  return ret;
+}
+
 int ObLockMemtable::scan(
     const ObTableIterParam &param,
     ObTableAccessContext &context,
@@ -625,13 +673,15 @@ int ObLockMemtable::set(
     const uint64_t table_id,
     const storage::ObTableReadInfo &read_info,
     const ObIArray<share::schema::ObColDesc> &columns,
-    const storage::ObStoreRow &row)
+    const storage::ObStoreRow &row,
+    const share::ObEncryptMeta *encrypt_meta)
 {
   UNUSED(ctx);
   UNUSED(table_id);
   UNUSED(read_info);
   UNUSED(columns);
   UNUSED(row);
+  UNUSED(encrypt_meta);
   return OB_NOT_SUPPORTED;
 }
 
@@ -725,10 +775,34 @@ SCN ObLockMemtable::get_rec_scn()
   LOG_INFO("rec_scn of ObLockMemtable is ",
            K(rec_scn_), K(flushed_scn_), K(pre_rec_scn_),
            K(freeze_scn_), K(max_committed_scn_), K(is_frozen_), K(ls_id_));
+<<<<<<< HEAD
   if (!pre_rec_scn_.is_valid()) {
     return rec_scn_;
   } else {
     return pre_rec_scn_;
+=======
+  // If pre_rec_scn_ is max, it means that previous memtable
+  // has already been flushed. In ohter words, it means that
+  // rec_scn_ is ready to work, so we can return rec_scn_.
+  // You can regard max_scn as an invalid value for pre_rec_scn_ here.
+  // (As a matter of fact, max_scn means pre_rec_scn_ or rec_scn_
+  // will not block checkpoint advancing.)
+  //
+  // Specifically, if there's a commit_scn which is smaller
+  // than the freeze_scn_, the pre_rec_scn_ will be set to
+  // an valid value (i.e. not max_scn) again, it's a special
+  // case in disordered replay.
+  // You can see details about this case in update_lock_status.
+  if (pre_rec_scn_.is_max()) {
+    return rec_scn_;
+  } else {
+    if (pre_rec_scn_ > rec_scn_) {
+      LOG_INFO("prec_rec_scn_ is larger than rec_scn_!", K(pre_rec_scn_),
+               K(rec_scn_), K(flushed_scn_), K(freeze_scn_),
+               K(max_committed_scn_), K(is_frozen_), K(ls_id_));
+    }
+    return share::SCN::min(pre_rec_scn_, rec_scn_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
 }
 
@@ -746,7 +820,11 @@ int ObLockMemtable::on_memtable_flushed()
 {
   int ret = OB_SUCCESS;
   WLockGuard guard(flush_lock_);
+<<<<<<< HEAD
   pre_rec_scn_.reset();
+=======
+  pre_rec_scn_.set_max();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   if (freeze_scn_ > flushed_scn_) {
     flushed_scn_ = freeze_scn_;
   } else {
@@ -787,7 +865,11 @@ int ObLockMemtable::flush(SCN recycle_scn,
       LOG_INFO("lock memtable no need to flush", K(rec_scn), K(recycle_scn),
                K(is_frozen_), K(ls_id_));
     } else if (is_active_memtable()) {
+<<<<<<< HEAD
       freeze_scn_ = max_committed_scn_;
+=======
+      freeze_scn_.inc_update(max_committed_scn_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       if (flushed_scn_ >= freeze_scn_) {
         LOG_INFO("skip freeze because of flushed", K_(ls_id), K_(flushed_scn), K_(freeze_scn));
       } else {
@@ -825,6 +907,8 @@ int ObLockMemtable::flush(SCN recycle_scn,
         if (OB_EAGAIN != ret && OB_SIZE_OVERFLOW != ret) {
           LOG_WARN("failed to schedule lock_memtable merge dag", K(ret), K(this));
         }
+      } else {
+        LOG_INFO("schedule lock_memtable merge_dag successfully", K(ls_id_), K(freeze_scn_));
       }
     }
   }
@@ -846,6 +930,7 @@ int ObLockMemtable::replay_row(
   int64_t create_timestamp = 0;
   int64_t create_schema_vesion = -1;
   ObMemtableCtx *mem_ctx = nullptr;
+  const int64_t curr_timestamp = ObTimeUtility::current_time();
 
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
@@ -872,7 +957,7 @@ int ObLockMemtable::replay_row(
                           lock_op_type,
                           LOCK_OP_DOING,
                           seq_no,
-                          create_timestamp,
+                          OB_MIN(create_timestamp, curr_timestamp),
                           create_schema_vesion);
     if (OB_UNLIKELY(!lock_op.is_valid())) {
       ret = OB_ERR_UNEXPECTED;

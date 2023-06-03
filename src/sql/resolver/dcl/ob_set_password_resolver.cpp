@@ -78,9 +78,15 @@ int ObSetPasswordResolver::resolve(const ParseNode &parse_tree)
       ObString host_name;
       const ObString &session_user_name = session_info_->get_user_name();
       const ObString &session_host_name = session_info_->get_host_name();
+      bool is_valid = false;
       if (NULL != node->children_[0]) {
         ParseNode *user_hostname_node = node->children_[0];
-        if (OB_ISNULL(user_hostname_node->children_[0])) {
+        if (OB_FAIL(check_role_as_user(user_hostname_node, is_valid))) {
+          LOG_WARN("failed to check role as user", K(ret));
+        } else if (!is_valid) {
+          ret = OB_USER_NOT_EXIST;
+          LOG_ORACLE_USER_ERROR(OB_USER_NOT_EXIST, int(user_hostname_node->str_len_), user_hostname_node->str_value_);
+        } else if (OB_ISNULL(user_hostname_node->children_[0])) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("username should not be NULL", K(ret));
         } else {
@@ -102,7 +108,15 @@ int ObSetPasswordResolver::resolve(const ParseNode &parse_tree)
         host_name = session_host_name;
         set_pwd_stmt->set_for_current_user(true);
       }
-
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(check_dcl_on_inner_user(node->type_,
+                                            params_.session_info_->get_priv_user_id(),
+                                            user_name,
+                                            host_name))) {
+          LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user", K(ret),
+                   K(params_.session_info_->get_priv_user_id()), K(user_name));
+        }
+      }
       if (OB_SUCC(ret)) {
         // replace password to *** in query_string for audit
         ObString masked_sql;
@@ -321,4 +335,27 @@ int ObSetPasswordResolver::resolve_oracle_password_strength(common::ObString &us
     }
   }
   return ret; 
+}
+
+/*
+bugfix :
+alter user resource identified by password core cause by invalid memory access
+*/
+int ObSetPasswordResolver::check_role_as_user(ParseNode *user_hostname_node, bool &is_valid) {
+  is_valid = false;
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(user_hostname_node)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("failed to check_role_as_user, user_hostname_node is NULL", K(ret));
+  } else if (!lib::is_oracle_mode() || T_VARCHAR != user_hostname_node->type_) {
+    is_valid = true;
+  } else {
+    ObString node_str(user_hostname_node->str_len_, user_hostname_node->str_value_);
+    if (0 != node_str.case_compare(OB_ORA_RESOURCE_ROLE_NAME) &&
+        0 != node_str.case_compare(OB_ORA_PUBLIC_ROLE_NAME) &&
+        0 != node_str.case_compare(OB_ORA_CONNECT_ROLE_NAME)) {
+      is_valid = true;
+    }
+  }
+  return ret;
 }

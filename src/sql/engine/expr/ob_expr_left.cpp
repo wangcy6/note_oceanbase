@@ -26,7 +26,7 @@ namespace sql
 {
 
 ObExprLeft::ObExprLeft(ObIAllocator &alloc)
-: ObStringExprOperator(alloc, T_FUN_SYS_LEFT, "left", 2)
+: ObStringExprOperator(alloc, T_FUN_SYS_LEFT, "left", 2, VALID_FOR_GENERATED_COL)
 {
 }
 
@@ -78,6 +78,8 @@ int ObExprLeft::calc_result_type2(ObExprResType &type,
   } else if (exec_ctx->is_ps_prepare_stage()) {
     // the ps prepare stage does not do type deduction, and directly gives a default type.
     type.set_char();
+    type.set_default_collation_type();
+    type.set_collation_level(CS_LEVEL_IMPLICIT);
     type.set_length(0);
   } else {
     type2.set_calc_type(ObIntType);

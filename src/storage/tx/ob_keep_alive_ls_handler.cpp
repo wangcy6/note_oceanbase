@@ -32,7 +32,8 @@ int64_t ObKeepAliveLogBody::get_max_serialize_size()
   return max_log_body.get_serialize_size();
 }
 
-int ObKeepAliveLSHandler::init(const ObLSID &ls_id, logservice::ObLogHandler *log_handler_ptr)
+int ObKeepAliveLSHandler::init(const int64_t tenant_id, const ObLSID &ls_id,
+                               logservice::ObLogHandler *log_handler_ptr)
 {
   int ret = OB_SUCCESS;
   logservice::ObLogBaseHeader base_header(ObLogBaseType::KEEP_ALIVE_LOG_BASE_TYPE,
@@ -45,7 +46,7 @@ int ObKeepAliveLSHandler::init(const ObLSID &ls_id, logservice::ObLogHandler *lo
   } else if (OB_NOT_NULL(log_handler_ptr_)) {
     ret = OB_INIT_TWICE;
   } else if (OB_ISNULL(submit_buf_ =
-                           static_cast<char *>(ob_malloc(submit_buf_len_, "KeepAliveBuf")))) {
+                       static_cast<char *>(ob_malloc(submit_buf_len_, ObMemAttr(tenant_id, "KeepAliveBuf"))))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     TRANS_LOG(WARN, "[Keep Alive] submit_buf alloc failed", K(ret), KP(submit_buf_),
               K(base_header));
@@ -204,10 +205,17 @@ void ObKeepAliveLSHandler::print_stat_info()
                                                           "Near_To_GTS_Cnt",    stat_info_.near_to_gts_cnt,
                                                           "Other_Error_Cnt",    stat_info_.other_error_cnt,
                                                           "Submit_Succ_Cnt",    stat_info_.submit_succ_cnt,
+<<<<<<< HEAD
                                                           "last_scn",           stat_info_.stat_keepalive_info_.scn_.get_val_for_tx(),
                                                           "last_lsn",           stat_info_.stat_keepalive_info_.lsn_,
                                                           "last_gts",           last_gts_,
                                                           "min_start_scn",      stat_info_.stat_keepalive_info_.min_start_scn_.get_val_for_tx(),
+=======
+                                                          "last_scn",           to_cstring(stat_info_.stat_keepalive_info_.scn_),
+                                                          "last_lsn",           stat_info_.stat_keepalive_info_.lsn_,
+                                                          "last_gts",           last_gts_,
+                                                          "min_start_scn",      to_cstring(stat_info_.stat_keepalive_info_.min_start_scn_),
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                                                           "min_start_status",   stat_info_.stat_keepalive_info_.min_start_status_);
   stat_info_.clear_cnt();
 }

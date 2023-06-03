@@ -12,6 +12,7 @@
 
 #include "common/cell/ob_cell_writer.h"
 #include "common/object/ob_object.h"
+#include "lib/timezone/ob_time_convert.h"
 namespace oceanbase
 {
 namespace common
@@ -175,7 +176,9 @@ int ObCellWriter::write_text(const ObObj &obj, const enum ObObjType store_type, 
   }
   if (OB_SUCC(ret) && !old_text_format()) {
     ObLobScale lob_scale(obj.get_scale());
-    if (!lob_scale.is_in_row()) {
+    if (obj.has_lob_header()) {
+      lob_scale.set_has_lob_header();
+    } else if (!lob_scale.is_in_row()) {
       lob_scale.set_in_row();
     }
     if (OB_FAIL(append<uint8_t>(static_cast<uint8_t>(lob_scale.get_scale())))) {
@@ -503,7 +506,7 @@ int ObCellWriter::append(uint64_t column_id, const ObObj &obj, ObObj *clone_obj)
         WRITE_DATA(ObTimestampType, 0, int64_t, obj.get_timestamp());
         break;
       case ObTimeType: {
-        const int64_t ob_time_max_value = 3020399999999;  // 838:59:59
+        const int64_t ob_time_max_value = TIME_MAX_VAL;
         assert(obj.get_time() <= ob_time_max_value && obj.get_time() >= -ob_time_max_value);
         WRITE_DATA(ObTimeType, 0, int64_t, obj.get_time());
         break;
@@ -528,7 +531,8 @@ int ObCellWriter::append(uint64_t column_id, const ObObj &obj, ObObj *clone_obj)
       case ObTextType:
       case ObMediumTextType:
       case ObLongTextType: 
-      case ObJsonType: {
+      case ObJsonType:
+      case ObGeometryType: {
         ret = write_text(obj, obj.get_type(), obj.get_string(), clone_obj);
         break;
       }

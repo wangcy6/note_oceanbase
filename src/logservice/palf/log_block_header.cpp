@@ -149,7 +149,11 @@ DEFINE_DESERIALIZE(LogBlockHeader)
              || OB_FAIL(serialization::decode_i32(buf, data_len, new_pos, &flag_))
              || OB_FAIL(min_lsn_.deserialize(buf, data_len, new_pos))
              || OB_FAIL(min_scn_.fixed_deserialize(buf, data_len, new_pos))
+<<<<<<< HEAD
              || OB_FAIL(max_scn_.fixed_deserialize(buf, data_len, new_pos))
+=======
+             || OB_FAIL(max_scn_.fixed_deserialize_without_transform(buf, data_len, new_pos))
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
              || OB_FAIL(serialization::decode_i64(buf, data_len, new_pos, reinterpret_cast<int64_t*>(&curr_block_id_)))
              || OB_FAIL(serialization::decode_i64(buf, data_len, new_pos, &palf_id_))
              || OB_FAIL(serialization::decode_i64(buf, data_len, new_pos, &checksum_))) {

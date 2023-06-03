@@ -16,17 +16,22 @@
 #define OCEANBASE_LIBOBCDC_SCHEMA_CACHE_INFO_H__
 
 #include "share/ob_errno.h"                               // OB_SUCCESS
-#include "share/schema/ob_table_schema.h"                 // ObTableSchema, ColumnIdxHashArray
+#include "share/schema/ob_table_schema.h"                 // ColumnIdxHashArray
 #include "common/object/ob_object.h"                      // ObObjMeta
 #include "common/ob_accuracy.h"                           // ObAccuracy
 #include "lib/container/ob_array_helper.h"
 
 namespace oceanbase
 {
+namespace datadict
+{
+class ObDictTableMeta;
+}
 namespace libobcdc
 {
 class ObObj2strHelper;
 class ObLogSchemaGuard;
+class ObCDCUdtSchemaInfo;
 
 // The primary keyless table has one hidden columns.
 // column_id=OB_HIDDEN_PK_INCREMENT_COLUMN_ID[1], column_name="__pk_increment"
@@ -52,10 +57,11 @@ public:
 public:
   // Common column initialization interface
   // allocator is used to allocate memory for orig_default_value_str, consistent with release_mem
+  template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
   int init(
       const uint64_t column_id,
-      const share::schema::ObTableSchema &table_schema,
-      const share::schema::ObColumnSchemaV2 &column_table_schema,
+      const TABLE_SCHEMA &table_schema,
+      const COLUMN_SCHEMA &column_table_schema,
       const int16_t column_stored_idx,
       const bool is_usr_column,
       const int16_t usr_column_idx,
@@ -104,6 +110,20 @@ public:
   }
   void get_extended_type_info(common::ObArrayHelper<common::ObString> &str_array) const;
 
+  inline void set_udt_set_id(const uint64_t id) { udt_set_id_ = id; }
+  inline uint64_t get_udt_set_id() const { return udt_set_id_; }
+  inline bool is_udt_column() const { return udt_set_id_ > 0 && OB_INVALID_ID != udt_set_id_; }
+
+  inline void set_sub_data_type(const uint64_t sub_data_type) { sub_type_ = sub_data_type; }
+  inline uint64_t get_sub_data_type() const { return sub_type_; }
+
+  inline bool is_udt_hidden_column() const { return is_udt_column() && is_hidden(); }
+  inline bool is_xmltype() const {
+    return is_udt_column()
+        && (((meta_type_.is_ext() || meta_type_.is_user_defined_sql_type()) && sub_type_ == T_OBJ_XML)
+           || meta_type_.is_xml_sql_type());
+  }
+
 public:
   TO_STRING_KV(
       K_(column_id),
@@ -117,21 +137,25 @@ public:
       K_(orig_default_value_str),
       K_(extended_type_info_size),
       K_(extended_type_info),
-      K_(is_rowkey));
+      K_(is_rowkey),
+      K_(udt_set_id),
+      K_(sub_type));
 
 private:
+  template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
   int get_column_ori_default_value_(
-      const share::schema::ObTableSchema &table_schema,
-      const share::schema::ObColumnSchemaV2 &column_table_schema,
+      const TABLE_SCHEMA &table_schema,
+      const COLUMN_SCHEMA &column_table_schema,
       const int16_t column_idx,
       const ObTimeZoneInfoWrap *tz_info_wrap,
       ObObj2strHelper &obj2str_helper,
       common::ObIAllocator &allocator,
       common::ObString *&str);
 
+  template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
   int init_extended_type_info_(
-      const share::schema::ObTableSchema &table_schema,
-      const share::schema::ObColumnSchemaV2 &column_table_schema,
+      const TABLE_SCHEMA &table_schema,
+      const COLUMN_SCHEMA &column_table_schema,
       const int16_t column_idx,
       common::ObIAllocator &allocator);
 
@@ -153,6 +177,9 @@ private:
   // need to mark if this column was the primary key when the user created it
   bool               is_rowkey_;
 
+  uint64_t           udt_set_id_;
+  uint64_t           sub_type_;
+
 private:
   DISALLOW_COPY_AND_ASSIGN(ColumnSchemaInfo);
 };
@@ -163,8 +190,12 @@ class ObLogRowkeyInfo
 public:
   ObLogRowkeyInfo();
   ~ObLogRowkeyInfo();
-  int init(common::ObIAllocator &allocator,
-      const int64_t size);
+  int init(
+      common::ObIAllocator &allocator,
+      const share::schema::ObTableSchema &table_schema);
+  int init(
+      common::ObIAllocator &allocator,
+      const datadict::ObDictTableMeta &table_schema);
   void destroy();
   // Before destructuring, you need to call release_mem to release the memory of the silent column_id_array.
   void release_mem(common::ObIAllocator &allocator);
@@ -186,6 +217,10 @@ public:
 
 public:
   int64_t to_string(char* buf, const int64_t buf_len) const;
+private:
+  int do_init_(
+      common::ObIAllocator &allocator,
+      const int64_t size);
 
 private:
   int64_t              size_;
@@ -215,6 +250,7 @@ struct GetColumnKey<share::schema::ObColumnIdKey, ColumnSchemaInfo *>
 };
 
 typedef common::hash::ObPointerHashArray<share::schema::ObColumnIdKey, ColumnSchemaInfo *, GetColumnKey> ColumnIdxHashArray;
+typedef common::hash::ObHashMap<uint64_t, ObCDCUdtSchemaInfo*> ObCDCUdtSchemaInfoMap;
 class TableSchemaInfo
 {
 public:
@@ -222,7 +258,8 @@ public:
   virtual ~TableSchemaInfo();
 
 public:
-  int init(const share::schema::ObTableSchema *table_schema);
+  template<class TABLE_SCHEMA>
+  int init(const TABLE_SCHEMA *table_schema);
   void destroy();
 
   common::ObIAllocator &get_allocator() { return allocator_; }
@@ -249,9 +286,10 @@ public:
   inline const ColumnSchemaInfo *get_column_schema_array() const { return column_schema_array_; }
 
   // init column schema info
+  template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
   int init_column_schema_info(
-      const share::schema::ObTableSchema &table_schema,
-      const share::schema::ObColumnSchemaV2 &column_table_schema,
+      const TABLE_SCHEMA &table_schema,
+      const COLUMN_SCHEMA &column_table_schema,
       const int16_t column_stored_idx,
       const bool is_usr_column,
       const int16_t usr_column_idx,
@@ -280,6 +318,14 @@ public:
       const int16_t rowkey_idx,
       ColumnSchemaInfo *&column_schema_info) const;
 
+  int get_main_column_of_udt(
+      const uint64_t udt_set_id,
+      ColumnSchemaInfo *&column_schema_info) const;
+
+  int get_udt_schema_info(
+      const uint64_t udt_set_id,
+      ObCDCUdtSchemaInfo *&schema_info) const;
+
 public:
   TO_STRING_KV(K_(rowkey_info),
       K_(is_heap_table),
@@ -289,7 +335,8 @@ public:
       K_(column_schema_array_cnt));
 
 private:
-  int init_rowkey_info_(const share::schema::ObTableSchema *table_schema);
+  template<class TABLE_SCHEMA>
+  int init_rowkey_info_(const TABLE_SCHEMA *table_schema);
   int init_user_column_idx_array_(const int64_t cnt);
   void destroy_user_column_idx_array_();
   int init_column_schema_array_(const int64_t cnt);
@@ -321,6 +368,10 @@ private:
         column_cnt * 2) * sizeof(void*) + sizeof(ColumnIdxHashArray);
   }
 
+  int add_udt_column_(ColumnSchemaInfo *column_info);
+  int init_udt_schema_info_map_();
+  int destroy_udt_schema_info_map_();
+
 private:
   bool                 is_inited_;
   common::ObIAllocator &allocator_;
@@ -341,6 +392,8 @@ private:
   ColumnSchemaInfo   *column_schema_array_;
   int64_t            column_schema_array_cnt_;
   ColumnIdxHashArray *column_id_hash_arr_; // column_id -> column_stored_idx
+
+  ObCDCUdtSchemaInfoMap *udt_schema_info_map_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(TableSchemaInfo);

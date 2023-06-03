@@ -110,6 +110,9 @@ namespace share
   static const char* const OB_SV_LOG_BIN = "log_bin";
   static const char* const OB_SV_SERVER_UUID = "server_uuid";
   static const char* const OB_SV_DEFAULT_STORAGE_ENGINE = "default_storage_engine";
+  static const char* const OB_SV_CTE_MAX_RECURSION_DEPTH = "cte_max_recursion_depth";
+  static const char* const OB_SV_REGEXP_STACK_LIMIT = "regexp_stack_limit";
+  static const char* const OB_SV_REGEXP_TIME_LIMIT = "regexp_time_limit";
   static const char* const OB_SV_INTERM_RESULT_MEM_LIMIT = "ob_interm_result_mem_limit";
   static const char* const OB_SV_PROXY_PARTITION_HIT = "ob_proxy_partition_hit";
   static const char* const OB_SV_LOG_LEVEL = "ob_log_level";
@@ -231,6 +234,20 @@ namespace share
   static const char* const OB_SV_INNODB_STRICT_MODE = "innodb_strict_mode";
   static const char* const OB_SV__WINDOWFUNC_OPTIMIZATION_SETTINGS = "_windowfunc_optimization_settings";
   static const char* const OB_SV_ENABLE_RICH_ERROR_MSG = "ob_enable_rich_error_msg";
+  static const char* const OB_SV_LOG_ROW_VALUE_OPTIONS = "log_row_value_options";
+  static const char* const OB_SV_MAX_READ_STALE_TIME = "ob_max_read_stale_time";
+  static const char* const OB_SV__OPTIMIZER_GATHER_STATS_ON_LOAD = "_optimizer_gather_stats_on_load";
+  static const char* const OB_SV__SET_REVERSE_DBLINK_INFOS = "_set_reverse_dblink_infos";
+  static const char* const OB_SV__FORCE_ORDER_PRESERVE_SET = "_force_order_preserve_set";
+  static const char* const OB_SV__SHOW_DDL_IN_COMPAT_MODE = "_show_ddl_in_compat_mode";
+  static const char* const OB_SV_PARALLEL_DEGREE_POLICY = "parallel_degree_policy";
+  static const char* const OB_SV_PARALLEL_DEGREE_LIMIT = "parallel_degree_limit";
+  static const char* const OB_SV_PARALLEL_MIN_SCAN_TIME_THRESHOLD = "parallel_min_scan_time_threshold";
+  static const char* const OB_SV_OPTIMIZER_DYNAMIC_SAMPLING = "optimizer_dynamic_sampling";
+  static const char* const OB_SV_RUNTIME_FILTER_TYPE = "runtime_filter_type";
+  static const char* const OB_SV_RUNTIME_FILTER_WAIT_TIME_MS = "runtime_filter_wait_time_ms";
+  static const char* const OB_SV_RUNTIME_FILTER_MAX_IN_NUM = "runtime_filter_max_in_num";
+  static const char* const OB_SV_RUNTIME_BLOOM_FILTER_MAX_SIZE = "runtime_bloom_filter_max_size";
 
 }
 }

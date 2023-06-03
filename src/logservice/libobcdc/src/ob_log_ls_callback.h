@@ -15,7 +15,8 @@
 
 #include "lib/container/ob_se_array.h"        // ObSEArray
 #include "logservice/palf/lsn.h"              // LSN
-#include "ob_log_ls_define.h"                 // TenantLSID
+#include "logservice/common_util/ob_log_ls_define.h"                 // logservice::TenantLSID
+#include "logservice/logfetcher/ob_log_fetcher_start_parameters.h"  // logfetcher::ObLogFetcherStartParameters
 
 namespace oceanbase
 {
@@ -28,9 +29,8 @@ public:
 
 public:
   // Add LS
-  virtual int add_ls(const TenantLSID &tls_id,
-      const int64_t start_tstamp,
-      const palf::LSN &start_lsn) = 0;
+  virtual int add_ls(const logservice::TenantLSID &tls_id,
+      const logfetcher::ObLogFetcherStartParameters &start_parameters) = 0;
 };
 
 struct LSRecycleCallback
@@ -40,7 +40,7 @@ public:
 
 public:
   // Recycling LS
-  virtual int recycle_ls(const TenantLSID &tls_id) = 0;
+  virtual int recycle_ls(const logservice::TenantLSID &tls_id) = 0;
 };
 
 typedef common::ObSEArray<int64_t, 4> LSCBArray;

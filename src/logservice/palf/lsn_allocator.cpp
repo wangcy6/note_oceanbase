@@ -288,6 +288,11 @@ int LSNAllocator::try_freeze(LSN &last_lsn, int64_t &last_log_id)
 
 int LSNAllocator::alloc_lsn_scn(const SCN &base_scn,
                                 const int64_t size, // 已包含LogHeader size
+<<<<<<< HEAD
+=======
+                                const int64_t log_id_upper_bound,
+                                const LSN &lsn_upper_bound,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                                 LSN &lsn,
                                 int64_t &log_id,
                                 SCN &scn,
@@ -298,9 +303,15 @@ int LSNAllocator::alloc_lsn_scn(const SCN &base_scn,
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
+<<<<<<< HEAD
   } else if (size <= 0 || !base_scn.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     PALF_LOG(WARN, "invalid arguments", K(ret), K(base_scn), K(size));
+=======
+  } else if (size <= 0 || !base_scn.is_valid() || log_id_upper_bound <= 0 || !lsn_upper_bound.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    PALF_LOG(WARN, "invalid arguments", K(ret), K(base_scn), K(size), K(log_id_upper_bound), K(lsn_upper_bound));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else {
     // 生成新日志时需加上log_group_entry_header的size
     const int64_t new_group_log_size = size + LogGroupEntryHeader::HEADER_SER_SIZE;
@@ -356,12 +367,12 @@ int LSNAllocator::alloc_lsn_scn(const SCN &base_scn,
           break;
         }
 
-        uint64_t tmp_next_block_id = lsn_2_block(last.lsn_val_, PALF_BLOCK_SIZE);
+        uint64_t tmp_next_block_id = lsn_2_block(LSN(last.lsn_val_), PALF_BLOCK_SIZE);
         uint64_t tmp_next_log_id_delta = last.log_id_delta_;
         uint64_t tmp_next_scn_delta = tmp_next_scn - scn_base_;
         // 下一条日志是否需要cut
         bool is_next_need_cut = false;
-        const uint64_t last_block_offset = lsn_2_offset(last.lsn_val_, PALF_BLOCK_SIZE);
+        const uint64_t last_block_offset = lsn_2_offset(LSN(last.lsn_val_), PALF_BLOCK_SIZE);
         uint64_t tmp_next_block_offset = 0;
         if (last.is_need_cut_) {
           // 上一条日志不再聚合，需生成新日志
@@ -448,7 +459,22 @@ int LSNAllocator::alloc_lsn_scn(const SCN &base_scn,
         next.log_id_delta_ = tmp_next_log_id_delta;
         next.scn_delta_ = tmp_next_scn_delta;
 
-        if (CAS128(&lsn_ts_meta_, last, next)) {
+        int64_t new_log_id = is_new_group_log ? (last_log_id + 1) : last_log_id;
+        if (need_gen_padding_entry) {
+          // Padding entry also consumes one log_id.
+          new_log_id++;
+        }
+        LSN new_max_lsn;
+        new_max_lsn.val_ = next.lsn_val_;
+        if (new_log_id > log_id_upper_bound || new_max_lsn > lsn_upper_bound) {
+          ret = OB_EAGAIN;
+          if (REACH_TIME_INTERVAL(100 * 1000)) {
+            PALF_LOG(INFO, "log_id or lsn will exceed upper bound, need retry", K(ret), K(size),
+                K(new_log_id), K(new_max_lsn), K(is_new_group_log), K(need_gen_padding_entry),
+                K(log_id_upper_bound), K(lsn_upper_bound));
+          }
+          break;
+        } else if (CAS128(&lsn_ts_meta_, last, next)) {
           lsn.val_ = last.lsn_val_;
           if (is_new_group_log) {
             log_id = last_log_id + 1;

@@ -40,7 +40,7 @@ public:
 
   static const int64_t NEED_FLUSH_CLOG_DISK_PERCENT = 30;
   static int mtl_init(ObCheckPointService *&m);
-  int init();
+  int init(const int64_t tenant_id);
   int start();
   int stop();
   void wait();
@@ -52,9 +52,12 @@ public:
   int add_ls_freeze_task(
       ObDataCheckpoint *data_checkpoint,
       share::SCN rec_scn);
+<<<<<<< HEAD
 
   int do_minor_freeze();
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 private:
   bool is_inited_;
 

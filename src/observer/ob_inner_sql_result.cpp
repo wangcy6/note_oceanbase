@@ -77,7 +77,15 @@ int ObInnerSQLResult::init(bool has_tenant_resource)
     .set_ablock_size(lib::INTACT_MIDDLE_AOBJECT_SIZE);
   if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(mem_context_, param))) {
     LOG_WARN("create memory entity failed", K(ret));
-  } else {
+  } else if (has_tenant_resource) {
+    if (OB_FAIL(GCTX.omt_->get_tenant_with_tenant_lock(session_.get_effective_tenant_id(), handle_, tenant_))) {
+      if (OB_IN_STOP_STATE == ret) {
+        ret = OB_TENANT_NOT_IN_SERVER;
+      }
+      LOG_WARN("get tenant lock fail", K(ret), K(session_.get_effective_tenant_id()));
+    }
+  }
+  if (OB_SUCC(ret)) {
     set_has_tenant_resource(has_tenant_resource);
     if (!has_tenant_resource) {
       remote_result_set_ = new (buf_) ObRemoteResultSet(mem_context_->get_arena_allocator());
@@ -128,11 +136,6 @@ int ObInnerSQLResult::open()
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
-  } else if (has_tenant_resource() && OB_FAIL(GCTX.omt_->get_tenant_with_tenant_lock(session_.get_effective_tenant_id(), handle_, tenant_))) {
-    if (OB_IN_STOP_STATE == ret) {
-      ret = OB_TENANT_NOT_IN_SERVER;
-    }
-    LOG_WARN("get tenant lock fail", K(ret), K(session_.get_effective_tenant_id()));
   } else if (has_tenant_resource() && OB_FAIL(tenant_guard.switch_to(tenant_))) {
     LOG_WARN("switch tenant failed", K(ret), K(session_.get_effective_tenant_id()));
   } else {
@@ -146,7 +149,7 @@ int ObInnerSQLResult::open()
         ret = OB_INIT_TWICE;
         LOG_WARN("result set already open", K(ret));
       } else if (has_tenant_resource() && OB_FAIL(result_set_->open())) {
-        ObResultSet::refresh_location_cache(result_set_->get_exec_context().get_task_exec_ctx(), true, ret);
+        result_set_->refresh_location_cache(true, ret);
         LOG_WARN("open result set failed", K(ret));
         // move after precess_retry().
 //        result_set_->close();
@@ -211,7 +214,7 @@ int ObInnerSQLResult::inner_close()
   } else {
     WITH_CONTEXT(mem_context_) {
       if (has_tenant_resource() && OB_FAIL(result_set_->close())) {
-        ObResultSet::refresh_location_cache(result_set_->get_exec_context().get_task_exec_ctx(), true, ret);
+        result_set_->refresh_location_cache(true, ret);
         LOG_WARN("result set close failed", K(ret));
       } else if(!has_tenant_resource() && OB_FAIL(remote_result_set_->close())) {
         LOG_WARN("remote_result_set close failed", K(ret));
@@ -245,7 +248,7 @@ int ObInnerSQLResult::next()
     WITH_CONTEXT(mem_context_) {
       if (has_tenant_resource() && OB_FAIL(result_set_->get_next_row(row_))) {
         if (OB_ITER_END != ret) {
-          ObResultSet::refresh_location_cache(result_set_->get_exec_context().get_task_exec_ctx(), true, ret);
+          result_set_->refresh_location_cache(true, ret);
           LOG_WARN("get next row failed", K(ret));
         }
       } else if (!has_tenant_resource() && OB_FAIL(remote_result_set_->get_next_row(row_))) {
@@ -541,9 +544,9 @@ int ObInnerSQLResult::get_type(const int64_t col_idx, ObObjMeta &type) const
 
 int ObInnerSQLResult::get_col_meta(const int64_t col_idx, bool old_max_length,
                                    oceanbase::common::ObString &name, ObObjMeta &meta,
-                                   int16_t &precision, int16_t &scale, int32_t &length) const
+                                   ObAccuracy &acc) const
 {
-  UNUSEDx(col_idx, old_max_length, name, meta);
+  UNUSEDx(col_idx, old_max_length, name, meta, acc);
   int ret = OB_ERR_UNEXPECTED;
   return ret;
 }

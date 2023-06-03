@@ -40,6 +40,7 @@ struct EqualSetKey
     }
     return result;
   }
+  virtual int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   const ObRawExpr *expr_;
   TO_STRING_KV(K_(expr));
 };
@@ -91,7 +92,7 @@ protected:
   ObExprEqualSet *new_equal_set();
   int find_equal_set(int64_t expr_idx, const ObRawExpr *new_expr, ObExprEqualSet *&equal_set_ret);
   int add_equal_cond(const ObOpRawExpr &expr);
-  int64_t get_or_add_expr_idx(const ObRawExpr *expr);
+  int get_or_add_expr_idx(const ObRawExpr *expr, int64_t &expr_idx);
   int expr_can_be_add_to_equal_set(const ObExprEqualSet &equal_set,
                                     const ObRawExpr *same_expr,
                                     const ObRawExpr *new_expr,

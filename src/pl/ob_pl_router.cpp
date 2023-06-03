@@ -56,7 +56,8 @@ int ObPLRouter::check_error_in_resolve(int code)
     case OB_ERR_UNEXPECTED:
     case OB_ERR_RETURN_VALUE_REQUIRED:
     case OB_ERR_END_LABEL_NOT_MATCH:
-    case OB_ERR_TOO_LONG_IDENT: {
+    case OB_ERR_TOO_LONG_IDENT:
+    case OB_ERR_PL_JSONTYPE_USAGE: {
       ret = code;
     }
     break;
@@ -84,9 +85,11 @@ int ObPLRouter::check_error_in_resolve(int code)
     case OB_ERR_SET_USAGE:
     case OB_ERR_COLUMN_SPEC:
     case OB_ERR_TRIGGER_NO_SUCH_ROW:
+    case OB_ERR_SP_NO_DROP_SP:
     case OB_ERR_SP_BAD_CONDITION_TYPE:
     case OB_ERR_DUP_SIGNAL_SET:
-    case OB_ERR_CANNOT_UPDATE_VIRTUAL_COL_IN_TRG: {
+    case OB_ERR_CANNOT_UPDATE_VIRTUAL_COL_IN_TRG:
+    case OB_ERR_VIEW_SELECT_CONTAIN_QUESTIONMARK: {
       if (lib::is_mysql_mode()) {
         ret = code;
         break;
@@ -103,7 +106,7 @@ int ObPLRouter::check_error_in_resolve(int code)
   return ret;
 }
 
-int ObPLRouter::analyze(ObString &route_sql, ObIArray<ObDependencyInfo> &dep_info)
+int ObPLRouter::analyze(ObString &route_sql, ObIArray<ObDependencyInfo> &dep_info, ObRoutineInfo &routine_info)
 {
   int ret = OB_SUCCESS;
   HEAP_VAR(ObPLFunctionAST, func_ast, inner_allocator_) {
@@ -125,6 +128,32 @@ int ObPLRouter::analyze(ObString &route_sql, ObIArray<ObDependencyInfo> &dep_inf
                                             dep_info,
                                             routine_info_.get_object_type(),
                                             0, dep_attr, dep_attr));
+    }
+    if (OB_SUCC(ret)) {
+      if (func_ast.is_modifies_sql_data()) {
+        routine_info.set_modifies_sql_data();
+      } else if (func_ast.is_reads_sql_data()) {
+        routine_info.set_reads_sql_data();
+      } else if (func_ast.is_contains_sql()) {
+        routine_info.set_contains_sql();
+      } else if (func_ast.is_no_sql()) {
+        routine_info.set_no_sql();
+      }
+      if (func_ast.is_wps()) {
+        routine_info.set_wps();
+      }
+      if (func_ast.is_rps()) {
+        routine_info.set_rps();
+      }
+      if (func_ast.is_has_sequence()) {
+        routine_info.set_has_sequence();
+      }
+      if (func_ast.is_has_out_param()) {
+        routine_info.set_has_out_param();
+      }
+      if (func_ast.is_external_state()) {
+        routine_info.set_external_state();
+      }
     }
   }
   return ret;
@@ -189,7 +218,7 @@ int ObPLRouter::simple_resolve(ObPLFunctionAST &func_ast)
   //Resolver
   if (OB_SUCC(ret)) {
     const bool is_prepare_protocol = false;
-    ObPLPackageGuard package_guard(sql::PACKAGE_RESV_HANDLE);
+    ObPLPackageGuard package_guard(session_info_.get_effective_tenant_id());
     ObPLResolver resolver(inner_allocator_,
                           session_info_,
                           schema_guard_,

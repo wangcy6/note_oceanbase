@@ -10,6 +10,9 @@
  * See the Mulan PubL v2 for more details.
  */
 
+#ifndef __OB_DTL_INTERM_RESULT_MANAGER_H__
+#define __OB_DTL_INTERM_RESULT_MANAGER_H__
+
 #include "lib/hash/ob_hashmap.h"
 #include "lib/ob_define.h"
 #include "common/sql_mode/ob_sql_mode.h"
@@ -17,8 +20,7 @@
 #include "sql/engine/basic/ob_chunk_row_store.h"
 #include "sql/engine/basic/ob_chunk_datum_store.h"
 #include "lib/allocator/ob_allocator.h"
-#ifndef __OB_DTL_INTERM_RESULT_MANAGER_H__
-#define __OB_DTL_INTERM_RESULT_MANAGER_H__
+#include "share/detect/ob_detectable_id.h"
 
 namespace oceanbase
 {
@@ -40,7 +42,7 @@ struct ObDTLIntermResultMonitorInfo
     qc_id_(qc_id), dfo_id_(dfo_id), sqc_id_(sqc_id)
   { }
     TO_STRING_KV(K_(qc_id), K_(dfo_id), K_(sqc_id));
-  int32_t qc_id_;
+  int64_t qc_id_;
   int64_t dfo_id_;
   int64_t sqc_id_;
 };
@@ -61,6 +63,8 @@ struct ObDTLIntermResultKey
     hash_val = common::murmurhash(&batch_id_, sizeof(uint64_t), hash_val);
     return hash_val;
   }
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
+
   inline bool operator==(const ObDTLIntermResultKey& key) const
   {
     return channel_id_ == key.channel_id_ && batch_id_ == key.batch_id_;
@@ -74,7 +78,7 @@ struct ObDTLIntermResultInfo
   ObDTLIntermResultInfo()
       : datum_store_(NULL), ret_(common::OB_SUCCESS),
       is_read_(false), is_eof_(false), ref_count_(0),
-      trace_id_(), dump_time_(0), dump_cost_(0)
+      trace_id_(), dump_time_(0), dump_cost_(0), unregister_dm_info_()
   {}
   ~ObDTLIntermResultInfo() {}
   bool is_store_valid() const { return NULL != datum_store_; }
@@ -103,7 +107,9 @@ public:
   common::ObCurTraceId::TraceId trace_id_;
   int64_t dump_time_;
   int64_t dump_cost_;
+  common::ObUnregisterDmInfo unregister_dm_info_;
   ObDTLIntermResultMonitorInfo monitor_info_;
+  uint64_t tenant_id_;
 };
 
 struct ObDTLIntermResultInfoGuard
@@ -204,15 +210,17 @@ public:
   bool is_eof_;
 };
 
-class ObAtomicEraseIntermResultInfoCall
+class ObEraseTenantIntermResultInfo
 {
 public:
-  ObAtomicEraseIntermResultInfoCall() : need_free_(false) {}
-  ~ObAtomicEraseIntermResultInfoCall() = default;
-  void operator() (common::hash::HashMapPair<ObDTLIntermResultKey,
+  ObEraseTenantIntermResultInfo() : tenant_id_(OB_INVALID_ID), expire_keys_(), ret_(common::OB_SUCCESS) {}
+  ~ObEraseTenantIntermResultInfo() = default;
+  int operator() (common::hash::HashMapPair<ObDTLIntermResultKey,
       ObDTLIntermResultInfo *> &entry);
 public:
-  bool need_free_;
+  uint64_t tenant_id_;
+  common::ObSEArray<ObDTLIntermResultKey, 64> expire_keys_;
+  int ret_;
 };
 
 class ObDTLIntermResultManager
@@ -232,7 +240,7 @@ public:
   int get_interm_result_info(ObDTLIntermResultKey &key, ObDTLIntermResultInfo &result_info);
   int create_interm_result_info(ObMemAttr &attr, ObDTLIntermResultInfoGuard &result_info_guard,
                                 const ObDTLIntermResultMonitorInfo &monitor_info);
-  int erase_interm_result_info(ObDTLIntermResultKey &key);
+  int erase_interm_result_info(ObDTLIntermResultKey &key, bool need_unregister_check_item_from_dm=true);
   int insert_interm_result_info(ObDTLIntermResultKey &key, ObDTLIntermResultInfo *&result_info);
   // 以下两个接口会持有bucket读锁.
   int clear_timeout_result_info(ObDTLIntermResultGC &gc);
@@ -246,6 +254,7 @@ public:
   int init();
   void destroy();
   int generate_monitor_info_rows(observer::ObDTLIntermResultMonitorInfoGetter &monitor_info_getter);
+  int erase_tenant_interm_result_info(int64_t tenant_id);
   static void free_interm_result_info_store(ObDTLIntermResultInfo *result_info);
   static void free_interm_result_info(ObDTLIntermResultInfo *result_info);
   static void inc_interm_result_ref_count(ObDTLIntermResultInfo *result_info);

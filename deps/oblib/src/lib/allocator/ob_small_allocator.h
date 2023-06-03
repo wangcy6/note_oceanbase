@@ -32,14 +32,26 @@ public:
            const int64_t block_size = OB_MALLOC_NORMAL_BLOCK_SIZE,
            const int64_t min_obj_count_on_block = DEFAULT_MIN_OBJ_COUNT_ON_BLOCK,
            const int64_t limit_num = INT64_MAX) {
+    lib::ObMemAttr attr;
+    attr.label_ = label;
+    attr.tenant_id_ = tenant_id;
+    return init(obj_size, attr, block_size, min_obj_count_on_block, limit_num);
+  }
+  int init(const int64_t obj_size,
+           const lib::ObMemAttr &attr,
+           const int64_t block_size = OB_MALLOC_NORMAL_BLOCK_SIZE,
+           const int64_t min_obj_count_on_block = DEFAULT_MIN_OBJ_COUNT_ON_BLOCK,
+           const int64_t limit_num = INT64_MAX) {
     int ret = OB_SUCCESS;
+    attr_ = attr;
     UNUSED(min_obj_count_on_block);
-    attr_.label_ = label;
-    attr_.tenant_id_ = tenant_id;
     if (limit_num < INT64_MAX) {
       block_alloc_.set_limit(limit_num * obj_size);
     }
-    if (OB_FAIL(ObSliceAlloc::init(obj_size, block_size, block_alloc_, attr_))) {
+    if (obj_size < 0 || obj_size > INT32_MAX || block_size < 0 || block_size > INT32_MAX) {
+      ret = OB_INVALID_ARGUMENT;
+    } else if (OB_FAIL(ObSliceAlloc::init(static_cast<int32_t>(obj_size),
+        static_cast<int32_t>(block_size), block_alloc_, attr_))) {
     } else {
       ObSliceAlloc::set_nway(OB_MAX_CPU_NUM * 16);
     }
@@ -53,4 +65,3 @@ private:
 }; // end namespace oceanbase
 
 #endif /* OCEANBASE_ALLOCATOR_OB_SMALL_ALLOCATOR_V2_H_ */
-

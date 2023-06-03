@@ -76,6 +76,15 @@ enum ObRoutineFlag
   SP_FLAG_UDT_CONS = 4096, // this is udt constructor
   SP_FLAG_UDT_ORDER = 8192, // UDT order function
   SP_FLAG_AGGREGATE = 16384,
+  SP_FLAG_NO_SQL = 32768,
+  SP_FLAG_READS_SQL_DATA = 65536,
+  SP_FLAG_MODIFIES_SQL_DATA = 131072,
+  SP_FLAG_CONTAINS_SQL = 262144,
+  SP_FLAG_WPS = SP_FLAG_CONTAINS_SQL * 2,
+  SP_FLAG_RPS = SP_FLAG_WPS * 2,
+  SP_FLAG_HAS_SEQUENCE = SP_FLAG_RPS * 2,
+  SP_FLAG_HAS_OUT_PARAM = SP_FLAG_HAS_SEQUENCE * 2,
+  SP_FLAG_EXTERNAL_STATE = SP_FLAG_HAS_OUT_PARAM * 2,
 };
 
 namespace oceanbase
@@ -121,6 +130,8 @@ public:
   virtual int find_param_by_name(const common::ObString &name, int64_t &position) const = 0;
   virtual int get_routine_param(int64_t position, ObIRoutineParam *&param) const = 0;
   virtual const ObIRoutineParam* get_ret_info() const = 0;
+  virtual uint64_t get_database_id() const = 0;
+  virtual uint64_t get_package_id() const = 0;
   virtual void set_deterministic() = 0;
   virtual bool is_deterministic() const = 0;
   virtual void set_parallel_enable() = 0;
@@ -138,7 +149,24 @@ public:
   virtual bool is_udt_order() const = 0;
   virtual void set_pipelined() = 0;
   virtual bool is_pipelined() const = 0;
-
+  virtual void set_no_sql() = 0;
+  virtual bool is_no_sql() const = 0;
+  virtual void set_reads_sql_data() = 0;
+  virtual bool is_reads_sql_data() const = 0;
+  virtual void set_modifies_sql_data() = 0;
+  virtual bool is_modifies_sql_data() const = 0;
+  virtual void set_contains_sql() = 0;
+  virtual bool is_contains_sql() const = 0;
+  virtual bool is_wps() const = 0;
+  virtual bool is_rps() const = 0;
+  virtual bool is_has_sequence() const = 0;
+  virtual bool is_has_out_param() const = 0;
+  virtual bool is_external_state() const = 0;
+  virtual void set_wps() = 0;
+  virtual void set_rps() = 0;
+  virtual void set_has_sequence() = 0;
+  virtual void set_has_out_param() = 0;
+  virtual void set_external_state() = 0;
   TO_STRING_EMPTY();
 };
 
@@ -441,6 +469,7 @@ public:
   OB_INLINE void set_deterministic() { flag_ |= SP_FLAG_DETERMINISTIC; }
   OB_INLINE void set_parallel_enable() { flag_ |= SP_FLAG_PARALLEL_ENABLE; }
   OB_INLINE void set_invoker_right() { flag_ |= SP_FLAG_INVOKER_RIGHT; }
+  OB_INLINE void clear_invoker_right() { flag_ &= (~((uint64_t)SP_FLAG_INVOKER_RIGHT)); }
   OB_INLINE void set_result_cache() { flag_ |= SP_FLAG_RESULT_CACHE; }
   OB_INLINE void set_accessible_by_clause() { flag_ |= SP_FLAG_ACCESSIBLE_BY; }
   OB_INLINE void set_pipelined() { flag_ |= SP_FLAG_PIPELINED; }
@@ -451,6 +480,29 @@ public:
   OB_INLINE void set_is_udt_order() { flag_ |= SP_FLAG_UDT_ORDER; }
   OB_INLINE void set_is_udt_map() { flag_ |= SP_FLAG_UDT_MAP; }
   OB_INLINE void set_is_aggregate() { flag_ |= SP_FLAG_AGGREGATE; }
+  OB_INLINE void set_no_sql() { flag_ &= ~SP_FLAG_READS_SQL_DATA; flag_ &= ~SP_FLAG_MODIFIES_SQL_DATA; flag_ |= SP_FLAG_NO_SQL;}
+  OB_INLINE void set_reads_sql_data() { flag_ &= ~SP_FLAG_NO_SQL; flag_ &= ~SP_FLAG_MODIFIES_SQL_DATA; flag_ |= SP_FLAG_READS_SQL_DATA;}
+  OB_INLINE void set_modifies_sql_data() { flag_ &= ~SP_FLAG_NO_SQL; flag_ &= ~SP_FLAG_READS_SQL_DATA; flag_ |= SP_FLAG_MODIFIES_SQL_DATA;}
+  OB_INLINE void set_contains_sql()
+  {
+    flag_ &= ~SP_FLAG_NO_SQL;
+    flag_ &= ~SP_FLAG_READS_SQL_DATA;
+    flag_ &= ~SP_FLAG_MODIFIES_SQL_DATA;
+    flag_ |= SP_FLAG_CONTAINS_SQL;
+  }
+
+
+  OB_INLINE bool is_wps() const { return SP_FLAG_WPS == (flag_ & SP_FLAG_WPS); }
+  OB_INLINE bool is_rps() const { return SP_FLAG_RPS == (flag_ & SP_FLAG_RPS); }
+  OB_INLINE bool is_has_sequence() const { return SP_FLAG_HAS_SEQUENCE == (flag_ & SP_FLAG_HAS_SEQUENCE); }
+  OB_INLINE bool is_has_out_param() const { return SP_FLAG_HAS_OUT_PARAM == (flag_ & SP_FLAG_HAS_OUT_PARAM); }
+  OB_INLINE bool is_external_state() const { return SP_FLAG_EXTERNAL_STATE == (flag_ & SP_FLAG_EXTERNAL_STATE); }
+
+  OB_INLINE void set_wps() { flag_ |= SP_FLAG_WPS;}
+  OB_INLINE void set_rps() { flag_ |= SP_FLAG_RPS;}
+  OB_INLINE void set_has_sequence() { flag_ |= SP_FLAG_HAS_SEQUENCE;}
+  OB_INLINE void set_has_out_param() { flag_ |= SP_FLAG_HAS_OUT_PARAM;}
+  OB_INLINE void set_external_state() { flag_ |= SP_FLAG_EXTERNAL_STATE;}
 
   OB_INLINE bool is_aggregate() const { return SP_FLAG_AGGREGATE == (flag_ & SP_FLAG_AGGREGATE); }
 
@@ -477,6 +529,18 @@ public:
   OB_INLINE bool is_deterministic() const
   {
     return SP_FLAG_DETERMINISTIC == (flag_ & SP_FLAG_DETERMINISTIC);
+  }
+  OB_INLINE bool is_no_sql() const {
+    return SP_FLAG_NO_SQL == (flag_ & SP_FLAG_NO_SQL);
+  }
+  OB_INLINE bool is_reads_sql_data() const {
+    return SP_FLAG_READS_SQL_DATA == (flag_ & SP_FLAG_READS_SQL_DATA);
+  }
+  OB_INLINE bool is_modifies_sql_data() const {
+    return SP_FLAG_MODIFIES_SQL_DATA == (flag_ & SP_FLAG_MODIFIES_SQL_DATA);
+  }
+  OB_INLINE bool is_contains_sql() const {
+    return !(is_no_sql()||is_reads_sql_data()||is_modifies_sql_data());
   }
   OB_INLINE bool is_parallel_enable() const
   {

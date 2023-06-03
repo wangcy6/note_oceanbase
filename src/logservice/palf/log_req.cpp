@@ -217,7 +217,8 @@ NotifyRebuildReq::NotifyRebuildReq()
 {
 }
 
-NotifyRebuildReq::NotifyRebuildReq(const LSN &base_lsn, const LogInfo &base_prev_log_info)
+NotifyRebuildReq::NotifyRebuildReq(const LSN &base_lsn,
+    const LogInfo &base_prev_log_info)
     : base_lsn_(base_lsn), base_prev_log_info_(base_prev_log_info)
 {
 }
@@ -239,6 +240,19 @@ void NotifyRebuildReq::reset()
 }
 
 OB_SERIALIZE_MEMBER(NotifyRebuildReq, base_lsn_, base_prev_log_info_);
+
+NotifyFetchLogReq::NotifyFetchLogReq()
+{}
+
+NotifyFetchLogReq::~NotifyFetchLogReq()
+{}
+
+bool NotifyFetchLogReq::is_valid() const
+{
+  return true;
+}
+
+OB_SERIALIZE_MEMBER(NotifyFetchLogReq);
 
 // ================= LogPrepareReq start =================
 LogPrepareReq::LogPrepareReq()
@@ -280,8 +294,9 @@ LogPrepareResp::LogPrepareResp()
   : msg_proposal_id_(INVALID_PROPOSAL_ID),
     vote_granted_(false),
     log_proposal_id_(INVALID_PROPOSAL_ID),
-    lsn_(),
-    log_mode_meta_()
+    max_flushed_lsn_(),
+    log_mode_meta_(),
+    committed_end_lsn_()
 {
 }
 
@@ -289,13 +304,15 @@ LogPrepareResp::LogPrepareResp(
     const int64_t &msg_proposal_id,
     const bool vote_granted,
     const int64_t &log_proposal_id,
-    const LSN &lsn,
-    const LogModeMeta &mode_meta)
+    const LSN &max_flushed_lsn,
+    const LogModeMeta &mode_meta,
+    const LSN &committed_end_lsn)
   : msg_proposal_id_(msg_proposal_id),
     vote_granted_(vote_granted),
     log_proposal_id_(log_proposal_id),
-    lsn_(lsn),
-    log_mode_meta_(mode_meta)
+    max_flushed_lsn_(max_flushed_lsn),
+    log_mode_meta_(mode_meta),
+    committed_end_lsn_(committed_end_lsn)
 {
 }
 
@@ -308,7 +325,7 @@ bool LogPrepareResp::is_valid() const
 {
   return INVALID_PROPOSAL_ID != msg_proposal_id_
          && INVALID_PROPOSAL_ID != log_proposal_id_
-         && true == lsn_.is_valid()
+         && true == max_flushed_lsn_.is_valid()
          && true == log_mode_meta_.is_valid();
 }
 
@@ -317,11 +334,13 @@ void LogPrepareResp::reset()
   msg_proposal_id_ = INVALID_PROPOSAL_ID;
   vote_granted_ = false;
   log_proposal_id_ = INVALID_PROPOSAL_ID;
-  lsn_.reset();
+  max_flushed_lsn_.reset();
   log_mode_meta_.reset();
+  committed_end_lsn_.reset();
 }
 
-OB_SERIALIZE_MEMBER(LogPrepareResp, msg_proposal_id_, vote_granted_, log_proposal_id_, lsn_, log_mode_meta_);
+OB_SERIALIZE_MEMBER(LogPrepareResp, msg_proposal_id_, vote_granted_, log_proposal_id_, \
+    max_flushed_lsn_, log_mode_meta_, committed_end_lsn_);
 
 LogChangeConfigMetaReq::LogChangeConfigMetaReq()
   : msg_proposal_id_(INVALID_PROPOSAL_ID),
@@ -405,15 +424,18 @@ OB_SERIALIZE_MEMBER(LogChangeConfigMetaResp, proposal_id_, config_version_);
 // ========== LogChangeModeMetaReq start=========
 LogChangeModeMetaReq::LogChangeModeMetaReq()
   : msg_proposal_id_(INVALID_PROPOSAL_ID),
-    meta_()
+    meta_(),
+    is_applied_mode_meta_(false)
 {
 }
 
 LogChangeModeMetaReq::LogChangeModeMetaReq(
     const int64_t &msg_proposal_id,
-    const LogModeMeta &meta)
+    const LogModeMeta &meta,
+    const bool is_applied_mode_meta)
   : msg_proposal_id_(msg_proposal_id),
-    meta_(meta)
+    meta_(meta),
+    is_applied_mode_meta_(is_applied_mode_meta)
 {
 }
 
@@ -432,9 +454,10 @@ void LogChangeModeMetaReq::reset()
 {
   msg_proposal_id_ = INVALID_PROPOSAL_ID;
   meta_.reset();
+  is_applied_mode_meta_ = false;
 }
 
-OB_SERIALIZE_MEMBER(LogChangeModeMetaReq, msg_proposal_id_, meta_);
+OB_SERIALIZE_MEMBER(LogChangeModeMetaReq, msg_proposal_id_, meta_, is_applied_mode_meta_);
 // ========== LogChangeModeMetaReq end=========
 
 // ========== LogChangeModeMetaResp start=========
@@ -467,12 +490,13 @@ OB_SERIALIZE_MEMBER(LogChangeModeMetaResp, msg_proposal_id_);
 
 // ================= LogGetMCStReq start ================
 LogGetMCStReq::LogGetMCStReq()
-  : config_version_()
+  : config_version_(), need_purge_throttling_(false)
 {
 }
 
-LogGetMCStReq::LogGetMCStReq(const LogConfigVersion &config_version)
-  : config_version_(config_version)
+LogGetMCStReq::LogGetMCStReq(const LogConfigVersion &config_version,
+                             const bool need_purge_throttling)
+  : config_version_(config_version), need_purge_throttling_(need_purge_throttling)
 {
 }
 
@@ -489,9 +513,10 @@ bool LogGetMCStReq::is_valid() const
 void LogGetMCStReq::reset()
 {
   config_version_.reset();
+  need_purge_throttling_ = false;
 }
 
-OB_SERIALIZE_MEMBER(LogGetMCStReq, config_version_);
+OB_SERIALIZE_MEMBER(LogGetMCStReq, config_version_, need_purge_throttling_);
 // ================= LogGetMCStReq end ================
 
 // ================= LogGetMCStResp start ================
@@ -499,18 +524,21 @@ LogGetMCStResp::LogGetMCStResp()
   : msg_proposal_id_(INVALID_PROPOSAL_ID),
     max_flushed_end_lsn_(),
     is_normal_replica_(false),
-    need_update_config_meta_(false)
+    need_update_config_meta_(false),
+    last_slide_log_id_(INT64_MAX)
 {
 }
 
 LogGetMCStResp::LogGetMCStResp(const int64_t &msg_proposal_id,
                                const LSN &max_flushed_end_lsn,
                                const bool is_normal_replica,
-                               const bool need_update_config_meta)
+                               const bool need_update_config_meta,
+                               const int64_t last_slide_log_id)
   : msg_proposal_id_(msg_proposal_id),
     max_flushed_end_lsn_(max_flushed_end_lsn),
     is_normal_replica_(is_normal_replica),
-    need_update_config_meta_(need_update_config_meta)
+    need_update_config_meta_(need_update_config_meta),
+    last_slide_log_id_(last_slide_log_id)
 {
 }
 
@@ -530,10 +558,11 @@ void LogGetMCStResp::reset()
   max_flushed_end_lsn_.reset();
   is_normal_replica_ = false;
   need_update_config_meta_ = false;
+  last_slide_log_id_ = INT64_MAX;
 }
 
 OB_SERIALIZE_MEMBER(LogGetMCStResp, msg_proposal_id_, max_flushed_end_lsn_, \
-    is_normal_replica_, need_update_config_meta_);
+    is_normal_replica_, need_update_config_meta_, last_slide_log_id_);
 // ================= LogGetMCStResp end ================
 
 // ============= LogLearnerReq begin ==============
@@ -683,5 +712,66 @@ void CommittedInfo::reset()
 OB_SERIALIZE_MEMBER(CommittedInfo, msg_proposal_id_, prev_log_id_, \
     prev_log_proposal_id_, committed_end_lsn_);
 // ============= CommittedInfo end ==============
+
+// ================= LogGetStatReq start ================
+LogGetStatReq::LogGetStatReq()
+  : get_type_(LogGetStatType::INVALID_SYNC_GET_TYPE)
+{
+}
+
+LogGetStatReq::LogGetStatReq(const LogGetStatType get_type)
+  : get_type_(get_type)
+{
+}
+
+LogGetStatReq::~LogGetStatReq()
+{
+  reset();
+}
+
+bool LogGetStatReq::is_valid() const
+{
+  return get_type_ != LogGetStatType::INVALID_SYNC_GET_TYPE;
+}
+
+void LogGetStatReq::reset()
+{
+  get_type_ = LogGetStatType::INVALID_SYNC_GET_TYPE;
+}
+
+OB_SERIALIZE_MEMBER(LogGetStatReq, get_type_);
+// ================= LogGetStatReq end ================
+
+// ================= LogGetStatResp start ================
+LogGetStatResp::LogGetStatResp()
+  : max_scn_(), end_lsn_()
+{
+}
+
+LogGetStatResp::LogGetStatResp(const share::SCN &max_scn, const LSN &end_lsn)
+  : max_scn_(max_scn), end_lsn_(end_lsn)
+{
+}
+
+LogGetStatResp::~LogGetStatResp()
+{
+  reset();
+}
+
+bool LogGetStatResp::is_valid() const
+{
+  return true;
+}
+
+void LogGetStatResp::reset()
+{
+  max_scn_.reset();
+  end_lsn_.reset();
+}
+
+OB_SERIALIZE_MEMBER(LogGetStatResp, max_scn_, end_lsn_);
+// ================= LogGetStatResp end ================
+
+
 } // end namespace palf
 } // end namespace oceanbase

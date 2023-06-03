@@ -22,6 +22,7 @@
 #include "storage/tx/ob_trans_define.h"
 #include "storage/memtable/mvcc/ob_tx_callback_list.h"
 #include "storage/tablelock/ob_table_lock_common.h"
+#include "storage/memtable/ob_memtable_util.h"
 
 namespace oceanbase
 {
@@ -34,7 +35,8 @@ namespace memtable
 class ObMemtableCtxCbAllocator;
 class ObIMemtable;
 class ObMemtable;
-enum class MutatorType; 
+class ObCallbackScope;
+enum class MutatorType;
 
 class ObITransCallback;
 struct RedoDataNode
@@ -152,7 +154,9 @@ public:
     explicit WRLockGuard(const common::SpinRWLock &rwlock);
     ~WRLockGuard() {}
   private:
+#ifdef ENABLE_DEBUG_LOG
     common::ObSimpleTimeGuard time_guard_; // print log and lbt, if the lock is held too much time.
+#endif
     common::SpinWLockGuard lock_guard_;
   };
   class RDLockGuard
@@ -161,12 +165,15 @@ public:
     explicit RDLockGuard(const common::SpinRWLock &rwlock);
     ~RDLockGuard() {}
   private:
+#ifdef ENABLE_DEBUG_LOG
     common::ObSimpleTimeGuard time_guard_; // print log and lbt, if the lock is held too much time.
+#endif
     common::SpinRLockGuard lock_guard_;
   };
 
   friend class ObITransCallbackIterator;
   enum { MAX_CALLBACK_LIST_COUNT = OB_MAX_CPU_NUM };
+  enum { MAX_CB_ALLOCATOR_COUNT = OB_MAX_CPU_NUM };
   enum {
     PARALLEL_STMT = -1
   };
@@ -178,7 +185,6 @@ public:
       rwlock_(ObLatchIds::MEMTABLE_CALLBACK_LIST_MGR_LOCK),
       parallel_stat_(0),
       for_replay_(false),
-      leader_changed_(false),
       callback_main_list_append_count_(0),
       callback_slave_list_append_count_(0),
       callback_slave_list_merge_count_(0),
@@ -188,15 +194,18 @@ public:
       callback_remove_for_rollback_to_count_(0),
       pending_log_size_(0),
       flushed_log_size_(0),
-      cb_allocator_(cb_allocator)
+      cb_allocator_(cb_allocator),
+      cb_allocators_(NULL)
   {
   }
   ~ObTransCallbackMgr() {}
   void reset();
   ObIMvccCtx &get_ctx() { return host_; }
+  void *callback_alloc(const int64_t size);
+  void callback_free(ObITransCallback *cb);
   int append(ObITransCallback *node);
-  int before_append(ObITransCallback *node);
-  int after_append(ObITransCallback *node, const int ret_code);
+  void before_append(ObITransCallback *node);
+  void after_append(ObITransCallback *node, const int ret_code);
   void trans_start();
   void calc_checksum_all();
   void print_callbacks();
@@ -209,7 +218,9 @@ public:
   void set_for_replay(const bool for_replay);
   bool is_for_replay() const { return ATOMIC_LOAD(&for_replay_); }
   int remove_callbacks_for_fast_commit(bool &has_remove);
-  int remove_callback_for_uncommited_txn(memtable::ObIMemtable *memtable);
+  int remove_callback_for_uncommited_txn(
+    const memtable::ObMemtableSet *memtable_set,
+    const share::SCN max_applied_scn);
   int get_memtable_key_arr(transaction::ObMemtableKeyArray &memtable_key_arr);
   void acquire_callback_list();
   void revert_callback_list();
@@ -220,6 +231,11 @@ public:
 private:
   void wakeup_waiting_txns_();
 public:
+<<<<<<< HEAD
+=======
+  int sync_log_fail(const ObCallbackScope &callbacks,
+                    int64_t &removed_cnt);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int calc_checksum_before_scn(const share::SCN scn,
                                uint64_t &checksum,
                                share::SCN &checksum_scn);
@@ -233,9 +249,23 @@ public:
   void clear_pending_log_size() { ATOMIC_STORE(&pending_log_size_, 0); }
   int64_t get_pending_log_size() { return ATOMIC_LOAD(&pending_log_size_); }
   int64_t get_flushed_log_size() { return ATOMIC_LOAD(&flushed_log_size_); }
-  bool is_all_redo_submitted(ObITransCallback *generate_cursor)
+  bool is_all_redo_submitted()
   {
-    return (ObITransCallback *)callback_list_.get_tail() == generate_cursor;
+    bool all_redo_submitted = true;
+    if (OB_NOT_NULL(callback_lists_)) {
+      for (int64_t i = 0; i < MAX_CALLBACK_LIST_COUNT; ++i) {
+        if (!callback_lists_[i].empty()) {
+          all_redo_submitted = false;
+          break;
+        }
+      }
+    }
+
+    if (all_redo_submitted) {
+      all_redo_submitted = !(((ObITransCallback *)callback_list_.get_tail())->need_submit_log());
+    }
+
+    return all_redo_submitted;
   }
   void merge_multi_callback_lists();
   void reset_pdml_stat();
@@ -274,10 +304,6 @@ public:
   share::SCN get_checksum_scn() const { return callback_list_.get_checksum_scn(); }
   transaction::ObPartTransCtx *get_trans_ctx() const;
 private:
-  bool is_all_redo_submitted(ObMvccRowCallback *generate_cursor)
-  {
-    return (ObMvccRowCallback *)callback_list_.get_tail() == generate_cursor;
-  }
   void force_merge_multi_callback_lists();
 private:
   ObITransCallback *get_guard_() { return callback_list_.get_guard(); }
@@ -294,7 +320,6 @@ private:
     int64_t parallel_stat_;
   };
   bool for_replay_;
-  bool leader_changed_;
   // statistics for callback remove
   int64_t callback_main_list_append_count_;
   int64_t callback_slave_list_append_count_;
@@ -308,6 +333,7 @@ private:
   // current flushed log size in leader participant
   int64_t flushed_log_size_;
   ObMemtableCtxCbAllocator &cb_allocator_;
+  ObMemtableCtxCbAllocator *cb_allocators_;
 };
 
 //class ObIMvccCtx;
@@ -390,7 +416,7 @@ public:
   int64_t to_string(char *buf, const int64_t buf_len) const;
   bool log_synced() const override { return share::SCN::max_scn() != scn_; }
   virtual int before_append(const bool is_replay) override;
-  virtual int after_append(const bool is_replay, const int ret_code) override;
+  virtual void after_append(const bool is_replay) override;
   virtual int log_submitted() override;
   virtual int undo_log_submitted() override;
   int64_t get_data_size()

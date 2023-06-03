@@ -21,16 +21,18 @@
 namespace oceanbase
 {
 namespace share
+<<<<<<< HEAD
 {
 class SCN;
 }
 namespace rpc
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
-class ObBatchCreateTabletArg;
+class SCN;
 }
 namespace rootserver
 {
-class ObServerManager;
 class ObTableCreator
 {
 public:
@@ -45,7 +47,7 @@ public:
                   ls_id_array_(),
                   inited_(false) {}
   virtual ~ObTableCreator();
-  int init();
+  int init(const bool need_tablet_cnt_check);
   int execute();
   void reset();
 

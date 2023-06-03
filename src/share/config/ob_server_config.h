@@ -21,6 +21,7 @@ namespace oceanbase
 namespace unittest
 {
   class ObSimpleClusterTestBase;
+  class ObMultiReplicaTestBase;
 }
 namespace common
 {
@@ -38,6 +39,7 @@ const char* const ENABLE_AUTO_LEADER_SWITCH = "enable_auto_leader_switch";
 const char* const MAJOR_COMPACT_TRIGGER = "major_compact_trigger";
 const char* const ENABLE_PERF_EVENT = "enable_perf_event";
 const char* const ENABLE_SQL_AUDIT = "enable_sql_audit";
+const char *const OB_STR_TRC_CONTROL_INFO = "_trace_control_info";
 const char* const CONFIG_TRUE_VALUE_BOOL = "1";
 const char* const CONFIG_FALSE_VALUE_BOOL = "0";
 const char* const CONFIG_TRUE_VALUE_STRING = "true";
@@ -52,6 +54,8 @@ const char* const CLUSTER_ID = "cluster_id";
 const char* const CLUSTER_NAME = "cluster";
 const char* const FREEZE_TRIGGER_PERCENTAGE = "freeze_trigger_percentage";
 const char* const WRITING_THROTTLEIUNG_TRIGGER_PERCENTAGE = "writing_throttling_trigger_percentage";
+const char* const COMPATIBLE = "compatible";
+const char* const WEAK_READ_VERSION_REFRESH_INTERVAL = "weak_read_version_refresh_interval";
 class ObServerMemoryConfig;
 
 class ObServerConfig : public ObCommonConfig
@@ -89,13 +93,13 @@ public:
   bool enable_defensive_check() const
   {
     int64_t v = _enable_defensive_check;
-    return v > 0 && lib::is_diagnose_info_enabled();
+    return v > 0;
   }
 
   bool enable_strict_defensive_check() const
   {
     int64_t v = _enable_defensive_check;
-    return v == 2 && lib::is_diagnose_info_enabled();
+    return v == 2;
   }
 
   // false for 1.4.2 -> 1.4.3
@@ -106,6 +110,7 @@ public:
   bool in_major_version_upgrade_mode() const { return in_upgrade_mode() && is_major_version_upgrade(); }
   bool enable_new_major() const {  return true; }
   bool in_upgrade_mode() const;
+  bool in_dbupgrade_stage() const;
   bool is_valid() const { return  system_config_!= NULL; };
   int64_t get_current_version() { return system_config_->get_version(); }
 
@@ -140,10 +145,16 @@ private:
 class ObServerMemoryConfig
 {
 public:
+  enum CapacityType {
+    SYSTEM_MEMORY,
+    HIDDEN_SYS_MEMORY,
+  };
   friend class unittest::ObSimpleClusterTestBase;
+  friend class unittest::ObMultiReplicaTestBase;
   ObServerMemoryConfig();
   static ObServerMemoryConfig &get_instance();
   int reload_config(const ObServerConfig& server_config);
+  int64_t get_capacity_default_memory(CapacityType type, int64_t memory_limit);
   int64_t get_server_memory_limit() { return memory_limit_; }
   int64_t get_reserved_server_memory() { return system_memory_; }
   int64_t get_server_memory_avail() { return memory_limit_ - system_memory_; }

@@ -23,6 +23,7 @@
 #include "storage/tx/ob_timestamp_service.h"
 #include "storage/tx/ob_trans_id_service.h"
 #include "storage/tablelock/ob_lock_memtable.h"
+#include "storage/tablet/ob_tablet.h"
 
 namespace oceanbase
 {
@@ -56,6 +57,22 @@ int ObTxReplayExecutor::execute(storage::ObLS *ls,
                                                 tenant_id))) {
     TRANS_LOG(WARN, "replay_executor.do_replay failed",
         K(replay_executor), K(buf), K(size), K(skip_pos), K(replay_hint), K(ls_id), K(tenant_id));
+  } else {
+    if (log_timestamp <= ls->get_ls_wrs_handler()->get_ls_weak_read_ts()) {
+      SCN min_log_service_scn;
+      // check max decided scn
+      ls->get_max_decided_scn(min_log_service_scn);
+      int tmp_ret = OB_ERR_UNEXPECTED;
+      TRANS_LOG(ERROR, "unexpected log timestamp and weak read ts", "ret", tmp_ret,
+                                                                    K(replay_executor),
+                                                                    K(buf),
+                                                                    K(size),
+                                                                    K(skip_pos),
+                                                                    K(replay_hint),
+                                                                    K(min_log_service_scn),
+                                                                    K(ls_id),
+                                                                    K(tenant_id));
+    }
   }
   return ret;
 }
@@ -76,16 +93,34 @@ int ObTxReplayExecutor::do_replay_(const char *buf,
     first_created_ctx_ = false;
 
     while (OB_SUCC(ret)) {
-      if (OB_FAIL(log_block_.get_next_log(header))) {
-        if (OB_ITER_END == ret) {
-          ret = OB_SUCCESS;
-          break;
-        } else {
-          TRANS_LOG(WARN, "[Replay Tx] get_next_log error in replay_buf", KPC(this));
+      if (OB_FAIL(try_get_tx_ctx_(
+                                  log_block_header_.get_tx_id(),
+                                  tenant_id,
+                                  ls_id))) {
+        TRANS_LOG(WARN, "try get tx ctx failed", K(ret), K(replay_hint), K(log_block_header_));
+      } else if (OB_ISNULL(ctx_)) {
+        if (OB_FAIL(log_block_.get_next_log(header))) {
+
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+            break;
+          } else {
+            TRANS_LOG(WARN, "[Replay Tx] get_next_log error in replay_buf", KPC(this));
+          }
         }
-      } else if (OB_FAIL(try_get_tx_ctx_(header.get_tx_log_type(), log_block_header_.get_tx_id(),
-                                                         tenant_id, ls_id))) {
-        TRANS_LOG(WARN, "try get tx ctx failed", K(ret), K(replay_hint),K(log_block_header_));
+      } else {
+        if (OB_FAIL(ctx_->iter_next_log_for_replay(log_block_, header, log_ts_ns_))) {
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+            break;
+          } else {
+            TRANS_LOG(WARN, "[Replay Tx] get_next_log error in replay_buf", KPC(this));
+          }
+        }
+      }
+
+      if(OB_FAIL(ret)) {
+          //do nothing
       } else if (ctx_ != nullptr
                && OB_FAIL(ctx_->validate_replay_log_entry_no(first_created_ctx_,
                                                              log_block_header_.get_log_entry_no(),
@@ -167,6 +202,12 @@ int ObTxReplayExecutor::do_replay_(const char *buf,
           }
           break;
         }
+        case ObTxLogType::TX_BIG_SEGMENT_LOG: {
+          if (OB_FAIL(ctx_->replay_one_part_of_big_segment(lsn_, log_ts_ns_, tx_part_log_no_))) {
+            TRANS_LOG(WARN, "[Replay Tx] replay big segment log error", KR(ret));
+          }
+          break;
+        }
         default: {
           ret = OB_ERR_UNEXPECTED;
           TRANS_LOG(ERROR, "[Replay Tx] Unknown Log Type in replay buf",
@@ -191,24 +232,23 @@ int ObTxReplayExecutor::prepare_replay_(const char *buf, const int64_t &size, co
   return ret;
 }
 
-int ObTxReplayExecutor::try_get_tx_ctx_(ObTxLogType type,
-                                        int64_t tx_id,
-                                        int64_t tenant_id,
-                                        const ObLSID &ls_id)
+int ObTxReplayExecutor::try_get_tx_ctx_(int64_t tx_id, int64_t tenant_id, const ObLSID &ls_id)
 {
   int ret = OB_SUCCESS;
 
+  ObTransID trans_id(tx_id);
   // replay ls log without part_ctx
-  if (!ObTxLogTypeChecker::is_ls_log(type) && nullptr == ctx_) {
+  if (ctx_ != nullptr) {
+    first_created_ctx_ = false;
+  } else if (trans_id.is_valid() && nullptr == ctx_) {
 
     if (OB_FAIL(ls_tx_srv_->get_tx_ctx(tx_id, true, ctx_)) && OB_TRANS_CTX_NOT_EXIST != ret) {
       TRANS_LOG(WARN, "[Replay Tx] get tx ctx from ctx_mgr failed", K(ret), K(tx_id), KP(ctx_));
     } else if (OB_TRANS_CTX_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
       bool tx_ctx_existed = false;
-      common::ObAddr scheduler;
-      ObTxCreateArg arg(false, /* can_elr */
-                        true,  /* for_replay */
+      common::ObAddr scheduler = log_block_header_.get_scheduler();
+      ObTxCreateArg arg(true,  /* for_replay */
                         tenant_id,
                         tx_id,
                         ls_id,
@@ -254,7 +294,7 @@ void ObTxReplayExecutor::finish_replay_(const int retcode)
     if (OB_SUCCESS != retcode) {
       mt_ctx_->replay_end(false, /*is_replay_succ*/
                           log_ts_ns_);
-      TRANS_LOG(WARN, "[Replay Tx]Tx Redo replay error, rollback to start", K(*this));
+      TRANS_LOG_RET(WARN, OB_ERR_UNEXPECTED, "[Replay Tx]Tx Redo replay error, rollback to start", K(*this));
     } else {
       mt_ctx_->replay_end(true, /*is_replay_succ*/
                           log_ts_ns_);
@@ -484,6 +524,9 @@ int ObTxReplayExecutor::replay_redo_in_memtable_(ObTxRedoLog &redo)
   ObMutatorRowHeader row_head;
   uint8_t meta_flag = 0;
 
+  ObCLogEncryptInfo encrypt_info;
+  encrypt_info.init();
+
   if (OB_ISNULL(mmi_ptr_)) {
     if (nullptr
         == (mmi_ptr_ = static_cast<ObMemtableMutatorIterator *>(
@@ -500,7 +543,7 @@ int ObTxReplayExecutor::replay_redo_in_memtable_(ObTxRedoLog &redo)
   if (OB_FAIL(ret)) {
 
   } else if (OB_FAIL(mmi_ptr_->deserialize(redo.get_replay_mutator_buf(), redo.get_mutator_size(),
-                                           pos, redo.get_clog_encrypt_info()))
+                                           pos, encrypt_info))
              || redo.get_mutator_size() != pos) {
     TRANS_LOG(WARN, "[Replay Tx] deserialize fail or pos does not match data_len", K(ret));
   } else {
@@ -508,13 +551,15 @@ int ObTxReplayExecutor::replay_redo_in_memtable_(ObTxRedoLog &redo)
     ObEncryptRowBuf row_buf;
     while (OB_SUCC(ret)) {
       row_head.reset();
-      if (OB_FAIL(mmi_ptr_->iterate_next_row())) {
+      if (OB_FAIL(mmi_ptr_->iterate_next_row(row_buf, encrypt_info))) {
         if (OB_ITER_END != ret) {
           TRANS_LOG(WARN, "[Replay Tx]  iterate_next_row failed", K(ret));
         }
       } else if (FALSE_IT(row_head = mmi_ptr_->get_row_head())) {
         // do nothing
-      } else if (OB_FAIL(replay_one_row_in_memtable_(row_head, mmi_ptr_, row_buf))) {
+      } else if (OB_NOT_NULL(ctx_) && OB_FAIL(ctx_->merge_tablet_modify_record(row_head.tablet_id_))) {
+        TRANS_LOG(WARN, "record tablet_id in redo failed", K(ret), K(row_head));
+      } else if (OB_FAIL(replay_one_row_in_memtable_(row_head, mmi_ptr_))) {
         if (OB_MINOR_FREEZE_NOT_ALLOW == ret) {
           if (TC_REACH_TIME_INTERVAL(1000 * 1000)) {
             TRANS_LOG(WARN, "[Replay Tx] cannot create more memtable", K(ret),
@@ -552,8 +597,7 @@ int ObTxReplayExecutor::replay_redo_in_memtable_(ObTxRedoLog &redo)
 }
 
 int ObTxReplayExecutor::replay_one_row_in_memtable_(ObMutatorRowHeader &row_head,
-                                                    memtable::ObMemtableMutatorIterator *mmi_ptr,
-                                                    memtable::ObEncryptRowBuf &row_buf)
+                                                    memtable::ObMemtableMutatorIterator *mmi_ptr)
 {
   int ret = OB_SUCCESS;
   lib::Worker::CompatMode mode;
@@ -592,7 +636,7 @@ int ObTxReplayExecutor::replay_one_row_in_memtable_(ObMutatorRowHeader &row_head
     lib::CompatModeGuard compat_guard(mode);
     switch (row_head.mutator_type_) {
     case MutatorType::MUTATOR_ROW: {
-      if (OB_FAIL(replay_row_(storeCtx, tablet, mmi_ptr_, row_buf)) && OB_ITER_END != ret) {
+      if (OB_FAIL(replay_row_(storeCtx, tablet, mmi_ptr_)) && OB_ITER_END != ret) {
         if (OB_NO_NEED_UPDATE != ret && OB_MINOR_FREEZE_NOT_ALLOW != ret) {
           TRANS_LOG(WARN, "[Replay Tx] replay row failed.", K(ret), K(mt_ctx_),
                     K(row_head.tablet_id_));
@@ -609,7 +653,7 @@ int ObTxReplayExecutor::replay_one_row_in_memtable_(ObMutatorRowHeader &row_head
       break;
     }
     case MutatorType::MUTATOR_TABLE_LOCK: {
-      if (OB_FAIL(replay_lock_(storeCtx, tablet, mmi_ptr_, row_buf)) && OB_ITER_END != ret) {
+      if (OB_FAIL(replay_lock_(storeCtx, tablet, mmi_ptr_)) && OB_ITER_END != ret) {
         TRANS_LOG(WARN, "[Replay Tx] replay lock failed.", K(ret), K(mt_ctx_),
                   K(row_head.tablet_id_));
       } else {
@@ -644,16 +688,17 @@ int ObTxReplayExecutor::prepare_memtable_replay_(ObStorageTableGuard &w_guard,
 
 int ObTxReplayExecutor::replay_row_(storage::ObStoreCtx &store_ctx,
                                     ObTablet *tablet,
-                                    memtable::ObMemtableMutatorIterator *mmi_ptr,
-                                    memtable::ObEncryptRowBuf &row_buf)
+                                    memtable::ObMemtableMutatorIterator *mmi_ptr)
 {
   int ret = OB_SUCCESS;
+  common::ObTimeGuard timeguard("replay_row_in_memtable", 10 * 1000);
   ObIMemtable *mem_ptr = nullptr;
   ObMemtable *data_mem_ptr = nullptr;
   ObStorageTableGuard w_guard(tablet, store_ctx, true, true, log_ts_ns_);
   if (OB_ISNULL(mmi_ptr)) {
     ret = OB_ERR_UNEXPECTED;
     TRANS_LOG(WARN, "[Replay Tx] invaild arguments", K(ret), KP(mmi_ptr));
+  } else if (FALSE_IT(timeguard.click("start"))) {
   } else if (OB_FAIL(prepare_memtable_replay_(w_guard, mem_ptr))) {
     if (OB_NO_NEED_UPDATE != ret) {
       TRANS_LOG(WARN, "[Replay Tx] prepare for replay failed", K(ret), KP(mem_ptr), KP(mmi_ptr));
@@ -667,7 +712,8 @@ int ObTxReplayExecutor::replay_row_(storage::ObStoreCtx &store_ctx,
     ret = OB_ERR_UNEXPECTED;
     TRANS_LOG(WARN, "[Replay Tx] this is not a ObMemtable", K(ret), KP(mem_ptr), KPC(mem_ptr),
               KP(mmi_ptr));
-  } else if (OB_FAIL(data_mem_ptr->replay_row(store_ctx, mmi_ptr, row_buf))) {
+  } else if (FALSE_IT(timeguard.click("get_memtable"))) {
+  } else if (OB_FAIL(data_mem_ptr->replay_row(store_ctx, mmi_ptr))) {
     TRANS_LOG(WARN, "[Replay Tx] replay row error", K(ret));
   } else if (OB_FAIL(data_mem_ptr->set_max_end_scn(log_ts_ns_))) { // for freeze log_ts , may be
     TRANS_LOG(WARN, "[Replay Tx] set memtable max end log ts failed", K(ret), KP(data_mem_ptr));
@@ -675,6 +721,7 @@ int ObTxReplayExecutor::replay_row_(storage::ObStoreCtx &store_ctx,
     TRANS_LOG(WARN, "[Replay Tx] set rec_log_ts error", K(ret), KPC(data_mem_ptr));
   }
 
+  timeguard.click("replay_finish");
   if (OB_FAIL(ret) && ret != OB_NO_NEED_UPDATE) {
     // We need rollback all callbacks of this log to avoid replay a row
     // in a freeze memtable which has a smaller end ts than this log.
@@ -687,19 +734,20 @@ int ObTxReplayExecutor::replay_row_(storage::ObStoreCtx &store_ctx,
 
 int ObTxReplayExecutor::replay_lock_(storage::ObStoreCtx &store_ctx,
                                      ObTablet *tablet,
-                                     memtable::ObMemtableMutatorIterator *mmi_ptr,
-                                     memtable::ObEncryptRowBuf &row_buf)
+                                     memtable::ObMemtableMutatorIterator *mmi_ptr)
 {
   // TODO: yanyuan.cxf lock is not encrypted.
-  UNUSED(row_buf);
+  common::ObTimeGuard timeguard("replay_row_in_lock_memtable", 10 * 1000);
   int ret = OB_SUCCESS;
   ObTableHandleV2 handle;
   ObLockMemtable *memtable = nullptr;
+  timeguard.click("start");
   if (OB_FAIL(tablet->get_active_memtable(handle))) {
     TRANS_LOG(WARN, "[Replay Tx] get active memtable failed", K(ret), K(*tablet));
   } else if (OB_FAIL(handle.get_lock_memtable(memtable))) {
     ret = OB_ERR_UNEXPECTED;
     TRANS_LOG(WARN, "[Replay Tx] get lock memtable failed", K(ret), K(handle));
+  } else if (FALSE_IT(timeguard.click("get_memtable"))) {
   } else if (OB_FAIL(memtable->replay_row(store_ctx, mmi_ptr))) {
     TRANS_LOG(WARN, "[Replay Tx] replay lock row error", K(ret));
   } else {

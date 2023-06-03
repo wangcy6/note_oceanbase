@@ -156,9 +156,9 @@ template <typename T> const T* __ptr__(const T *ptr) { return ptr; }
 template <typename T>
 struct Hash
 {
-  uint64_t operator()(const T &t)
+  int operator()(const T &t, uint64_t &hash_val)
   {
-    return __ptr__(t)->hash();
+    return __ptr__(t)->hash(hash_val);
   }
 };
 
@@ -364,7 +364,7 @@ public:
     load_factor_u_limit_(0.0),
     load_factor_l_limit_(0.0),
     Lp_(0),
-    eslock_(),
+    eslock_(common::ObLatchIds::HASH_MAP_LOCK),
     m_seg_sz_(0),
     m_seg_bkt_n_(0),
     m_seg_n_lmt_(0),
@@ -623,10 +623,12 @@ ObConcurrentFIFOAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr
 /* Hash Map memory manager. */
 template <typename Key, typename Value, typename MemMgrTag>
 ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::HashMapMemMgrCore()
+  : map_array_lock_(common::ObLatchIds::HASH_MAP_LOCK)
 {
   attr_.label_ = ObModIds::OB_LINEAR_HASH_MAP;
+  SET_USE_500(attr_);
   // Init node alloc.
-  int ret = node_alloc_.init(static_cast<int64_t>(sizeof(Node)), attr_.label_, attr_.tenant_id_);
+  int ret = node_alloc_.init(static_cast<int64_t>(sizeof(Node)), attr_);
   if (OB_FAIL(ret)) {
     LIB_LOG(WARN, "failed to init node alloc", K(ret));
   }
@@ -636,18 +638,18 @@ ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::HashMapMemMgrCore()
     //
     page_size = OB_MALLOC_BIG_BLOCK_SIZE;
   } else {
-    total_limit /= (lib::ObRunningModeConfig::MINI_MEM_UPPER / lib::ObRunningModeConfig::instance().memory_limit_);
+    total_limit *= lib::mini_mode_resource_ratio();
     page_size = OB_MALLOC_MIDDLE_BLOCK_SIZE;
   }
   // Init dir alloc.
   ret = dir_alloc_.init(total_limit, 2 * page_size, page_size);
-  dir_alloc_.set_label(attr_.label_);
+  dir_alloc_.set_attr(attr_);
   if (OB_FAIL(ret)) {
     LIB_LOG(WARN, "failed to init dir alloc", K(ret));
   }
   // Init counter alloc.
   ret = cnter_alloc_.init(total_limit, 2 * page_size, page_size);
-  cnter_alloc_.set_label(attr_.label_);
+  cnter_alloc_.set_attr(attr_);
   if (OB_FAIL(ret)) {
     LIB_LOG(WARN, "failed to init cnter alloc", K(ret));
   }
@@ -788,7 +790,7 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::Cnter::add(const int64_t cnt,
                                                const int64_t th_id)
 {
   if (NULL == cnter_) {
-    LIB_LOG(ERROR, "invalid cnter, not init", K(cnter_));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "invalid cnter, not init", K(cnter_));
   } else {
     // Use thread id mod counter cnt to assign counter.
     // get cpu id may be used in the future.
@@ -1174,7 +1176,7 @@ ObLinearHashMap<Key, Value, MemMgrTag>::cons_seg_(uint64_t seg_sz)
 {
   Bucket *ret = NULL;
   if (NULL == (ret = static_cast<Bucket*>(ob_malloc(seg_sz, memattr_)))) {
-    LIB_LOG(WARN, "failed to alloc segment", K(seg_sz));
+    LIB_LOG_RET(WARN, OB_ALLOCATE_MEMORY_FAILED, "failed to alloc segment", K(seg_sz));
   } else {
 DISABLE_WARNING_GCC_PUSH
 #ifdef __clang__
@@ -1211,10 +1213,10 @@ ObLinearHashMap<Key, Value, MemMgrTag>::cons_dir_(uint64_t dir_sz, Bucket **old_
   uint64_t old_seg_n = (old_dir == NULL) ? 0 : (old_dir_sz / sizeof(Bucket*));
   uint64_t dir_seg_n_lmt = dir_sz / sizeof(Bucket*);
   if (dir_seg_n_lmt <= old_seg_n) {
-    LIB_LOG(WARN, "err seg n", K(dir_seg_n_lmt), K(old_seg_n));
+    LIB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "err seg n", K(dir_seg_n_lmt), K(old_seg_n));
   }
   else if (NULL == (ret = static_cast<Bucket**>(mem_mgr_.get_dir_alloc().alloc(dir_sz)))) {
-    LIB_LOG(WARN, "failed to alloc directory", K(dir_sz));
+    LIB_LOG_RET(WARN, OB_ALLOCATE_MEMORY_FAILED, "failed to alloc directory", K(dir_sz));
   } else {
     for (uint64_t idx = 0; idx < old_seg_n; ++idx) {
       ret[idx] = old_dir[idx];
@@ -1254,7 +1256,7 @@ template <typename Key, typename Value, typename MemMgrTag>
 void ObLinearHashMap<Key, Value, MemMgrTag>::set_bkt_lock_(Bucket *bkt, bool to_lock)
 {
   if (NULL == bkt) {
-    LIB_LOG(ERROR, "err set bkt lock");
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err set bkt lock");
   } else {
     if (to_lock) {
       bool locked = false;
@@ -1284,7 +1286,7 @@ template <typename Key, typename Value, typename MemMgrTag>
 void ObLinearHashMap<Key, Value, MemMgrTag>::set_bkt_active_(Bucket *bkt, bool to_activate)
 {
   if (NULL == bkt) {
-    LIB_LOG(ERROR, "err set bkt active");
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err set bkt active");
   } else {
     bkt->flag_ = static_cast<uint8_t>(to_activate ? (bkt->flag_ | BKT_ACTIVE_MASK) : (bkt->flag_ & ~BKT_ACTIVE_MASK));
   }
@@ -1295,7 +1297,7 @@ bool ObLinearHashMap<Key, Value, MemMgrTag>::is_bkt_active_(const Bucket *bkt)
 {
   bool bret = false;
   if (NULL == bkt) {
-    LIB_LOG(ERROR, "err set bkt nonempty");
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err set bkt nonempty");
   } else {
     bret = (bkt->flag_ & BKT_ACTIVE_MASK) != 0;
   }
@@ -1306,7 +1308,7 @@ template <typename Key, typename Value, typename MemMgrTag>
 void ObLinearHashMap<Key, Value, MemMgrTag>::set_bkt_nonempty_(Bucket *bkt, bool to_nonempty)
 {
   if (NULL == bkt) {
-    LIB_LOG(ERROR, "err set bkt nonempty");
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err set bkt nonempty");
   } else {
     bkt->flag_ = static_cast<uint8_t>(to_nonempty ? (bkt->flag_ | BKT_NONEMPTY_MASK) : (bkt->flag_ & ~BKT_NONEMPTY_MASK));
   }
@@ -1443,12 +1445,12 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::load_expand_d_seg_bkts_(uint64_t L,
     Bucket* &dst_bkt)
 {
   if (NULL == dir_) {
-    LIB_LOG(ERROR, "err dir", K(dir_));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err dir", K(dir_));
   } else {
     Bucket *src_seg = dir_[seg_idx_(p)];
     Bucket *dst_seg = dir_[seg_idx_((L0_bkt_n_ << L) + p)];
     if (NULL == src_seg || NULL == dst_seg) {
-      LIB_LOG(ERROR, "err seg", K(src_seg), K(dst_seg));
+      LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err seg", K(src_seg), K(dst_seg));
     } else {
       src_bkt = &src_seg[seg_bkt_idx_(p)];
       dst_bkt = &dst_seg[seg_bkt_idx_((L0_bkt_n_ << L) + p)];
@@ -1464,7 +1466,7 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::split_expand_d_seg_bkts_(uint64_t L
     Bucket *src_bkt, Bucket *dst_bkt)
 {
   if (NULL == src_bkt || NULL == dst_bkt) {
-    LIB_LOG(ERROR, "err bkt ptr", K(src_bkt), K(dst_bkt));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err bkt ptr", K(src_bkt), K(dst_bkt));
   }
   else if (is_bkt_nonempty_(src_bkt)) {
     Node *split_nodes[2] = { NULL, NULL };
@@ -1473,12 +1475,16 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::split_expand_d_seg_bkts_(uint64_t L
     while (iter != NULL) {
       Node *cur = iter;
       iter = iter->next_;
-      uint64_t new_idx = hash_func_(cur->key_) % (L0_bkt_n_ << (L + 1));
+      uint64_t new_idx = 0;
+      (void)hash_func_(cur->key_, new_idx);
+      new_idx = new_idx % (L0_bkt_n_ << (L + 1));
       Node* &split_node = (new_idx == p) ? split_nodes[0] : split_nodes[1];
       cur->next_ = split_node;
       split_node = cur;
     }
-    uint64_t new_idx = hash_func_(src_bkt->key_) % (L0_bkt_n_ << (L + 1));
+    uint64_t new_idx = 0;
+    (void)hash_func_(src_bkt->key_, new_idx);
+    new_idx = new_idx % (L0_bkt_n_ << (L + 1));
     if (new_idx != p) {
       new (&dst_bkt->key_) Key(src_bkt->key_);
       new (&dst_bkt->value_) Value(src_bkt->value_);
@@ -1513,7 +1519,7 @@ template <typename Key, typename Value, typename MemMgrTag>
 void ObLinearHashMap<Key, Value, MemMgrTag>::unload_expand_d_seg_bkts_(Bucket *src_bkt, Bucket *dst_bkt)
 {
   if (NULL == src_bkt || NULL == dst_bkt) {
-    LIB_LOG(ERROR, "err bkt ptr", K(src_bkt), K(dst_bkt));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err bkt ptr", K(src_bkt), K(dst_bkt));
   } else {
     src_bkt->bkt_L_ = (uint8_t) (src_bkt->bkt_L_ + 1);
     dst_bkt->bkt_L_ = src_bkt->bkt_L_;
@@ -1527,12 +1533,12 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::load_shrink_d_seg_bkts_(uint64_t L,
     Bucket* &dst_bkt)
 {
   if (NULL == dir_) {
-    LIB_LOG(ERROR, "err dir", K(dir_));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err dir", K(dir_));
   } else {
     Bucket *src_seg = dir_[seg_idx_((L0_bkt_n_ << L) + p)];
     Bucket *dst_seg = dir_[seg_idx_(p)];
     if (NULL == src_seg || NULL == dst_seg) {
-      LIB_LOG(ERROR, "err seg", K(src_seg), K(dst_seg));
+      LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err seg", K(src_seg), K(dst_seg));
     } else {
       src_bkt = &src_seg[seg_bkt_idx_((L0_bkt_n_ << L) + p)];
       dst_bkt = &dst_seg[seg_bkt_idx_(p)];
@@ -1583,7 +1589,7 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::unload_shrink_d_seg_bkts_(Bucket *s
     bool succ)
 {
   if (NULL == src_bkt || NULL == dst_bkt) {
-    LIB_LOG(ERROR, "err bkt ptr", K(src_bkt), K(dst_bkt));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err bkt ptr", K(src_bkt), K(dst_bkt));
   } else {
     if (succ) {
       dst_bkt->bkt_L_ = (uint8_t) (dst_bkt->bkt_L_ - 1);
@@ -1666,7 +1672,7 @@ template <typename Key, typename Value, typename MemMgrTag>
 typename ObLinearHashMap<Key, Value, MemMgrTag>::Bucket*
 ObLinearHashMap<Key, Value, MemMgrTag>::load_access_bkt_(const Key &key, uint64_t &hash_v, Bucket*& bkt_seg)
 {
-  hash_v = hash_func_(key); // Return hash value as seed of load factor ctrl.
+  (void)hash_func_(key, hash_v); // Return hash value as seed of load factor ctrl.
   uint64_t L = 0;
   uint64_t p = 0;
   uint64_t bkt_L = 0;
@@ -1754,7 +1760,7 @@ template <typename Key, typename Value, typename MemMgrTag>
 void ObLinearHashMap<Key, Value, MemMgrTag>::unload_access_bkt_(Bucket *bkt, Bucket* bkt_seg)
 {
   if (NULL == bkt) {
-    LIB_LOG(ERROR, "err bkt", K(bkt));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err bkt", K(bkt));
   } else {
     set_bkt_lock_(bkt, false);
     unload_haz_seg_(bkt_seg);
@@ -1787,7 +1793,7 @@ uint64_t ObLinearHashMap<Key, Value, MemMgrTag>::do_clear_seg_(Bucket *seg, uint
 {
   uint64_t cnt = 0;
   if (NULL == seg) {
-    LIB_LOG(ERROR, "err seg", K(seg));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err seg", K(seg));
   } else {
     for (uint64_t idx = 0; idx < bkt_n; ++idx) {
       Bucket *bkt = &seg[idx];
@@ -2330,7 +2336,7 @@ template <typename Function>
 bool ObLinearHashMap<Key, Value, MemMgrTag>::DoRemoveIfOnBkt<Function>::operator()(ObLinearHashMap<Key, Value, MemMgrTag> &host, Bucket *bkt, Function &fn)
 {
   if (NULL == bkt) {
-    LIB_LOG(ERROR, "err bkt", K(bkt));
+    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "err bkt", K(bkt));
   } else {
     Node *remove_list = NULL;
     Node **next_ptr = NULL;

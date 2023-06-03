@@ -153,19 +153,19 @@ int deep_copy_parse_node(void *malloc_pool, const ParseNode *src_node, ParseNode
         (void)fprintf(stderr, "ERROR failed to allocate memory\n");
       }
       for (int64_t i = 0; OB_PARSER_SUCCESS == ret && i < src_node->num_child_; ++i) {
-        ParseNode *dst_node = NULL;
+        ParseNode *tmp_node = NULL;
         ParseNode *child_node = src_node->children_[i];
         if (OB_UNLIKELY(NULL == child_node)) {
           ret = OB_PARSER_ERR_UNEXPECTED;
           (void)fprintf(stderr, "ERROR child node is null\n");
-        } else if (OB_UNLIKELY(NULL == (dst_node =
+        } else if (OB_UNLIKELY(NULL == (tmp_node =
                   (ParseNode *)parser_alloc(malloc_pool, sizeof(ParseNode))))) {
           ret = OB_PARSER_ERR_NO_MEMORY;
           (void)fprintf(stderr, "ERROR failed to allocate memory\n");
-        } else if (OB_PARSER_SUCCESS != (ret = deep_copy_parse_node(malloc_pool, child_node, dst_node))) {
+        } else if (OB_PARSER_SUCCESS != (ret = deep_copy_parse_node(malloc_pool, child_node, tmp_node))) {
           (void)fprintf(stderr, "ERROR failed to deep copy parse node\n");
         } else {
-          dst_node->children_[i] = dst_node;
+          dst_node->children_[i] = tmp_node;
         }
       }
     }
@@ -183,7 +183,7 @@ ParseNode *new_node(void *malloc_pool, ObItemType type, int num)
     node->type_ = type;
     node->num_child_ = num;
     node->value_ = INT64_MAX;
-    node->str_off_ = -1;
+    node->pl_str_off_ = -1;
 #ifdef SQL_PARSER_COMPILATION
     node->token_off_ = -1;
     node->token_len_ = -1;
@@ -505,17 +505,24 @@ void ob_parse_binary(const char *src, int64_t len, char *dest)
   if (OB_UNLIKELY(NULL == src || len <= 0 || NULL == dest)) {
     //do nothing
   } else {
+    bool is_odd = false;
     if (len > 0 && len % 2 != 0)
     {
       *dest = char_int(src[0]);
       ++src;
       ++dest;
+      is_odd = true;
     }
-    const char *end = src + len -1;
-    for (; src <= end; src += 2)
-    {
-      *dest = (char)(16*char_int(src[0]) + char_int(src[1]));
-      ++dest;
+    if (len == 1) {
+      //do nothing.
+    } else {
+      //for odd number, we have copy the first char,  so we should minus 2;
+      const char *end = src + len - (is_odd ? 2 : 1);
+      for (; src <= end; src += 2)
+      {
+        *dest = (char)(16*char_int(src[0]) + char_int(src[1]));
+        ++dest;
+      }
     }
   }
 }
@@ -747,6 +754,26 @@ int64_t get_question_mark(ObQuestionMarkCtx *ctx, void *malloc_pool, const char 
     } else {
       (void)fprintf(stderr, "ERROR question mark name buffer is null\n");
     }
+  }
+  return idx;
+}
+
+int64_t get_question_mark_by_defined_name(ObQuestionMarkCtx *ctx, const char *name)
+{
+  int64_t idx = -1;
+  if (OB_UNLIKELY(NULL == ctx || NULL == name)) {
+    (void)fprintf(stderr, "ERROR question mark ctx or name is NULL\n");
+  } else if (ctx->name_ != NULL) {
+    for (int64_t i = 0; -1 == idx && i < ctx->count_; ++i) {
+      if (NULL == ctx->name_[i]) {
+        (void)fprintf(stderr, "ERROR name_ in question mark ctx is null\n");
+      } else if (0 == STRCASECMP(ctx->name_[i], name)) {
+        idx = i;
+        break;
+      }
+    }
+  } else {
+    (void)fprintf(stderr, "ERROR name_ in question mark ctx is null\n");
   }
   return idx;
 }

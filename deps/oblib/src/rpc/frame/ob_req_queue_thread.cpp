@@ -31,24 +31,31 @@ using namespace oceanbase::rpc::frame;
 using namespace oceanbase::common;
 using namespace oceanbase::lib;
 
-ObReqQueue::ObReqQueue(int queue_capacity)
-    : wait_finish_(false),
+ObReqQueue::ObReqQueue(int capacity)
+    : wait_finish_(true),
+      push_worker_count_(0),
+      capacity_(capacity),
       queue_(),
       qhandler_(NULL),
       host_()
 {
-  queue_.init(queue_capacity);
 }
 
 ObReqQueue::~ObReqQueue()
 {
+  LOG_INFO("begin to destroy queue", K(queue_.size()));
   queue_.destroy();
+}
+
+int ObReqQueue::init(const int64_t tenant_id)
+{
+  return queue_.init(capacity_, "ReqQueue", tenant_id);
 }
 
 void ObReqQueue::set_qhandler(ObiReqQHandler *qhandler)
 {
   if (OB_ISNULL(qhandler)) {
-    LOG_ERROR("invalid argument", K(qhandler));
+    LOG_ERROR_RET(common::OB_INVALID_ARGUMENT, "invalid argument", K(qhandler));
   }
   qhandler_ = qhandler;
 }
@@ -70,6 +77,17 @@ bool ObReqQueue::push(ObRequest *req, int max_queue_len, bool block)
     bret = OB_LIKELY(OB_SUCCESS == queue_.push(req));
   }
   return bret;
+}
+
+oceanbase::rpc::ObRequest *ObReqQueue::pop()
+{
+  void *task = NULL;
+  int64_t timeout = 0;
+  ObRequest *req = NULL;
+  if (queue_.size() > 0 && OB_LIKELY(OB_SUCCESS == queue_.pop(task, timeout)) && OB_NOT_NULL(task)) {
+    req = reinterpret_cast<ObRequest *>(task);
+  }
+  return req;
 }
 
 void ObReqQueue::set_host(const ObAddr &host)
@@ -102,8 +120,14 @@ int ObReqQueue::process_task(void *task)
         } else {
           ObCurTraceId::set(trace_id);
         }
-        if (OB_LOG_LEVEL_NONE != packet.get_log_level()) {
-          ObThreadLogLevelUtils::init(packet.get_log_level());
+        // Do not set thread local log level while log level upgrading (OB_LOGGER.is_info_as_wdiag)
+        if (OB_LOGGER.is_info_as_wdiag()) {
+          ObThreadLogLevelUtils::clear();
+        } else {
+          int8_t log_level = packet.get_log_level();
+          if (OB_LOG_LEVEL_NONE != log_level) {
+            ObThreadLogLevelUtils::init(log_level);
+          }
         }
       } else {
         // mysql command request
@@ -135,14 +159,13 @@ int ObReqQueue::process_task(void *task)
 void ObReqQueue::loop()
 {
   int ret = OB_SUCCESS;
-  int64_t timeout = 300 * 1000;
+  int64_t timeout = 3000 * 1000;
   void *task = NULL;
-
   if (OB_ISNULL(qhandler_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_ERROR("invalid argument", K(qhandler_));
   } else if (OB_FAIL(qhandler_->onThreadCreated(nullptr))) {
-    LOG_ERROR("do thread craeted fail, thread will exit", K(ret));
+    LOG_ERROR("do thread created fail, thread will exit", K(ret));
   } else {
     // The main loop threads process tasks.
     while (!Thread::current().has_set_stop()) {
@@ -157,18 +180,22 @@ void ObReqQueue::loop()
     }  // main loop
 
     if (!wait_finish_) {
-      LOG_INFO("exiting queue thread without "
-              "wait finish, remain %ld task", "qsize", queue_.size());
-    } else if (0 != queue_.size()) {
-      LOG_INFO("exiting queue thread and wait remain finish");
+      LOG_INFO("exiting queue thread without wait finish", K(queue_.size()));
+    } else {
+      while(get_push_worker_count() != 0); // wait to push finish
+      LOG_INFO("exiting queue thread and wait remain finish", K(queue_.size()));
       // Process remains if we should wait until all task has been
       // processed before exiting this thread. Previous return code
       // isn't significant, we just ignore it to make progress. When
       // queue pop a normal task we process it until pop fails.
       ret = OB_SUCCESS;
-      while (OB_SUCC(ret)) {
+      while (queue_.size() > 0 && OB_SUCC(ret)) {
         if (OB_FAIL(queue_.pop(task, timeout))) {
           LOG_DEBUG("queue pop task fail", K(&queue_));
+          if(OB_ENTRY_NOT_EXIST == ret) {
+            // lightyqueue may return OB_ENTRY_NOT_EXIST when tasks existing
+            ret = OB_SUCCESS;
+          }
         } else if (NULL != task) {
           process_task(task);  // ignore return code.
         } else {

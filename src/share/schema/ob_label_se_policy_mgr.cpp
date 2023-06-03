@@ -29,24 +29,24 @@ using namespace hash;
 
 ObLabelSePolicyMgr::ObLabelSePolicyMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_POLICY),
-      policy_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_POLICY),
-      column_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_POLICY),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_POLICY)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE)),
+      policy_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE)),
+      column_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE))
 
 {
 }
 
 ObLabelSePolicyMgr::ObLabelSePolicyMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_POLICY),
-      policy_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_POLICY),
-      column_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_POLICY),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_POLICY)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE)),
+      policy_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE)),
+      column_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_POLICY, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -75,7 +75,7 @@ int ObLabelSePolicyMgr::init()
 void ObLabelSePolicyMgr::reset()
 {
   if (!is_inited_) {
-    LOG_WARN("label security policy manger not init");
+    LOG_WARN_RET(OB_NOT_INIT, "label security policy manger not init");
   } else {
     schema_infos_.clear();
     policy_name_map_.clear();
@@ -466,26 +466,26 @@ int ObLabelSePolicyMgr::get_schema_statistics(ObSchemaStatisticsInfo &schema_inf
 
 ObLabelSeCompMgr::ObLabelSeCompMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      short_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      long_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      num_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      short_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      long_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      num_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE))
 
 {
 }
 
 ObLabelSeCompMgr::ObLabelSeCompMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      short_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      long_name_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT),
-      num_map_(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      short_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      long_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE)),
+      num_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_COMPONENT, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -516,7 +516,7 @@ int ObLabelSeCompMgr::init()
 void ObLabelSeCompMgr::reset()
 {
   if (!is_inited_) {
-    LOG_ERROR("schema mgr not inited");
+    LOG_ERROR_RET(OB_NOT_INIT, "schema mgr not inited");
   } else {
     schema_infos_.clear();
     long_name_map_.clear();
@@ -1049,24 +1049,24 @@ int ObLabelSeCompMgr::get_schema_statistics(ObSchemaStatisticsInfo &schema_info)
 
 ObLabelSeLabelMgr::ObLabelSeLabelMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_LABEL),
-      label_map_(ObModIds::OB_SCHEMA_LABEL_SE_LABEL),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_LABEL),
-      tag_map_(ObModIds::OB_SCHEMA_LABEL_SE_LABEL)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE)),
+      label_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE)),
+      tag_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE))
 
 {
 }
 
 ObLabelSeLabelMgr::ObLabelSeLabelMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_LABEL),
-      label_map_(ObModIds::OB_SCHEMA_LABEL_SE_LABEL),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_LABEL),
-      tag_map_(ObModIds::OB_SCHEMA_LABEL_SE_LABEL)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE)),
+      label_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE)),
+      tag_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_LABEL, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -1095,7 +1095,7 @@ int ObLabelSeLabelMgr::init()
 void ObLabelSeLabelMgr::reset()
 {
   if (!is_inited_) {
-    LOG_WARN("label security policy manger not init");
+    LOG_WARN_RET(OB_NOT_INIT, "label security policy manger not init");
   } else {
     schema_infos_.clear();
     label_map_.clear();
@@ -1559,22 +1559,22 @@ int ObLabelSeLabelMgr::get_schema_statistics(ObSchemaStatisticsInfo &schema_info
 
 ObLabelSeUserLevelMgr::ObLabelSeUserLevelMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL),
-      user_level_map_(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL, ObCtxIds::SCHEMA_SERVICE)),
+      user_level_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL, ObCtxIds::SCHEMA_SERVICE))
 
 {
 }
 
 ObLabelSeUserLevelMgr::ObLabelSeUserLevelMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      schema_infos_(0, NULL, ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL),
-      user_level_map_(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL),
-      id_map_(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL)
+      schema_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL, ObCtxIds::SCHEMA_SERVICE)),
+      user_level_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL, ObCtxIds::SCHEMA_SERVICE)),
+      id_map_(SET_USE_500(ObModIds::OB_SCHEMA_LABEL_SE_USER_LEVEL, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -1601,7 +1601,7 @@ int ObLabelSeUserLevelMgr::init()
 void ObLabelSeUserLevelMgr::reset()
 {
   if (!is_inited_) {
-    LOG_WARN("label security policy manger not init");
+    LOG_WARN_RET(OB_NOT_INIT, "label security policy manger not init");
   } else {
     schema_infos_.clear();
     user_level_map_.clear();

@@ -13,6 +13,8 @@
 #ifndef OCEANBASE_STORAGE_OB_TX_TABLE_ITERATOR
 #define OCEANBASE_STORAGE_OB_TX_TABLE_ITERATOR
 
+#include "lib/container/ob_array.h"
+#include "logservice/archiveservice/ob_archive_util.h"
 #include "storage/memtable/ob_memtable_iterator.h"
 #include "storage/tx_table/ob_tx_table_define.h"
 #include "storage/tx/ob_trans_ctx_mgr.h"
@@ -31,8 +33,9 @@ namespace transaction
 }
 namespace storage
 {
+class ObTxTable;
 class ObTxDataMemtable;
-class ObTxDataSortListNode;
+class ObTxDataLinkNode;
 class ObSSTableArray;
 struct TxDataReadSchema;
 
@@ -74,57 +77,77 @@ enum TX_CTX_SSTABLE_COL_IDX : int64_t
  * └────────────┴──────────────┴─────────────┴────────────┴──────────────────────────────────┘
  *
  * This iterator will execute twice sorting and once reading from old tx data sstable.
- * For more details, see https://yuque.antfin-inc.com/ob/transaction/lurtok
+ * For more details, see
  *
  */
-
 
 class ObTxDataMemtableScanIterator : public memtable::ObIMemtableIterator
 {
 private:
   static const int64_t BUF_LENGTH = 1024;
-  static int64_t PERIODICAL_SELECT_INTERVAL_NS;
+
+  class TxData2DatumRowConverter {
+  public:
+    TxData2DatumRowConverter() :
+    serialize_buffer_(nullptr), buffer_len_(0), tx_data_(nullptr), generate_size_(0) {}
+    ~TxData2DatumRowConverter() { reset(); }
+    OB_NOINLINE int init(ObTxData *tx_data);
+    void reset();
+    int generate_next_now(const blocksstable::ObDatumRow *&row);
+    TO_STRING_KV(KP_(serialize_buffer), K_(buffer_len), KPC_(tx_data),
+                 K_(generate_size), K_(datum_row));
+  private:
+    char *serialize_buffer_;
+    int64_t buffer_len_;
+    ObTxData *tx_data_;
+    int64_t generate_size_;
+    blocksstable::ObDatumRow datum_row_;
+  };
 
 public:
-  ObTxDataMemtableScanIterator(const ObTableIterParam &iter_param)
+  ObTxDataMemtableScanIterator(const ObTableIterParam &iter_param, const blocksstable::ObDatumRange &range)
     : is_inited_(false),
       iter_param_(iter_param),
+<<<<<<< HEAD
       dump_tx_data_done_(false),
       cur_max_commit_version_(),
       pre_start_scn_(),
       tx_data_row_cnt_(0),
+=======
+      range_(range),
+      is_parallel_merge_(false),
+      iterate_row_cnt_(0),
+      start_tx_id_(0),
+      end_tx_id_(0),
+      row_cnt_to_dump_(0),
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       pre_tx_data_(nullptr),
-      arena_allocator_(),
       cur_node_(nullptr),
-      row_(),
-      buf_(arena_allocator_),
       tx_data_memtable_(nullptr),
       key_datum_(),
-      DEBUG_iter_commit_ts_cnt_(0) {}
+      drop_tx_data_cnt_(0) {}
 
   ~ObTxDataMemtableScanIterator() { reset(); }
 
-  /**
-   * @brief This init() function may cost more than 1 second because of the following
-   * reasons:
-   * 1. The tx data memtable uses a link hash map to do insert and read operation. So it does not
-   * have an ordered data structure.
-   * 2. The scann iterator need ordered access to tx data memtable.
-   *
-   * So this init() function will do sorting function of tx data memtable, this may cost more than 1
-   * second.
-   *
-   * @param[in] tx_data_memtable the tx data memtable to scan
-   */
   virtual int init(ObTxDataMemtable *tx_data_memtable);
-
   virtual int inner_get_next_row(const blocksstable::ObDatumRow *&row);
   virtual void reset();
   virtual void reuse();
 
-private:
-  int get_next_tx_data_row_(const blocksstable::ObDatumRow *&row);
+  TO_STRING_KV(K(is_inited_),
+               K(range_),
+               K(is_parallel_merge_),
+               K(iterate_row_cnt_),
+               K(start_tx_id_),
+               K(end_tx_id_),
+               K(row_cnt_to_dump_),
+               KP(cur_node_),
+               K(drop_tx_data_cnt_))
 
+private:
+  int get_next_tx_data_(ObTxData *&tx_data);
+
+<<<<<<< HEAD
   int get_next_commit_scn_row_(const blocksstable::ObDatumRow *&row);
 
   int prepare_commit_scn_list_();
@@ -174,23 +197,43 @@ private:
 
   void DEBUG_print_start_scn_list_();
   void DEBUG_print_merged_commit_versions_(ObCommitSCNsArray &merged_commit_versions);
+=======
+  int drop_and_get_tx_data_(ObTxData *&tx_data);
+
+  int init_iterate_range_(ObTxDataMemtable *tx_data_memtable);
+
+  int init_serial_range_(ObTxDataMemtable *tx_data_memtable);
+
+  int init_parallel_range_(ObTxDataMemtable *tx_data_memtable);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 private:
   bool is_inited_;
   const ObTableIterParam &iter_param_;
+<<<<<<< HEAD
   bool dump_tx_data_done_;
   share::SCN cur_max_commit_version_;
   share::SCN pre_start_scn_;
   int64_t tx_data_row_cnt_;
+=======
+  const blocksstable::ObDatumRange &range_;
+  bool is_parallel_merge_;
+  int64_t iterate_row_cnt_;
+  int64_t start_tx_id_;
+  int64_t end_tx_id_;
+  int64_t row_cnt_to_dump_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   ObTxData *pre_tx_data_;
-  ObArenaAllocator arena_allocator_;
-  ObTxDataSortListNode *cur_node_;
-  blocksstable::ObDatumRow row_;
-  ObTxLocalBuffer buf_;
+  ObTxDataLinkNode *cur_node_;
+  TxData2DatumRowConverter tx_data_2_datum_converter_;
   ObTxDataMemtable *tx_data_memtable_;
   blocksstable::ObStorageDatum key_datum_;
+<<<<<<< HEAD
   int64_t DEBUG_iter_commit_ts_cnt_;
   share::SCN DEBUG_last_start_scn_;
+=======
+  int64_t drop_tx_data_cnt_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 
 /**
@@ -219,15 +262,17 @@ private:
                              ObSSTableArray &sstables,
                              const ObTableIterParam &iter_param,
                              ObTableAccessContext &access_context,
-                             ObTxData &tx_data);
-  int deserialize_tx_data_from_store_row_(const blocksstable::ObDatumRow *row, ObTxData &tx_data);
+                             ObStringHolder &temp_buffer,
+                             int64_t &total_need_buffer_cnt);
+  OB_NOINLINE int deserialize_tx_data_from_store_buffers_(ObTxData &tx_data);
 
 private:
-  const ObTableIterParam & iter_param_;
+  const ObTableIterParam &iter_param_;
   SliceAllocator &slice_allocator_;
   transaction::ObTransID tx_id_;
   ObArenaAllocator arena_allocator_;
   blocksstable::ObStorageDatum key_datums_[2];
+  ObArray<ObStringHolder> tx_data_buffers_;
 };
 
 /**
@@ -302,7 +347,6 @@ private:
   transaction::ObLSTxCtxIterator ls_tx_ctx_iter_;
   const int64_t MAX_VALUE_LENGTH_;
   bool is_inited_;
-
 };
 
 }  // namespace storage

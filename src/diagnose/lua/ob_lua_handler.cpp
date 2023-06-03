@@ -26,12 +26,16 @@
 #include "lib/atomic/ob_atomic.h"
 #include "lib/signal/ob_signal_utils.h"
 #include "lib/thread/ob_thread_name.h"
+#include "lib/thread/protected_stack_allocator.h"
 #include "lib/utility/utility.h"
+#include "lib/thread/thread.h"
 
 extern "C" {
   #include <lua.h>
   #include <lauxlib.h>
   #include <lualib.h>
+extern int ob_epoll_wait(int __epfd, struct epoll_event *__events,
+		                     int __maxevents, int __timeout);
 }
 
 using namespace oceanbase;
@@ -41,7 +45,7 @@ using namespace oceanbase::diagnose;
 void ObLuaHandler::memory_update(const int size)
 {
   if (0 == size) {
-    OB_LOG(ERROR, "bad param", K(size));
+    OB_LOG_RET(ERROR, OB_INVALID_ARGUMENT, "bad param", K(size));
   } else if (size > 0) {
     ++alloc_count_;
     alloc_size_ += size;
@@ -60,7 +64,7 @@ void *ObLuaHandler::realloc_functor(void *userdata, void *ptr, size_t osize, siz
     // do nothing
   } else if (OB_NOT_NULL(ret = diagnose::alloc(nsize))) {
     if (OB_NOT_NULL(ptr)) {
-      MEMCPY(ret, ptr, std::min(*(uint64_t *)((char *)ptr - 8), nsize));
+      memmove(ret, ptr, std::min(osize, nsize));
     }
   }
   if (OB_NOT_NULL(ptr)) {
@@ -76,14 +80,14 @@ int ObLuaHandler::process(const char* lua_code)
     OB_LOG(INFO, "Lua code was executed", K(alloc_count_), K(free_count_), K(alloc_size_), K(free_size_));
     lua_State* L = lua_newstate(realloc_functor, nullptr);
     if (OB_ISNULL(L)) {
-      OB_LOG(ERROR, "luastate is NULL");
+      OB_LOG_RET(ERROR, OB_INVALID_ARGUMENT, "luastate is NULL");
     } else {
       luaL_openlibs(L);
       APIRegister::get_instance().register_api(L);
       try {
         luaL_dostring(L, lua_code);
       } catch (std::exception& e) {
-        _OB_LOG(ERROR, "exception during lua code execution, reason %s", e.what());
+        _OB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "exception during lua code execution, reason %s", e.what());
       }
       lua_close(L);
     }
@@ -146,7 +150,7 @@ int ObUnixDomainListener::run()
     struct epoll_event listen_ev;
     int epoll_fd = epoll_create(256);
     s.sun_family = AF_UNIX;
-    strncpy(s.sun_path, addr, sizeof(s.sun_path));
+    strncpy(s.sun_path, addr, sizeof(s.sun_path) - 1);
     unlink(addr);
     listen_ev.events = EPOLLIN;    
     listen_ev.data.fd = listen_fd_;
@@ -166,6 +170,7 @@ int ObUnixDomainListener::run()
       ATOMIC_STORE(&stop_, false);
       worker_ = std::thread([=]() {
         lib::set_thread_name("LuaHandler");
+        lib::ObStackHeaderGuard stack_header_guard;
         constexpr int64_t EPOLL_EVENT_BUFFER_SIZE = 32;
         constexpr int64_t TIMEOUT = 1000;
         struct epoll_event events[EPOLL_EVENT_BUFFER_SIZE];
@@ -174,7 +179,8 @@ int ObUnixDomainListener::run()
         while (OB_LIKELY(!ATOMIC_LOAD(&stop_))) {
           int conn_fd = -1;
           int ret = OB_SUCCESS;
-          int64_t event_cnt = epoll_wait(epoll_fd, events, EPOLL_EVENT_BUFFER_SIZE, TIMEOUT);
+          lib::Thread::update_loop_ts();
+          int64_t event_cnt = ob_epoll_wait(epoll_fd, events, EPOLL_EVENT_BUFFER_SIZE, TIMEOUT);
           if (event_cnt < 0) {
             if (EINTR == errno) {
               // timeout, ignore

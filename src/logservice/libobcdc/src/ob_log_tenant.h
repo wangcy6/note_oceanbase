@@ -52,6 +52,11 @@ struct TenantID
   {
     return static_cast<int64_t>(tenant_id_);
   }
+  int hash(uint64_t &hash_val) const
+  {
+    hash_val = hash();
+    return OB_SUCCESS;
+  }
 
   int compare(const TenantID &other) const
   {
@@ -171,7 +176,7 @@ public:
   int drop_tenant(bool &tenant_can_be_dropped, const char *call_from);
 
   // Increase the number of LS when a tenant is in service
-  int inc_ls_count_on_serving(const TenantLSID &tls_id, bool &is_serving);
+  int inc_ls_count_on_serving(const logservice::TenantLSID &tls_id, bool &is_serving);
 
   /// Recycle LS
   /// This task is called when processing a LS offline task, if this task is received,
@@ -183,7 +188,7 @@ public:
   ///
   /// @retval OB_SUCCESS         Success
   /// @retval other_error_code   Fail
-  int recycle_ls(const TenantLSID &tls_id, bool &tenant_can_be_dropped);
+  int recycle_ls(const logservice::TenantLSID &tls_id, bool &tenant_can_be_dropped);
 
   /// mark start of drop tenant
   ///
@@ -229,6 +234,13 @@ public:
   int add_all_user_tablets_info(const int64_t timeout)
   {
     return part_mgr_.add_all_user_tablets_info(timeout);
+  }
+
+  int add_all_user_tablets_info(
+      const ObIArray<const datadict::ObDictTableMeta *> &table_metas,
+      const int64_t timeout)
+  {
+    return part_mgr_.add_all_user_tablets_info(table_metas, timeout);
   }
 
   int get_table_info_of_tablet(const common::ObTabletID &tablet_id, ObCDCTableInfo &table_info) const

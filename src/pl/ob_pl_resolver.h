@@ -116,6 +116,26 @@ public:
   bool is_sync_package_var_;
 };
 
+class ObPLMockSelfArg
+{
+public:
+  ObPLMockSelfArg(
+    const ObIArray<ObObjAccessIdx> &access_idxs, ObSEArray<ObRawExpr*, 4> &expr_params, ObRawExprFactory &expr_factory)
+    : access_idxs_(access_idxs),
+      expr_params_(expr_params),
+      expr_factory_(expr_factory),
+      mark_only_(false),
+      mocked_(false) {}
+  int mock();
+  ~ObPLMockSelfArg();
+private:
+  const ObIArray<ObObjAccessIdx> &access_idxs_;
+  ObSEArray<ObRawExpr*, 4> &expr_params_;
+  ObRawExprFactory &expr_factory_;
+  bool mark_only_;
+  bool mocked_;
+};
+
 class ObPLPackageAST;
 class ObPLResolver
 {
@@ -153,6 +173,7 @@ public:
     inline void set_warning(int64_t level) { top_warning_level_ = level; }
     inline int64_t get_continue() { return top_continue_; }
     inline void set_continue() { top_continue_ = handler_stack_.count() - 1; }
+    inline void set_continue(int64_t top_continue) { top_continue_ = top_continue; }
     inline int64_t get_stack_depth() { return handler_stack_.count(); }
     inline bool in_continue() { return OB_INVALID_INDEX != top_continue_; }
     inline bool in_notfound() { return OB_INVALID_INDEX != top_notfound_level_; }
@@ -273,12 +294,14 @@ public:
                                ObPLBlockNS &ns,
                                ObRawExprFactory &expr_factory,
                                const ObSQLSessionInfo *session_info,
+                               ObSchemaGetterGuard *schema_guard,
                                ObRawExpr *&expr,
                                bool for_write = false);
   static int resolve_local_var(const ObString &var_name,
                                ObPLBlockNS &ns,
                                ObRawExprFactory &expr_factory,
                                const ObSQLSessionInfo *session_info,
+                               ObSchemaGetterGuard *schema_guard,
                                ObRawExpr *&expr,
                                bool for_write = false);
   static int resolve_sp_integer_constraint(ObPLDataType &pls_type);
@@ -301,6 +324,10 @@ public:
   int resolve_sqlcode_or_sqlerrm(sql::ObQualifiedName &q_name,
                                  ObPLCompileUnitAST &unit_ast,
                                  sql::ObRawExpr *&expr);
+  int resolve_construct(const ObQualifiedName &q_name,
+                                    const ObUDFInfo &udf_info,
+                                    const ObUserDefinedType &user_type,
+                                    ObRawExpr *&expr);
   int resolve_construct(const sql::ObQualifiedName &q_name,
                         const sql::ObUDFInfo &udf_info,
                         ObRawExpr *&expr);
@@ -429,6 +456,8 @@ public:
                                    ObIArray<ObRawExpr*>& params,
                                    const ObUserDefinedType *user_type,
                                    ObPLDataType &pl_type);
+  static bool is_json_type_compatible(
+    const ObUserDefinedType *left, const ObUserDefinedType *right);
   static int check_composite_compatible(const ObPLINS &ns,
     uint64_t left_type_id, uint64_t right_type_id, bool &is_compatible);
 
@@ -501,6 +530,11 @@ public:
   int check_static_bool_expr(const ObRawExpr *expr, bool &is_static_bool_expr);
 
   static int adjust_routine_param_type(ObPLDataType &type);
+
+  int resolve_udf_info(
+    sql::ObUDFInfo &udf_info, ObIArray<ObObjAccessIdx> &access_idxs, ObPLCompileUnitAST &func);
+
+  int construct_name(ObString &database_name, ObString &package_name, ObString &routine_name, ObSqlString &object_name);
 private:
   int resolve_declare_var(const ObStmtNodeTree *parse_tree, ObPLDeclareVarStmt *stmt, ObPLFunctionAST &func_ast);
   int resolve_declare_var(const ObStmtNodeTree *parse_tree, ObPLPackageAST &package_ast);
@@ -532,7 +566,7 @@ private:
                            bool is_for_param_type = false);
   int resolve_assign(const ObStmtNodeTree *parse_tree, ObPLAssignStmt *stmt, ObPLFunctionAST &func);
   int resolve_if(const ObStmtNodeTree *parse_tree, ObPLIfStmt *stmt, ObPLFunctionAST &func);
-  int resolve_case(const ObStmtNodeTree *parse_tree, ObPLIfStmt *stmt, ObPLFunctionAST &func);
+  int resolve_case(const ObStmtNodeTree *parse_tree, ObPLCaseStmt *stmt, ObPLFunctionAST &func);
   int resolve_iterate(const ObStmtNodeTree *parse_tree, ObPLIterateStmt *stmt, ObPLFunctionAST &func);
   int resolve_leave(const ObStmtNodeTree *parse_tree, ObPLLeaveStmt *stmt, ObPLFunctionAST &func);
   int resolve_while(const ObStmtNodeTree *parse_tree, ObPLWhileStmt *stmt, ObPLFunctionAST &func);
@@ -607,6 +641,8 @@ private:
                      const ObPLDataType *expected_type = NULL);
   int get_actually_pl_type(const ObPLDataType *&type);
   int set_cm_warn_on_fail(ObRawExpr *&expr);
+  int analyze_expr_type(ObRawExpr *&expr,
+                        ObPLCompileUnitAST &unit_ast);
   int resolve_expr(const ParseNode *node, ObPLCompileUnitAST &unit_ast,
                    sql::ObRawExpr *&expr, uint64_t line_number = 0, /* where this expr called */
                    bool need_add = true, const ObPLDataType *expected_type = NULL,
@@ -619,9 +655,12 @@ private:
                   sql::ObRawExpr *&expr,
                   bool for_write = false);
   int resolve_udf_without_brackets(sql::ObQualifiedName &q_name, ObPLCompileUnitAST &unit_ast, ObRawExpr *&expr);
-  int resolve_udf(sql::ObUDFInfo &udf_info,
-                  const ObIArray<ObString> &access_name,
-                  ObPLCompileUnitAST &func);
+  int make_self_symbol_expr(ObPLCompileUnitAST &func, ObRawExpr *&expr);
+  int add_udt_self_argument(const ObIRoutineInfo *routine_info,
+                            ObIArray<ObRawExpr*> &expr_params,
+                            ObIArray<ObObjAccessIdx> &access_idxs,
+                            ObUDFInfo &udf_info,
+                            ObPLCompileUnitAST &func);
   int resolve_qualified_identifier(sql::ObQualifiedName &q_name,
                                            ObIArray<sql::ObQualifiedName> &columns,
                                            ObIArray<ObRawExpr*> &real_exprs,
@@ -646,7 +685,7 @@ private:
   int resolve_package_stmt_list(const ObStmtNodeTree *node, ObPLStmtBlock *&block, ObPLPackageAST &package);
   int resolve_stmt_list(const ObStmtNodeTree *parse_tree, ObPLStmtBlock *&stmt, ObPLFunctionAST &func,
                         bool stop_search_label = false, bool in_handler_scope = false);
-  int resolve_when(const ObStmtNodeTree *parse_tree, const ObRawExpr *case_expr, ObPLIfStmt *stmt, ObPLFunctionAST &func);
+  int resolve_when(const ObStmtNodeTree *parse_tree, ObRawExpr *case_expr_var, ObPLCaseStmt *stmt, ObPLFunctionAST &func);
   int resolve_then(const ObStmtNodeTree *parse_tree,
                    ObPLFunctionAST &func,
                    ObPLDataType *data_type,
@@ -684,7 +723,8 @@ private:
                      const ObPLBlockNS &ns,
                      int64_t &cursor,
                      ObPLCompileUnitAST &func,
-                     bool check_mode = false);
+                     bool check_mode = false,
+                     bool for_external_cursor = false);
   int resolve_questionmark_cursor(const int64_t symbol_idx, 
                                   ObPLBlockNS &ns, 
                                   int64_t &cursor);
@@ -776,7 +816,8 @@ private:
                                    ObIArray<ObObjAccessIdx> &access_idxs);
 
 private:
-  int check_duplicate_condition(const ObPLDeclareHandlerStmt &stmt, const ObPLConditionValue &value, bool &dup);
+  int check_duplicate_condition(const ObPLDeclareHandlerStmt &stmt, const ObPLConditionValue &value,
+                                bool &dup, ObPLDeclareHandlerStmt::DeclareHandler::HandlerDesc* cur_desc);
   int analyze_actual_condition_type(const ObPLConditionValue &value, ObPLConditionType &type);
   int check_subprogram_variable_read_only(ObPLBlockNS &ns, uint64_t subprogram_id, int64_t var_idx);
   int check_package_variable_read_only(uint64_t package_id, uint64_t var_idx);
@@ -793,12 +834,14 @@ private:
   int build_obj_access_func_name(const ObIArray<ObObjAccessIdx> &access_idxs,
                                  ObRawExprFactory &expr_factory,
                                  const sql::ObSQLSessionInfo *session_info,
+                                 ObSchemaGetterGuard *schema_guard,
                                  bool for_write,
                                  ObString &result);
   static
   int make_var_from_access(const ObIArray<ObObjAccessIdx> &access_idxs,
                            ObRawExprFactory &expr_factory,
                            const sql::ObSQLSessionInfo *session_info,
+                           ObSchemaGetterGuard *schema_guard,
                            const ObPLBlockNS &ns,
                            ObRawExpr *&expr,
                            bool for_write = false);
@@ -846,7 +889,7 @@ private:
                      common::ObIArray<sql::ObUDFInfo> &udf_info,
                      common::ObIArray<sql::ObOpRawExpr*> &op_exprs,
                      bool is_prepare_protocol/*= false*/);
-  int check_expr_result_type(const ObRawExpr *expr, ObPLIntegerType &pl_integer_type);
+  int check_expr_result_type(const ObRawExpr *expr, ObPLIntegerType &pl_integer_type, bool &is_anonymos_arg);
   bool is_need_add_checker(const ObPLIntegerType &type, const ObRawExpr *expr);
   int add_pl_integer_checker_expr(ObRawExprFactory &expr_factory,
                                   const ObPLIntegerType &type,
@@ -900,30 +943,19 @@ private:
                               ObParamExternType type,
                               uint64_t obj_id,
                               ObPLExternTypeInfo &extern_type_info);
-  int check_is_udt_routine(const ObObjAccessIdent &access_ident, // 当前正在resolve的ident
+  int check_is_udt_routine(const ObObjAccessIdent &access_ident,
                            const ObPLBlockNS &ns,
                            ObIArray<ObObjAccessIdx> &access_idxs,
-                           ObObjAccessIdx &access_id,
-                           ObString &udt_type_name,
-                           uint64_t &udt_id,
                            bool &is_routine);
   static int get_number_literal_value(ObRawExpr *expr, int64_t &result);
+  int get_const_number_variable_literal_value(ObRawExpr *expr, int64_t &result);
   int check_assign_type(const ObPLDataType &dest_data_type, const ObRawExpr *right_expr);
   int is_return_ref_cursor_type(const ObRawExpr *expr, bool &is_ref_cursor_type);
-  int make_udt_udf_self_expr(const ObIArray<ObString> &access_name,
-                             ObPLCompileUnitAST &func,
-                             ObRawExpr *&expr,
-                             bool need_add = true);
-  int resolve_mocked_map_order_udf(const uint64_t udt_id,
-                                   const ObString &self_name,
-                                   const ObString &other_name,
-                                   ObPLCompileUnitAST &unit_ast,
-                                   ObIArray<ObRawExpr *> &expr,
-                                   ObRawExpr *org_expr,
-                                   bool &is_order);
+  int replace_map_or_order_expr(uint64_t udt_id,
+                                ObRawExpr *&expr,
+                                ObPLCompileUnitAST &unit_ast);
   int replace_object_compare_expr(ObRawExpr *&relation_expr,
-                                  ObPLCompileUnitAST &unit_ast,
-                                  bool &is_order);
+                                  ObPLCompileUnitAST &unit_ast);
 
   static const ObRawExpr *skip_implict_cast(const ObRawExpr *e);
 
@@ -958,8 +990,88 @@ private:
                                    ObPLFunctionAST &func,
                                    int64_t &idx);
   int check_update_column(const ObPLBlockNS &ns, const ObIArray<ObObjAccessIdx>& access_idxs);
+  static int get_udt_names(ObSchemaGetterGuard &schema_guard,
+                           const uint64_t udt_id,
+                           ObString &database_name,
+                           ObString &udt_name);
   static int get_udt_database_name(ObSchemaGetterGuard &schema_guard,
                                    const uint64_t udt_id, ObString &db_name);
+  static bool check_with_rowid(const ObString &routine_name,
+                               bool is_for_trigger);
+  static int recursive_replace_expr(ObRawExpr *expr,
+                                    ObQualifiedName &qualified_name,
+                                    ObRawExpr *real_expr);
+
+  int replace_udf_param_expr(ObQualifiedName &q_name,
+                             ObIArray<ObQualifiedName> &columns,
+                             ObIArray<ObRawExpr*> &real_exprs);
+  int replace_udf_param_expr(ObObjAccessIdent &access_ident,
+                             ObIArray<ObQualifiedName> &columns,
+                             ObIArray<ObRawExpr*> &real_exprs);
+  int get_names_by_access_ident(ObObjAccessIdent &access_ident,
+                                ObIArray<ObObjAccessIdx> &access_idxs,
+                                ObString &database_name,
+                                ObString &package_name,
+                                ObString &routine_name);
+  int check_routine_callable(const ObPLBlockNS &ns,
+                             ObIArray<ObObjAccessIdx> &access_idxs,
+                             ObIArray<ObRawExpr*> &expr_params,
+                             const ObIRoutineInfo &routine_info);
+  int resolve_routine(ObObjAccessIdent &access_ident,
+                      const ObPLBlockNS &ns,
+                      ObIArray<ObObjAccessIdx> &access_idxs,
+                      ObPLCompileUnitAST &func);
+
+  int resolve_function(ObObjAccessIdent &access_ident,
+                       ObIArray<ObObjAccessIdx> &access_idxs,
+                       const ObIRoutineInfo *routine_info,
+                       ObPLCompileUnitAST &func);
+
+  int resolve_procedure(ObObjAccessIdent &access_ident,
+                        ObIArray<ObObjAccessIdx> &access_idxs,
+                        const ObIRoutineInfo *routine_info,
+                        ObProcType routine_type);
+
+  int resolve_construct(ObObjAccessIdent &access_ident,
+                        const ObPLBlockNS &ns,
+                        ObIArray<ObObjAccessIdx> &access_idxs,
+                        uint64_t user_type_id,
+                        ObPLCompileUnitAST &func);
+
+  int resolve_self_element_access(ObObjAccessIdent &access_ident,
+                                  const ObPLBlockNS &ns,
+                                  ObIArray<ObObjAccessIdx> &access_idxs,
+                                  ObPLCompileUnitAST &func);
+
+  int build_current_access_idx(uint64_t parent_id,
+                               ObObjAccessIdx &access_idx,
+                               ObObjAccessIdent &access_ident,
+                               const ObPLBlockNS &ns,
+                               ObIArray<ObObjAccessIdx> &access_idxs,
+                               ObPLCompileUnitAST &func);
+
+  int build_collection_index_expr(ObObjAccessIdent &access_ident,
+                                  ObObjAccessIdx &access_idx,
+                                  const ObPLBlockNS &ns,
+                                  ObIArray<ObObjAccessIdx> &access_idxs,
+                                  const ObUserDefinedType &user_type,
+                                  ObPLCompileUnitAST &func);
+
+  int build_access_idx_sys_func(uint64_t parent_id, ObObjAccessIdx &access_idx);
+
+  int resolve_composite_access(ObObjAccessIdent &access_ident,
+                               ObIArray<ObObjAccessIdx> &access_idxs,
+                               const ObPLBlockNS &ns,
+                               ObPLCompileUnitAST &func);
+
+  int init_udf_info_of_accessident(ObObjAccessIdent &access_ident);
+  int init_udf_info_of_accessidents(ObIArray<ObObjAccessIdent> &access_ident);
+
+  int resolve_sys_func_access(ObObjAccessIdent &access_ident,
+                              ObIArray<ObObjAccessIdx> &access_idxs,
+                              const ObSQLSessionInfo *session_info,
+                              const ObPLBlockNS &ns);
+
 private:
   ObPLResolveCtx resolve_ctx_;
   ObPLExternalNS external_ns_;

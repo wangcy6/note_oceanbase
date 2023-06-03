@@ -23,7 +23,7 @@ namespace oceanbase
 namespace blocksstable
 {
 ObSelfBufferWriter::ObSelfBufferWriter(
-    const int64_t size, const char *label, const bool need_align)
+    const char *label, const int64_t size, const bool need_align)
     : ObBufferWriter(NULL, 0, 0), label_(label), is_aligned_(need_align),
       macro_block_mem_ctx_()
 {
@@ -52,7 +52,7 @@ char *ObSelfBufferWriter::alloc(const int64_t size)
   if (size == macro_block_mem_ctx_.get_block_size()) {
     data = (char *)macro_block_mem_ctx_.alloc();
     if (OB_ISNULL(data)) {
-      STORAGE_LOG(WARN, "fail to alloc buf from mem ctx", K(size));
+      STORAGE_LOG_RET(WARN, OB_ALLOCATE_MEMORY_FAILED, "fail to alloc buf from mem ctx", K(size));
     }
   }
 #endif

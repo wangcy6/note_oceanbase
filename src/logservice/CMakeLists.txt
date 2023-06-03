@@ -15,6 +15,12 @@ ob_set_subtarget(ob_logservice archiveservice
   archiveservice/ob_ls_mgr.cpp
   archiveservice/ob_ls_task.cpp
   archiveservice/ob_start_archive_helper.cpp
+  archiveservice/dynamic_buffer.cpp
+  archiveservice/large_buffer_pool.cpp
+  archiveservice/ob_archive_scheduler.cpp
+  archiveservice/ob_archive_timer.cpp
+  archiveservice/ob_ls_meta_recorder.cpp
+  archiveservice/ob_ls_meta_record_task.cpp
 )
 
 ob_set_subtarget(ob_logservice cdcservice
@@ -25,6 +31,7 @@ ob_set_subtarget(ob_logservice cdcservice
   cdcservice/ob_cdc_service.cpp
   cdcservice/ob_cdc_service_monitor.cpp
   cdcservice/ob_cdc_start_lsn_locator.cpp
+  cdcservice/ob_cdc_struct.cpp
   cdcservice/ob_cdc_util.cpp
 )
 
@@ -40,12 +47,14 @@ ob_set_subtarget(ob_logservice common
   ob_reporter_adapter.cpp
   ob_switch_leader_adapter.cpp
   ob_server_log_block_mgr.cpp
+  ob_log_flashback_service.cpp
+  ob_net_keepalive_adapter.cpp
+  ob_log_monitor.cpp
 )
 
 ob_set_subtarget(ob_logservice common_mixed
   applyservice/ob_log_apply_service.cpp
   logrpc/ob_log_request_handler.cpp
-  logrpc/ob_log_rpc_processor.cpp
   logrpc/ob_log_rpc_req.cpp
   rcservice/ob_role_change_handler.cpp
   rcservice/ob_role_change_service.cpp
@@ -72,7 +81,6 @@ ob_set_subtarget(ob_logservice logrouteservice
   logrouteservice/ob_log_route_service.cpp
   logrouteservice/ob_log_route_struct.cpp
   logrouteservice/ob_log_systable_queryer.cpp
-  logrouteservice/ob_log_utility.cpp
   logrouteservice/ob_ls_log_stat_info.cpp
   logrouteservice/ob_ls_server_list.cpp
   logrouteservice/ob_server_blacklist.cpp
@@ -128,10 +136,14 @@ ob_set_subtarget(ob_logservice palf
   palf/palf_env_impl.cpp
   palf/palf_handle.cpp
   palf/palf_handle_impl.cpp
+  palf/log_cache.cpp
   palf/palf_handle_impl_guard.cpp
   palf/log_block_pool_interface.cpp
   palf/palf_options.cpp
   palf/log_mode_mgr.cpp
+  palf/log_updater.cpp
+  palf/log_io_utils.cpp
+  palf/log_io_worker_wrapper.cpp
 )
 
 ob_set_subtarget(ob_logservice palf_election
@@ -155,11 +167,61 @@ ob_set_subtarget(ob_logservice restoreservice
   restoreservice/ob_remote_fetch_log.cpp
   restoreservice/ob_remote_fetch_log_worker.cpp
   restoreservice/ob_remote_location_adaptor.cpp
-  restoreservice/ob_remote_log_iterator.cpp
   restoreservice/ob_remote_log_source.cpp
   restoreservice/ob_remote_log_source_allocator.cpp
   restoreservice/ob_log_archive_piece_mgr.cpp
   restoreservice/ob_remote_error_reporter.cpp
+  restoreservice/ob_log_restore_allocator.cpp
+  restoreservice/ob_remote_fetch_context.cpp
+  restoreservice/ob_log_restore_scheduler.cpp
+  restoreservice/ob_log_restore_controller.cpp
+  restoreservice/ob_log_restore_driver_base.cpp
+  restoreservice/ob_log_restore_net_driver.cpp
+  restoreservice/ob_log_restore_archive_driver.cpp
+  restoreservice/ob_restore_log_function.cpp
+)
+
+
+ob_set_subtarget(ob_logservice data_dictionary
+  data_dictionary/ob_data_dict_utils.cpp
+  data_dictionary/ob_data_dict_struct.cpp
+  data_dictionary/ob_data_dict_service.cpp
+  data_dictionary/ob_data_dict_sql_client.cpp
+  data_dictionary/ob_data_dict_storager.cpp
+  data_dictionary/ob_data_dict_iterator.cpp
+  data_dictionary/ob_data_dict_meta_info.cpp
+)
+
+ob_set_subtarget(ob_logservice logfetcher
+  logfetcher/ob_log_fetcher.cpp
+  logfetcher/ob_log_fetching_mode.cpp
+  logfetcher/ob_log_ls_fetch_ctx.cpp
+  logfetcher/ob_log_fetcher_ls_ctx_default_factory.cpp
+  logfetcher/ob_log_ls_fetch_mgr.cpp
+  logfetcher/ob_log_fetcher_idle_pool.cpp
+  logfetcher/ob_log_fetcher_dead_pool.cpp
+  logfetcher/ob_log_start_lsn_locator.cpp
+  logfetcher/ob_log_part_progress_controller.cpp
+  logfetcher/ob_log_fetch_stream_container.cpp
+  logfetcher/ob_log_fetch_stream_container_mgr.cpp
+  logfetcher/ob_ls_worker.cpp
+  logfetcher/ob_log_rpc.cpp
+  logfetcher/ob_log_fetch_log_rpc.cpp
+  logfetcher/ob_log_fetch_stream_type.cpp
+  logfetcher/ob_log_fetch_stream_pool.cpp
+  logfetcher/ob_log_fetcher_switch_info.cpp
+  logfetcher/ob_log_ls_fetch_stream.cpp
+  logfetcher/ob_log_fetch_stat_info.cpp
+  logfetcher/ob_log_trace_id.cpp
+  logfetcher/ob_log_utils.cpp
+  logfetcher/ob_log_progress_info.cpp
+  logfetcher/ob_log_timer.cpp
+  logfetcher/ob_log_config.cpp
+)
+
+ob_set_subtarget(ob_logservice common_util
+  common_util/ob_log_time_utils.cpp
+  common_util/ob_log_ls_define.cpp
 )
 
 ob_server_add_target(ob_logservice)

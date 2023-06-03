@@ -22,6 +22,7 @@
 #include "lib/guard/ob_shared_guard.h"
 #include "lib/utility/utility.h"
 #include "lib/utility/ob_print_utils.h"
+#include "lib/container/ob_array_serialization.h"
 #include "share/ob_occam_time_guard.h"
 
 #define DETECT_TIME_GUARD(threshold) TIMEGUARD_INIT(DETECT, threshold, 10_s)
@@ -32,6 +33,11 @@ namespace share
 {
 namespace detector
 {
+// if msg in map count below LCL_MSG_CACHE_LIMIT/2, all pending msg is accepted
+// if msg in map count greater than LCL_MSG_CACHE_LIMIT/2, but less than LCL_MSG_CACHE_LIMIT,
+// random drop appending msg, drop probability depends on how many msg keeping in map,
+// if msg count in map reach LCL_MSG_CACHE_LIMIT, drop probability is 100%, no more msg is accepted.
+constexpr int64_t LCL_MSG_CACHE_LIMIT = 4096;
 
 class ObLCLMessage;
 class ObDependencyResource;
@@ -61,6 +67,7 @@ public:
   // build a directed dependency relationship to other
   virtual int block(const ObDependencyResource &) = 0;
   virtual int block(const BlockCallBack &) = 0;
+  virtual int get_block_list(common::ObIArray<ObDependencyResource> &cur_list) const = 0;
   // releace block list
   virtual int replace_block_list(const common::ObIArray<ObDependencyResource> &) = 0;
   // remove a directed dependency relationship to other
@@ -233,6 +240,7 @@ public:
   const UserBinaryKey &get_user_key() const;
   bool is_valid() const;
   uint64_t hash() const;
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   TO_STRING_KV(K_(addr), K_(user_key));
 private:
   common::ObAddr addr_;

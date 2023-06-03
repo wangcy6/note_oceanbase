@@ -93,12 +93,11 @@ int ObPDMLOpDataDriver::destroy()
   return ret;
 }
 
-int ObPDMLOpDataDriver::set_with_barrier(uint64_t op_id,
-                                         const ObPxMultiPartModifyOpInput *modify_input)
+int ObPDMLOpDataDriver::set_dh_barrier_param(uint64_t op_id,
+                                             const ObPxMultiPartModifyOpInput *modify_input)
 {
     int ret = OB_SUCCESS;
     op_id_ = op_id;
-    with_barrier_ = true;
     if (OB_ISNULL(modify_input)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("table modify is null", K(ret));
@@ -319,14 +318,16 @@ int ObPDMLOpDataDriver::barrier(ObExecContext &ctx)
   } else {
     ObPxSQCProxy &proxy = handler->get_sqc_proxy();
     ObBarrierPieceMsg piece;
-    piece.dfo_id_ = dfo_id_;
+    piece.source_dfo_id_ = dfo_id_;
+    piece.target_dfo_id_ = dfo_id_;
     piece.op_id_ = op_id_;
     piece.thread_id_ = GETTID();
     const ObBarrierWholeMsg *whole = nullptr;
-    if (OB_FAIL(proxy.get_dh_msg(op_id_,
-                                 piece,
-                                 whole,
-                                 ctx.get_physical_plan_ctx()->get_timeout_timestamp()))) {
+    if (OB_FAIL(proxy.get_dh_msg_sync(op_id_,
+                                      dtl::DH_BARRIER_WHOLE_MSG,
+                                      piece,
+                                      whole,
+                                      ctx.get_physical_plan_ctx()->get_timeout_timestamp()))) {
       LOG_WARN("fail get barrier msg", K(ret));
     }
   }

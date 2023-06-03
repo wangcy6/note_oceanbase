@@ -111,7 +111,7 @@ int ObPLDataType::get_table_type_by_name(uint64_t tenant_id,
     OX (pl_type.set_user_type_id(PL_RECORD_TYPE, table_info->get_table_id()));
     OX (pl_type.set_type_from(PL_TYPE_ATTR_ROWTYPE));
   } else {
-    ObPLPackageGuard dummy_guard(PACKAGE_TYPE_HANDLE);
+    ObPLPackageGuard dummy_guard(session_info.get_effective_tenant_id());
     ObMySQLProxy dummy_proxy;
     ObPLResolveCtx ctx(allocator, session_info, schema_guard, dummy_guard, dummy_proxy, false);
     ObRecordType *record_type = NULL;
@@ -573,10 +573,14 @@ int ObPLDataType::free_session_var(const ObPLResolveCtx &resolve_ctx, ObIAllocat
       obj.set_null();
     }
   } else if (is_cursor_type()) {
-    ObPLCursorInfo *cursor = reinterpret_cast<ObPLCursorInfo *>(obj.get_ext());
-    if (OB_NOT_NULL(cursor)) {
-      cursor->~ObPLCursorInfo();
-      cursor = NULL;
+    if (is_cursor_var()) {
+      ObPLCursorInfo *cursor = reinterpret_cast<ObPLCursorInfo *>(obj.get_ext());
+      if (OB_NOT_NULL(cursor)) {
+        cursor->~ObPLCursorInfo();
+        cursor = NULL;
+      }
+    } else {
+      // do nothing .. package ref cursor only use for cursor parameters, it will close by geneteror.
     }
   } else {
     ObPL *pl_engine = NULL;
@@ -1778,14 +1782,14 @@ int ObPLCursorInfo::close(sql::ObSQLSessionInfo &session, bool is_reuse)
     if (is_streaming()) {
       ObSPIResultSet *spi_result = get_cursor_handler();
       if (OB_NOT_NULL(spi_result)) {
-        if (OB_NOT_NULL(spi_result->get_mysql_result().get_result())) {
+        if (OB_NOT_NULL(spi_result->get_result_set())) {
           OZ (spi_result->set_cursor_env(session));
-          int close_ret = spi_result->get_mysql_result().close();
+          int close_ret = spi_result->close_result_set();
           if (OB_SUCCESS != close_ret) {
             LOG_WARN("close mysql result set failed", K(ret), K(close_ret));
           }
           ret = (OB_SUCCESS == ret ? close_ret : ret);
-          spi_result->get_mysql_result().reset();
+          //spi_result->get_mysql_result().reset();
           int reset_ret = spi_result->reset_cursor_env(session);
           ret = (OB_SUCCESS == ret ? reset_ret : ret);
         }
@@ -1978,24 +1982,26 @@ int ObPLCursorInfo::prepare_entity(ObSQLSessionInfo &session,
   return ret;
 }
 
-int ObPLCursorInfo::prepare_spi_result(ObSPIResultSet *&spi_result)
+int ObPLCursorInfo::prepare_spi_result(ObPLExecCtx *ctx, ObSPIResultSet *&spi_result)
 {
   int ret = OB_SUCCESS;
+  CK (OB_NOT_NULL(ctx));
+  CK (OB_NOT_NULL(ctx->exec_ctx_));
+  CK (OB_NOT_NULL(ctx->exec_ctx_->get_my_session()));
   if (OB_ISNULL(spi_cursor_)) {
-    OV (OB_NOT_NULL(entity_));
-    if (OB_SUCC(ret)) {
-      ObIAllocator &alloc = entity_->get_arena_allocator();
-      OX (spi_cursor_ = alloc.alloc(sizeof(ObSPIResultSet)));
-      OV (OB_NOT_NULL(spi_cursor_), OB_ALLOCATE_MEMORY_FAILED);
-    }
+    OV (OB_NOT_NULL(get_allocator()));
+    OX (spi_cursor_ = get_allocator()->alloc(sizeof(ObSPIResultSet)));
+    OV (OB_NOT_NULL(spi_cursor_), OB_ALLOCATE_MEMORY_FAILED);
   }
   OX (spi_result = new (spi_cursor_) ObSPIResultSet());
+  OZ (spi_result->init(*ctx->exec_ctx_->get_my_session()));
   return ret;
 }
 
 int ObPLCursorInfo::prepare_spi_cursor(ObSPICursor *&spi_cursor,
                                         uint64_t tenant_id,
-                                        uint64_t mem_limit)
+                                        uint64_t mem_limit,
+                                        bool is_local_for_update)
 {
   int ret = OB_SUCCESS;
   ObIAllocator *spi_allocator = get_allocator();
@@ -2003,7 +2009,10 @@ int ObPLCursorInfo::prepare_spi_cursor(ObSPICursor *&spi_cursor,
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("cursor allocator is null.", K(ret), K(spi_allocator), K(id_));
   } else if (OB_ISNULL(spi_cursor_)) {
-    OX (spi_cursor_ = spi_allocator->alloc(sizeof(ObSPICursor)));
+    int64_t alloc_size = is_local_for_update
+      ? (sizeof(ObSPICursor) > sizeof(ObSPIResultSet) ? sizeof(ObSPICursor) : sizeof(ObSPIResultSet))
+      : sizeof(ObSPICursor);
+    OX (spi_cursor_ = spi_allocator->alloc(alloc_size));
     OV (OB_NOT_NULL(spi_cursor_), OB_ALLOCATE_MEMORY_FAILED);
   }
   OX (spi_cursor = new (spi_cursor_) ObSPICursor(*spi_allocator));

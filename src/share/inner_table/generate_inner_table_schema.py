@@ -91,6 +91,7 @@ all_ora_mapping_virtual_tables = []
 real_table_virtual_table_names = []
 cluster_private_tables = []
 all_only_sys_table_name = {}
+mysql_compat_agent_tables = {}
 column_collation = 'CS_TYPE_INVALID'
 # virtual tables only accessible by sys tenant or sys views.
 restrict_access_virtual_tables = []
@@ -163,7 +164,7 @@ def print_default_column(column_name, rowkey_id, index_id, part_key_pos, column_
     else:
       set_op = 'set_timestamp({0})'.format(default_value)
   elif column_type == 'ObLongTextType':
-    set_op = 'set_lob_value(ObLongTextType, "{0}", strlen("{0}"))'.format(default_value)
+    set_op = 'set_lob_value(ObLongTextType, "{0}", static_cast<int32_t>(strlen("{0}")))'.format(default_value)
     if column_collation_type == "CS_TYPE_BINARY":
       set_op += '; {0}_default.set_collation_type(CS_TYPE_BINARY);'.format(column_name.lower())
   else:
@@ -736,12 +737,12 @@ def find_column_def(keywords, column_name, is_shadow_pk_column):
         i += 1
   else:
     for col in keywords['rowkey_columns']:
-      if col[0] == column_name:
+      if col[0].upper() == column_name.upper():
         return (i, col)
       else:
         i += 1
     for col in keywords['normal_columns']:
-      if col[0] == column_name:
+      if col[0].upper() == column_name.upper():
         return (i, col)
       else:
         i += 1
@@ -781,7 +782,7 @@ def add_index_columns(columns, **keywords):
     # rowkey columns of main table are normal in the unique index table.
     # i.e., rowkey_position = 0, index_position = 0.
     for col in keywords['rowkey_columns']:
-      if col[0] not in columns:
+      if col[0].upper() not in [x.upper() for x in columns]:
         (idx, column_def) = find_column_def(keywords, col[0], False)
         add_column(column_def, 0, 0, 0, idx)
         max_used_column_idx = max(max_used_column_idx, idx)
@@ -791,7 +792,7 @@ def add_index_columns(columns, **keywords):
       max_used_column_idx = max(max_used_column_idx, column_idx)
       rowkey_id += 1
     for col in keywords['rowkey_columns']:
-      if col[0] not in columns:
+      if col[0].upper() not in [x.upper() for x in columns]:
         column_idx = add_index_column(keywords, rowkey_id, 0, col[0])
         max_used_column_idx = max(max_used_column_idx, column_idx)
         rowkey_id += 1
@@ -828,15 +829,13 @@ def add_normal_columns(columns, *args):
       add_column(column, rowkey_id, index_id, 0)
 
 def add_storing_column(keywords, column_name):
-  idx = len(keywords['index_columns']) + len(keywords['rowkey_columns'])
-  for col in keywords['normal_columns']:
-    if col[0] == column_name:
-      add_column(col, 0, 0, 0, idx,is_hidden='false' ,is_storing_column='true')
-    else:
-      idx+=1
-def add_storing_columns(columns, **keywords):
+  (idx, column_def) = find_column_def(keywords, column_name, False)
+  add_column(column_def, 0, 0, 0, idx, is_hidden='false' ,is_storing_column='true')
+  return idx
+def add_storing_columns(columns, max_used_column_idx, **keywords):
   for column_name in columns:
-    add_storing_column(keywords, column_name)
+    max_used_column_idx = max(max_used_column_idx, add_storing_column(keywords, column_name))
+  return max_used_column_idx
 
 def add_field(kw, value):
   global cpp_f
@@ -944,7 +943,7 @@ def fill_default_values(default_filed_values, keywords, missing_fields, index_va
         if index_value[0] != '':
           keywords[key] = default_filed_values[key]
       elif key == 'data_table_id':
-        tid = table_name2tid(keywords['table_name'])
+        tid = table_name2tid(keywords['table_name'] + (keywords.has_key('name_postfix') and keywords['name_postfix'] or ''))
         add_field(field, tid)
       else:
         keywords[key] = default_filed_values[key]
@@ -1042,7 +1041,8 @@ def replace_agent_table_columns_def(columns):
     elif t == "longtext":
       pass
     elif t.startswith("varchar:") or t.startswith("varbinary:"):
-      pass
+      if len(column) >= 4 and "false" == column[2] and "" == column[3]:
+        column[2] = "true"
     elif t.startswith("number:"):
       pass
     else:
@@ -1090,7 +1090,37 @@ def gen_sys_agent_virtual_table_def(table_id, keywords):
   new_keywords = __gen_oracle_vt_base_on_mysql(table_id, keywords, "_SYS_AGENT")
   new_keywords["partition_expr"] = []
   new_keywords["partition_columns"] = []
+  new_keywords["vtable_route_policy"] = "local"
   all_only_sys_table_name[keywords["table_name"]] = True
+  all_agent_virtual_tables.append(new_keywords)
+  return new_keywords
+
+def __gen_mysql_vt(table_id, keywords, table_name_suffix):
+  if keywords.has_key('in_tenant_space') and keywords['in_tenant_space']:
+    raise Exception("base table should not in_tenant_space")
+  elif 'SYSTEM_TABLE' != keywords['table_type'] and 'VIRTUAL_TABLE' != keywords['table_type']:
+    raise Exception("unsupported table type", keywords['table_type'])
+  new_keywords = copy.deepcopy(keywords)
+  new_keywords["table_type"] = 'VIRTUAL_TABLE'
+  new_keywords["in_tenant_space"] = True
+  new_keywords["table_id"] = table_id
+  new_keywords["database_id"] = "OB_SYS_DATABASE_ID"
+  name = keywords["table_name"]
+  if name.startswith("__all_"):
+    new_keywords["table_name"] = name.replace("__all_", "__all_virtual_") + table_name_suffix
+  if is_sys_table(keywords['table_id']):
+    new_keywords['index_using_type'] = 'USING_BTREE'
+
+  new_keywords["base_def_keywords"] = keywords
+  return new_keywords
+
+def gen_mysql_sys_agent_virtual_table_def(table_id, keywords):
+  global all_agent_virtual_tables
+  new_keywords = __gen_mysql_vt(table_id, keywords, "_mysql_sys_agent")
+  new_keywords["partition_expr"] = []
+  new_keywords["partition_columns"] = []
+  new_keywords["vtable_route_policy"] = "local"
+  mysql_compat_agent_tables[keywords["table_name"]] = True
   all_agent_virtual_tables.append(new_keywords)
   return new_keywords
 
@@ -1247,7 +1277,11 @@ def generate_virtual_agent_misc_data(f):
     base_kw = kw['base_def_keywords']
     base_tid = table_name2tid(base_kw['table_name'])
     in_tenant_space = base_kw.has_key('in_tenant_space') and base_kw['in_tenant_space']
-    only_sys = all_only_sys_table_name.has_key(base_kw['table_name']) and all_only_sys_table_name[base_kw['table_name']]
+    only_sys = all_only_sys_table_name.has_key(base_kw['table_name']) and all_only_sys_table_name[base_kw['table_name']] and "OB_SYS_DATABASE_ID" != kw['database_id']
+    mysql_compat_agent_table_name = base_kw['table_name']
+    mysql_compat_agent = (mysql_compat_agent_tables.has_key(mysql_compat_agent_table_name)
+                          and mysql_compat_agent_tables[mysql_compat_agent_table_name]
+                          and "OB_SYS_DATABASE_ID" == kw['database_id'])
     iter_init += """
     case %s: {
       ObAgentVirtualTable *agent_iter = NULL;
@@ -1256,7 +1290,7 @@ def generate_virtual_agent_misc_data(f):
       const bool only_sys_data = %s;
       if (OB_FAIL(NEW_VIRTUAL_TABLE(ObAgentVirtualTable, agent_iter))) {
         SERVER_LOG(WARN, "create virtual table iterator failed", K(ret));
-      } else if (OB_FAIL(agent_iter->init(base_tid, sys_tenant_base_table, index_schema, params, only_sys_data))) {
+      } else if (OB_FAIL(agent_iter->init(base_tid, sys_tenant_base_table, index_schema, params, only_sys_data%s))) {
         SERVER_LOG(WARN, "virtual table iter init failed", K(ret));
         agent_iter->~ObAgentVirtualTable();
         allocator.free(agent_iter);
@@ -1265,7 +1299,8 @@ def generate_virtual_agent_misc_data(f):
        vt_iter = agent_iter;
       }
       break;
-    }\n""" % (tid, base_tid, in_tenant_space and 'false' or 'true', only_sys and 'true' or 'false')
+    }\n""" % (tid, base_tid, in_tenant_space and 'false' or 'true', only_sys and 'true' or 'false',
+              ', Worker::CompatMode::MYSQL' if mysql_compat_agent else '')
 
   iter_init += '  END_CREATE_VT_ITER_SWITCH_LAMBDA\n'
   f.write('\n\n#ifdef AGENT_VIRTUAL_TABLE_CREATE_ITER\n' + iter_init + '\n#endif // AGENT_VIRTUAL_TABLE_CREATE_ITER\n\n')
@@ -1302,6 +1337,64 @@ def def_sys_index_table(index_name, index_table_id, index_columns, index_using_t
   kw['partition_expr'] = []
   kw['storing_columns'] =[]
   sys_index_tables.append(kw)
+  def_table_schema(**kw)
+  index_def = cpp_f.getvalue()
+  cpp_f = cpp_f_tmp
+  cpp_f.write(index_def)
+
+def def_agent_index_table(index_name, index_table_id, index_columns, index_using_type, index_type,
+  real_table_name, real_index_name, keywords):
+  global cpp_f
+  global cpp_f_tmp
+  global StringIO
+  global sys_index_tables
+  kw = copy.deepcopy(keywords)
+  index_kw = copy.deepcopy(all_def_keywords[real_table_name + '_' + real_index_name])
+  if kw.has_key('index'):
+    raise Exception("should not have index", kw['table_name'])
+  if not kw['real_vt']:
+    raise Exception("only support oracle mapping table", kw['table_name'])
+  if not index_name.endswith('_real_agent'):
+    raise Exception("wrong index name", index_name)
+  if not index_name.startswith(real_index_name):
+    raise Exception("wrong index name", index_name, real_index_name)
+  if not is_ora_virtual_table(index_table_id):
+    raise Exception("index table id is invalid", index_table_id)
+  if not kw['base_def_keywords']['table_name'] == real_table_name:
+    raise Exception("table name mismatch", kw['base_def_keywords']['table_name'], real_table_name)
+  if not index_kw['index_name'] == real_index_name:
+    raise Exception("index name mismatch", index_kw['index_name'], real_index_name)
+  if not index_kw['index_columns'] == index_columns:
+    raise Exception("index column mismatch", index_kw['index_columns'], index_columns)
+
+
+  index_def = ''
+  cpp_f_tmp = cpp_f
+  cpp_f = StringIO.StringIO()
+  kw['index_name'] = index_name
+  kw['index_columns'] = index_columns
+  kw['index_table_id'] = index_table_id
+  kw['index_using_type'] = index_using_type
+  kw['index_type'] = index_type
+  kw['table_type'] = 'USER_INDEX'
+  kw['index_status'] = 'INDEX_STATUS_AVAILABLE'
+  kw['name_postfix'] = '_ORA'
+  dtid = table_name2tid(kw['table_name'] + kw['name_postfix'])
+  kw['data_table_id'] = dtid
+  kw['partition_columns'] = []
+  kw['partition_expr'] = []
+  kw['storing_columns'] =[]
+  kw["mapping_tid"] = table_name2tid(real_table_name + '_' + real_index_name)
+  kw["self_tid"] = table_name2index_tid(kw['table_name'] + kw['name_postfix'], kw['index_name'])
+  kw["real_vt"] = True
+  real_table_virtual_table_names.append(kw)
+
+  #In order to upgrade compatibility,
+  #the oracle inner table index cannot be added to the schema of the main table following the path of the main table.
+  #Only the schema refresh triggered by the creation of the index table can add simple index info,
+  #so the agent table index is not added to the sys index here
+
+  #sys_index_tables.append(kw)
   def_table_schema(**kw)
   index_def = cpp_f.getvalue()
   cpp_f = cpp_f_tmp
@@ -1583,6 +1676,11 @@ def def_table_schema(**keywords):
       all_def_keywords[keywords['table_name'] + keywords['name_postfix']] = copy.deepcopy(keywords)
     else:
       all_def_keywords[keywords['table_name']] = copy.deepcopy(keywords)
+  else:
+    if 'name_postfix' in keywords:
+      all_def_keywords[keywords['table_name'] + keywords['name_postfix'] + '_' + keywords['index_name']] = copy.deepcopy(keywords)
+    else:
+      all_def_keywords[keywords['table_name'] + '_' + keywords['index_name']] = copy.deepcopy(keywords)
 
   index_defs = []
   index_def = ''
@@ -1615,8 +1713,11 @@ def def_table_schema(**keywords):
   if keywords.has_key('index_name'):
     print_method_start(keywords['table_name'] + keywords['name_postfix'] + '_' + keywords['index_name'])
     if True == is_ora_virtual_table(int(keywords['table_id'])):
-      index_name_ids.append([keywords['index_name'], int(ora_virtual_index_table_id), keywords['table_name'] + keywords['name_postfix'], keywords['tenant_id'], keywords['table_id']])
-      ora_virtual_index_table_id -= 1
+      if keywords.has_key('real_vt') and True == keywords['real_vt']:
+        index_name_ids.append([keywords['index_name'], int(keywords['index_table_id']), keywords['table_name'] + keywords['name_postfix'], keywords['tenant_id'], keywords['table_id']])
+      else:
+        index_name_ids.append([keywords['index_name'], int(ora_virtual_index_table_id), keywords['table_name'] + keywords['name_postfix'], keywords['tenant_id'], keywords['table_id']])
+        ora_virtual_index_table_id -= 1
     elif True == is_mysql_virtual_table(int(keywords['table_id'])):
       index_name_ids.append([keywords['index_name'], int(ob_virtual_index_table_id), keywords['table_name'] + keywords['name_postfix'], keywords['tenant_id'], keywords['table_id']])
       ob_virtual_index_table_id -= 1
@@ -1740,7 +1841,7 @@ def def_table_schema(**keywords):
       add_field(field, database_id)
     elif field == 'table_name':
       if keywords.has_key('index_name') :
-        add_char_field(field, table_name2index_tname(keywords['table_name'], keywords['index_name']))
+        add_char_field(field, table_name2index_tname(keywords['table_name'] + keywords['name_postfix'], keywords['index_name']))
       else:
         if keywords["name_postfix"] != '_ORA':
           add_char_field(field, table_name2tname(keywords['table_name']))
@@ -1803,7 +1904,7 @@ def def_table_schema(**keywords):
       max_used_column_idx = add_index_columns(value, **keywords)
     elif field == 'storing_columns':
       # only virtual table index generation will enter here
-      add_storing_columns(value,**keywords)
+      max_used_column_idx = add_storing_columns(value, max_used_column_idx, **keywords)
     elif field in ('index_name', 'name_postfix',
                    'is_cluster_private', 'is_real_virtual_table',
                    'owner', 'vtable_route_policy'):
@@ -1873,6 +1974,7 @@ def start_generate_cpp(cpp_file_name):
 #include "share/schema/ob_schema_macro_define.h"
 #include "share/schema/ob_schema_service_sql_impl.h"
 #include "share/schema/ob_table_schema.h"
+#include "share/scn.h"
 
 namespace oceanbase
 {
@@ -1989,12 +2091,14 @@ def generate_h_content():
   sys_view_count = 0
 
   print_class_head_h()
+  new_table_name_postfix_ids = sorted(table_name_postfix_ids, key = lambda table : table[1])
+  new_index_name_ids = sorted(index_name_ids, key = lambda index : index[1])
 
   h_f.write("\npublic:\n")
   method_line = "  static int {0}_schema(share::schema::ObTableSchema &table_schema);\n"
-  for (table_name, table_id) in table_name_postfix_ids:
+  for (table_name, table_id) in new_table_name_postfix_ids:
     h_f.write(method_line.format(table_name.replace('$', '_').lower().strip('_'), table_id))
-  for line in index_name_ids:
+  for line in new_index_name_ids:
     h_f.write(method_line.format(line[2].replace('$', '_').strip('_').lower()+'_'+line[0].lower(), line[1]))
   line = """
 private:
@@ -2016,32 +2120,40 @@ private:
   h_f.write("  NULL,};\n\n")
 
   h_f.write("const schema_create_func core_table_schema_creators [] = {\n")
-  for (table_name, table_id) in table_name_postfix_ids:
+  for (table_name, table_id) in new_table_name_postfix_ids:
     if is_core_table(table_id) and table_id != kv_core_table_id:
       h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
       core_table_count = core_table_count + 1
   h_f.write("  NULL,};\n\n")
 
   h_f.write("const schema_create_func sys_table_schema_creators [] = {\n")
-  for (table_name, table_id) in table_name_postfix_ids:
+  for (table_name, table_id) in new_table_name_postfix_ids:
     if is_sys_table(table_id) and not is_core_table(table_id):
       h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
       sys_table_count = sys_table_count + 1
   h_f.write("  NULL,};\n\n")
 
   h_f.write("const schema_create_func virtual_table_schema_creators [] = {\n")
-  for (table_name, table_id) in table_name_postfix_ids:
-    if is_virtual_table(table_id):
+  for (table_name, table_id) in new_table_name_postfix_ids:
+    if is_mysql_virtual_table(table_id):
       h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
       virtual_table_count = virtual_table_count + 1
-  for index_l in index_name_ids:
-    if is_virtual_table(index_l[1]):
+  for index_l in new_index_name_ids:
+    if is_mysql_virtual_table(index_l[1]):
+      h_f.write(method_name.format(index_l[2].replace('$', '_').strip('_').lower()+'_'+index_l[0].lower(), index_l[2]))
+      virtual_table_count = virtual_table_count + 1
+  for (table_name, table_id) in new_table_name_postfix_ids:
+    if is_ora_virtual_table(table_id):
+      h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
+      virtual_table_count = virtual_table_count + 1
+  for index_l in new_index_name_ids:
+    if is_ora_virtual_table(index_l[1]):
       h_f.write(method_name.format(index_l[2].replace('$', '_').strip('_').lower()+'_'+index_l[0].lower(), index_l[2]))
       virtual_table_count = virtual_table_count + 1
   h_f.write("  NULL,};\n\n")
 
   h_f.write("const schema_create_func sys_view_schema_creators [] = {\n")
-  for (table_name, table_id) in table_name_postfix_ids:
+  for (table_name, table_id) in new_table_name_postfix_ids:
     if is_sys_view(table_id):
       h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
       sys_view_count = sys_view_count + 1

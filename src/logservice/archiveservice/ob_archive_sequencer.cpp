@@ -12,6 +12,7 @@
 
 #include "ob_archive_sequencer.h"
 #include "lib/ob_define.h"
+#include "lib/ob_errno.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "ob_ls_mgr.h"                    // ObArchiveLSMgr
 #include "logservice/ob_log_service.h"    // ObLogService
@@ -134,7 +135,7 @@ void ObArchiveSequencer::run1()
   ObCurTraceId::init(GCONF.self_addr_);
 
   if (OB_UNLIKELY(! inited_)) {
-    ARCHIVE_LOG(ERROR, "ObArchiveSequencer not init");
+    ARCHIVE_LOG_RET(ERROR, OB_NOT_INIT, "ObArchiveSequencer not init");
   } else {
     while (! has_set_stop()) {
       int64_t begin_tstamp = ObTimeUtility::current_time();
@@ -191,11 +192,22 @@ bool GenFetchTaskFunctor::operator()(const ObLSID &id, ObLSArchiveTask *ls_archi
   LSN fetch_lsn;
   SCN fetch_scn;
 
+  LogFileTuple archive_tuple;
+  int64_t unused_file_id = 0;
+  int64_t unused_file_offset = 0;
   if (OB_ISNULL(ls_archive_task)) {
     ret = OB_ERR_UNEXPECTED;
     ARCHIVE_LOG(ERROR, "ls_archive_task is NULL", K(ret), K(id), K(ls_archive_task));
   } else if (OB_FAIL(ls_archive_task->get_sequencer_progress(key_, station, seq_lsn))) {
     ARCHIVE_LOG(WARN, "get sequence progress failed", K(ret), K(id), KPC(ls_archive_task));
+  } else if (OB_FAIL(ls_archive_task->get_archive_progress(station, unused_file_id, unused_file_offset, archive_tuple))) {
+    ARCHIVE_LOG(WARN, "get archive progress failed", K(ret), K(id), KPC(ls_archive_task));
+  } else if (OB_UNLIKELY(seq_lsn < archive_tuple.get_lsn())) {
+    ret = OB_ERR_UNEXPECTED;
+    ARCHIVE_LOG(ERROR, "seq_lsn smaller than archive progress lsn", K(id), K(seq_lsn), K(archive_tuple));
+  } else if (seq_lsn - archive_tuple.get_lsn() >= MAX_LS_ARCHIVE_MEMORY_LIMIT) {
+    // just skip
+    ARCHIVE_LOG(TRACE, "cache sequenced log size reach limit, just wait", K(id), K(seq_lsn), K(archive_tuple));
   } else if (OB_FAIL(get_commit_index_(id, commit_lsn))) {
     ARCHIVE_LOG(WARN, "get commit index failed", K(ret), K(id));
   } else if (OB_FAIL(ls_archive_task->get_fetcher_progress(station, fetch_lsn, fetch_scn))) {

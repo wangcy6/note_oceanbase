@@ -82,7 +82,8 @@ public:
   static constexpr float HIGH_LEVEL_EVICT_PERCENTAGE = 0.9; // 90%
   static constexpr float LOW_LEVEL_EVICT_PERCENTAGE = 0.8; // 80%
   //每进行一次release_old操作删除的sql_audit百分比
-  static constexpr float BATCH_RELEASE_PERCENTAGE = 0.005; //0.005
+  static const int64_t BATCH_RELEASE_SIZE = 50000; //5w
+  static const int64_t MINI_MODE_BATCH_RELEASE_SIZE = 5000; //5k
   //启动淘汰检查的时间间隔
   static const int64_t EVICT_INTERVAL = 1000000; //1s
   typedef common::ObRaQueue::Ref Ref;
@@ -92,17 +93,23 @@ public:
 
 public:
   int init(uint64_t tenant_id, const int64_t max_mem_size, const int64_t queue_size);
+  int start();
+  void wait();
+  void stop();
   void destroy();
 
 public:
 
+  static int mtl_new(ObMySQLRequestManager* &req_mgr);
   static int mtl_init(ObMySQLRequestManager* &req_mgr);
   static void mtl_destroy(ObMySQLRequestManager* &req_mgr);
 
   common::ObConcurrentFIFOAllocator *get_allocator() { return &allocator_; }
   int64_t get_request_id() { ATOMIC_INC(&request_id_); return request_id_; }
 
-  int record_request(const ObAuditRecordData &audit_record, bool is_sensitive = false);
+  int record_request(const ObAuditRecordData &audit_record,
+                     const bool enable_query_response_time_stats,
+                     bool is_sensitive = false);
 
   int64_t get_start_idx() const { return (int64_t)queue_.get_pop_idx(); }
   int64_t get_end_idx() const { return (int64_t)queue_.get_push_idx(); }
@@ -176,6 +183,7 @@ private:
   // tenant id of this request manager
   uint64_t tenant_id_;
   int tg_id_;
+  volatile bool stop_flag_;
 };
 
 } // end of namespace obmysql

@@ -145,8 +145,11 @@ public:
   virtual int report_result();
   virtual lib::Worker::CompatMode get_compat_mode() const override
   { return compat_mode_; }
+  virtual uint64_t get_consumer_group_id() const override
+  { return consumer_group_id_; }
   ObStorageHADagType get_sub_type() const { return sub_type_; }
   ObIHADagNetCtx *get_ha_dag_net_ctx() const { return ha_dag_net_ctx_; }
+  virtual bool is_ha_dag() const override { return true; }
 
   INHERIT_TO_STRING_KV("ObIDag", ObIDag, KPC_(ha_dag_net_ctx), K_(sub_type), K_(result_mgr));
 protected:
@@ -162,7 +165,8 @@ class ObStorageHADagUtils
 public:
   static int deal_with_fo(
       const int err,
-      share::ObIDag *dag);
+      share::ObIDag *dag,
+      const bool allow_retry = true);
   static int get_ls(
       const share::ObLSID &ls_id,
       ObLSHandle &ls_handle);

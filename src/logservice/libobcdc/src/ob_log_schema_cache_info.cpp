@@ -18,6 +18,9 @@
 #include "ob_obj2str_helper.h"                    // ObObj2strHelper
 #include "ob_log_utils.h"                         // filter_non_user_column
 #include "ob_log_config.h"                        // TCONF
+#include "ob_log_meta_data_refresh_mode.h"        // RefreshMode
+#include "ob_cdc_udt.h"                           // ObCDCUdtSchemaInfo
+#include "src/logservice/data_dictionary/ob_data_dict_struct.h" // ObDictTableMeta/ObDictColumnMeta
 
 #define SCHEMA_STAT_INFO(fmt, args...) LOG_INFO("[SCHEMA_CACHE_STAT] " fmt, args)
 #define SCHEMA_STAT_DEBUG(fmt, args...) LOG_DEBUG("[SCHEMA_CACHE_STAT] " fmt, args)
@@ -40,7 +43,9 @@ ColumnSchemaInfo::ColumnSchemaInfo()
       orig_default_value_str_(NULL),
       extended_type_info_size_(0),
       extended_type_info_(NULL),
-      is_rowkey_(false)
+      is_rowkey_(false),
+      udt_set_id_(0),
+      sub_type_(0)
 {
   // default column is delete
 }
@@ -50,10 +55,11 @@ ColumnSchemaInfo::~ColumnSchemaInfo()
   destroy();
 }
 
+template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
 int ColumnSchemaInfo::init(
     const uint64_t column_id,
-    const share::schema::ObTableSchema &table_schema,
-    const share::schema::ObColumnSchemaV2 &column_table_schema,
+    const TABLE_SCHEMA &table_schema,
+    const COLUMN_SCHEMA &column_table_schema,
     const int16_t column_stored_idx,
     const bool is_usr_column,
     const int16_t usr_column_idx,
@@ -107,6 +113,8 @@ int ColumnSchemaInfo::init(
     collation_type_ =  collation_type;
     orig_default_value_str_ = orig_default_value_str;
     is_rowkey_ = column_table_schema.is_original_rowkey_column();
+    udt_set_id_ = column_table_schema.get_udt_set_id();
+    sub_type_ = column_table_schema.get_sub_data_type();
   }
 
   return ret;
@@ -129,13 +137,15 @@ void ColumnSchemaInfo::reset()
   collation_type_ = ObCollationType::CS_TYPE_INVALID;
 
   if (NULL != orig_default_value_str_) {
-    LOG_ERROR("orig_default_value_str_ should be null", K(orig_default_value_str_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "orig_default_value_str_ should be null", K(orig_default_value_str_));
     orig_default_value_str_ = NULL;
   }
 
   extended_type_info_size_ = 0;
   extended_type_info_ = NULL;
   is_rowkey_ = false;
+  udt_set_id_ = 0;
+  sub_type_ = 0;
 }
 
 void ColumnSchemaInfo::get_extended_type_info(common::ObArrayHelper<common::ObString> &str_array) const
@@ -144,9 +154,10 @@ void ColumnSchemaInfo::get_extended_type_info(common::ObArrayHelper<common::ObSt
   str_array.init(extended_type_info_size_, extended_type_info_, extended_type_info_size_);
 }
 
+template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
 int ColumnSchemaInfo::get_column_ori_default_value_(
-    const share::schema::ObTableSchema &table_schema,
-    const share::schema::ObColumnSchemaV2 &column_table_schema,
+    const TABLE_SCHEMA &table_schema,
+    const COLUMN_SCHEMA &column_table_schema,
     const int16_t column_idx,
     const ObTimeZoneInfoWrap *tz_info_wrap,
     ObObj2strHelper &obj2str_helper,
@@ -194,9 +205,10 @@ int ColumnSchemaInfo::get_column_ori_default_value_(
   return ret;
 }
 
+template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
 int ColumnSchemaInfo::init_extended_type_info_(
-    const share::schema::ObTableSchema &table_schema,
-    const share::schema::ObColumnSchemaV2 &column_table_schema,
+    const TABLE_SCHEMA &table_schema,
+    const COLUMN_SCHEMA &column_table_schema,
     const int16_t column_idx,
     common::ObIAllocator &allocator)
 {
@@ -223,7 +235,7 @@ int ColumnSchemaInfo::init_extended_type_info_(
       extended_type_info_size_ = src_extended_type_info.count();
 
       for (int64_t idx = 0; OB_SUCC(ret) && idx < src_extended_type_info.count(); ++idx) {
-        ObString &str= extended_type_info_[idx];
+        ObString &str = extended_type_info_[idx];
 
         if (OB_FAIL(deep_copy_str(src_extended_type_info.at(idx), str, allocator))) {
           LOG_ERROR("deep_copy_str failed", KR(ret), K(idx), K(str),
@@ -285,7 +297,38 @@ ObLogRowkeyInfo::~ObLogRowkeyInfo()
   destroy();
 }
 
-int ObLogRowkeyInfo::init(common::ObIAllocator &allocator,
+int ObLogRowkeyInfo::init(
+    common::ObIAllocator &allocator,
+    const share::schema::ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  const ObRowkeyInfo &rowkey_info = table_schema.get_rowkey_info();
+
+  if (OB_FAIL(do_init_(allocator, rowkey_info.get_size()))) {
+    LOG_ERROR("init ObLogRowkeyInfo failed", KR(ret), K(rowkey_info), K(table_schema));
+  }
+
+  return ret;
+}
+
+int ObLogRowkeyInfo::init(
+    common::ObIAllocator &allocator,
+    const datadict::ObDictTableMeta &table_schema)
+{
+  int ret = OB_SUCCESS;
+  ObRowkeyInfo rowkey_info;
+
+  if (OB_FAIL(table_schema.get_rowkey_info(rowkey_info))) {
+    LOG_ERROR("get_rowkey_info from ObDictTableMeta failed", KR(ret), K(table_schema));
+  } else if (OB_FAIL(do_init_(allocator, rowkey_info.get_size()))) {
+    LOG_ERROR("init ObLogRowkeyInfo failed", KR(ret), K(rowkey_info), K(table_schema));
+  }
+
+  return ret;
+}
+
+int ObLogRowkeyInfo::do_init_(
+    common::ObIAllocator &allocator,
     const int64_t size)
 {
   int ret = OB_SUCCESS;
@@ -310,7 +353,7 @@ int ObLogRowkeyInfo::init(common::ObIAllocator &allocator,
 void ObLogRowkeyInfo::destroy()
 {
   if (OB_NOT_NULL(column_stored_idx_array_)) {
-    LOG_ERROR("column_id_array_ should be null", K(column_stored_idx_array_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "column_id_array_ should be null", K(column_stored_idx_array_));
     column_stored_idx_array_ = NULL;
   }
   size_ = 0;
@@ -395,7 +438,8 @@ TableSchemaInfo::TableSchemaInfo(ObIAllocator &allocator)
       user_column_idx_array_cnt_(0),
       column_schema_array_(NULL),
       column_schema_array_cnt_(0),
-      column_id_hash_arr_(NULL)
+      column_id_hash_arr_(nullptr),
+      udt_schema_info_map_(nullptr)
 {
 }
 
@@ -404,7 +448,8 @@ TableSchemaInfo::~TableSchemaInfo()
   destroy();
 }
 
-int TableSchemaInfo::init(const share::schema::ObTableSchema *table_schema)
+template<class TABLE_SCHEMA>
+int TableSchemaInfo::init(const TABLE_SCHEMA *table_schema)
 {
   int ret = OB_SUCCESS;
 
@@ -462,6 +507,8 @@ int TableSchemaInfo::init(const share::schema::ObTableSchema *table_schema)
 
   return ret;
 }
+template int TableSchemaInfo::init(const share::schema::ObTableSchema *table_schema);
+template int TableSchemaInfo::init(const datadict::ObDictTableMeta *table_schema);
 
 void TableSchemaInfo::destroy()
 {
@@ -477,25 +524,19 @@ void TableSchemaInfo::destroy()
   }
   destroy_user_column_idx_array_();
   destroy_column_schema_array_();
+  destroy_udt_schema_info_map_();
 }
 
-int TableSchemaInfo::init_rowkey_info_(const share::schema::ObTableSchema *table_schema)
+template<class TABLE_SCHEMA>
+int TableSchemaInfo::init_rowkey_info_(const TABLE_SCHEMA *table_schema)
 {
   int ret = OB_SUCCESS;
 
   if (OB_ISNULL(table_schema)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_ERROR("invalid argument", KR(ret), K(table_schema));
-  } else {
-    const ObRowkeyInfo &rowkey_info = table_schema->get_rowkey_info();
-    ObArray<uint64_t> column_ids;
-
-    if (OB_FAIL(rowkey_info.get_column_ids(column_ids))) {
-      LOG_ERROR("rowkey info get_column_ids fail", KR(ret), K(column_ids));
-    } else if (OB_FAIL(rowkey_info_.init(allocator_, rowkey_info.get_size()))) {
-      LOG_ERROR("rowkey info init fail", KR(ret), "size", rowkey_info.get_size());
-    } else {
-    }
+  } else if (OB_FAIL(rowkey_info_.init(allocator_, *table_schema))) {
+    LOG_ERROR("rowkey info init fail", KR(ret), K(table_schema));
   }
 
   return ret;
@@ -598,9 +639,10 @@ int TableSchemaInfo::set_column_schema_info_for_column_id_(
   return ret;
 }
 
+template<class TABLE_SCHEMA, class COLUMN_SCHEMA>
 int TableSchemaInfo::init_column_schema_info(
-    const share::schema::ObTableSchema &table_schema,
-    const share::schema::ObColumnSchemaV2 &column_table_schema,
+    const TABLE_SCHEMA &table_schema,
+    const COLUMN_SCHEMA &column_table_schema,
     const int16_t column_stored_idx,
     const bool is_usr_column,
     const int16_t usr_column_idx,
@@ -659,6 +701,10 @@ int TableSchemaInfo::init_column_schema_info(
     LOG_ERROR("set_user_column_id_ fail", KR(ret),K(column_id), K(usr_column_idx), K(column_stored_idx));
   } else if (is_rowkey_col && OB_FAIL(rowkey_info_.set_column_stored_idx(rowkey_idx, column_stored_idx))) {
     LOG_ERROR("set_user_column_id_ fail", KR(ret),K(column_id), K(rowkey_idx), K(column_stored_idx));
+  } else if (OB_FAIL(add_udt_column_(column_schema_info))) {
+    LOG_ERROR("add_udt_column_ fail", KR(ret),
+        K(column_stored_idx), K(is_heap_table_pk_increment_column),
+        K(is_usr_column), K(usr_column_idx));
   } else {
     LOG_DEBUG("column_schema_info init success", KR(ret),
         "table_id", table_schema.get_table_id(),
@@ -667,7 +713,6 @@ int TableSchemaInfo::init_column_schema_info(
         "column_id", column_table_schema.get_column_id(),
         "column_name", column_table_schema.get_column_name(),
         "rowkey_pos", column_table_schema.get_rowkey_position(),
-        "order_in_rowkey", column_table_schema.get_order_in_rowkey(),
         K(column_stored_idx), K(is_heap_table_pk_increment_column),
         K(is_usr_column), K(usr_column_idx),
         "meta_type", column_table_schema.get_meta_type(),
@@ -676,6 +721,24 @@ int TableSchemaInfo::init_column_schema_info(
 
   return ret;
 }
+
+template int TableSchemaInfo::init_column_schema_info(
+    const ObTableSchema &table_schema,
+    const ObColumnSchemaV2 &column_table_schema,
+    const int16_t column_stored_idx,
+    const bool is_usr_column,
+    const int16_t usr_column_idx,
+    const ObTimeZoneInfoWrap *tz_info_wrap,
+    ObObj2strHelper &obj2str_helper);
+
+ template int TableSchemaInfo::init_column_schema_info(
+    const datadict::ObDictTableMeta &table_schema,
+    const datadict::ObDictColumnMeta &column_table_schema,
+    const int16_t column_stored_idx,
+    const bool is_usr_column,
+    const int16_t usr_column_idx,
+    const ObTimeZoneInfoWrap *tz_info_wrap,
+    ObObj2strHelper &obj2str_helper);
 
 int TableSchemaInfo::get_column_schema_info_of_column_id(
     const uint64_t column_id,
@@ -779,6 +842,117 @@ int TableSchemaInfo::set_user_column_idx_(
     user_column_idx_array_[user_column_index] = column_stored_index;
   }
 
+  return ret;
+}
+
+int TableSchemaInfo::add_udt_column_(ColumnSchemaInfo *column_info)
+{
+  int ret = OB_SUCCESS;
+  uint64_t udt_set_id = 0;
+  ObCDCUdtSchemaInfo *udt_schema_info = nullptr;
+  if (OB_ISNULL(column_info)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("add null hidden column info", KR(ret));
+  } else if (column_info->is_udt_column()) {
+    udt_set_id = column_info->get_udt_set_id();
+    if (OB_ISNULL(udt_schema_info_map_) && OB_FAIL(init_udt_schema_info_map_())) {
+      LOG_ERROR("udt_schema_info_map_ create fail", KR(ret), K(udt_set_id));
+    } else if (OB_FAIL(udt_schema_info_map_->get_refactored(udt_set_id, udt_schema_info))) {
+      if (OB_HASH_NOT_EXIST == ret) {
+        // create if not exist
+        if (OB_ISNULL(udt_schema_info = OB_NEWx(ObCDCUdtSchemaInfo, &allocator_))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_ERROR("allocate memory for udt schema info fail", KR(ret), "size", sizeof(ObCDCUdtSchemaInfo));
+        } else if (OB_FAIL(udt_schema_info_map_->set_refactored(udt_set_id, udt_schema_info))) {
+          if (OB_NOT_NULL(udt_schema_info)) {
+            udt_schema_info->~ObCDCUdtSchemaInfo();
+            allocator_.free(udt_schema_info);
+            udt_schema_info = nullptr;
+          }
+          LOG_ERROR("set udt_schema_info_map_ fail", KR(ret), K(udt_set_id));
+        }
+      } else {
+        LOG_ERROR("get udt schema info fail", KR(ret), K(udt_set_id));
+      }
+    }
+
+    // add
+    if (OB_SUCC(ret) && OB_NOT_NULL(udt_schema_info)) {
+      if (column_info->is_hidden()) {
+        if (OB_FAIL(udt_schema_info->add_hidden_column(column_info))) {
+          LOG_ERROR("add hidden column info fail", KR(ret), K(column_info));
+        }
+      } else {
+        if (OB_FAIL(udt_schema_info->set_main_column(column_info))) {
+          LOG_ERROR("set main column info fail", KR(ret), K(column_info));
+        }
+      }
+    } else {
+      LOG_ERROR("add udt column fail", KR(ret), K(udt_set_id), KP(udt_schema_info));
+    }
+  } // end if is_udt_column
+  return ret;
+}
+
+int TableSchemaInfo::init_udt_schema_info_map_()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(udt_schema_info_map_ = OB_NEWx(ObCDCUdtSchemaInfoMap, &allocator_))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_ERROR("allocate memory for udt_schema_info_map_ fail", KR(ret), "size", sizeof(ObCDCUdtSchemaInfoMap));
+  } else if (OB_FAIL(udt_schema_info_map_->create(4, "UDT"))) {
+    LOG_ERROR("udt_schema_info_map_ create fail", KR(ret));
+  }
+  return ret;
+}
+
+int TableSchemaInfo::destroy_udt_schema_info_map_()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(udt_schema_info_map_)) {
+    LOG_DEBUG("udt_schema_info_map_ not init", KP(udt_schema_info_map_));
+  } else {
+    for (ObCDCUdtSchemaInfoMap::iterator iter = udt_schema_info_map_->begin(); iter != udt_schema_info_map_->end(); ++iter) {
+      uint64_t udt_set_id = iter->first;
+      ObCDCUdtSchemaInfo *group_schema = iter->second;
+      group_schema->~ObCDCUdtSchemaInfo();
+      allocator_.free(group_schema);
+    }
+    udt_schema_info_map_->~ObCDCUdtSchemaInfoMap();
+    allocator_.free(udt_schema_info_map_);
+    udt_schema_info_map_ = nullptr;
+  }
+  return ret;
+}
+
+int TableSchemaInfo::get_main_column_of_udt(
+    const uint64_t udt_set_id,
+    ColumnSchemaInfo *&column_schema_info) const
+{
+  int ret = OB_SUCCESS;
+  ObCDCUdtSchemaInfo *udt_schema_info = nullptr;
+  if (OB_ISNULL(udt_schema_info_map_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("udt_schema_info_map_ is null", KR(ret));
+  } else if (OB_FAIL(udt_schema_info_map_->get_refactored(udt_set_id, udt_schema_info))) {
+    LOG_ERROR("get udt column schema fail", KR(ret), K(udt_set_id));
+  } else if (OB_FAIL(udt_schema_info->get_main_column(column_schema_info))) {
+    LOG_ERROR("get main column of udt fail", KR(ret), K(udt_set_id));
+  }
+  return ret;
+}
+
+int TableSchemaInfo::get_udt_schema_info(
+    const uint64_t udt_set_id,
+    ObCDCUdtSchemaInfo *&schema_info) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(udt_schema_info_map_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("udt_schema_info_map_ is null", KR(ret));
+  } else if (OB_FAIL(udt_schema_info_map_->get_refactored(udt_set_id, schema_info))) {
+    LOG_ERROR("get udt column schema  fail", KR(ret), K(udt_set_id));
+  }
   return ret;
 }
 

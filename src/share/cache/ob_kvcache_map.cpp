@@ -28,7 +28,7 @@ ObKVCacheMap::ObKVCacheMap()
       bucket_num_(0),
       bucket_size_(0),
       buckets_(NULL),
-      store_(NULL), 
+      store_(NULL),
       global_hazard_version_()
 {
   bucket_allocator_.set_label("CACHE_MAP_BKT");
@@ -56,7 +56,7 @@ int ObKVCacheMap::init(const int64_t bucket_num, ObKVCacheStore *store)
   } else {
     bucket_size_ = DEFAULT_BUCKET_SIZE;
     if (is_mini_mode()) {
-      bucket_size_ /= (lib::ObRunningModeConfig::MINI_MEM_UPPER / lib::ObRunningModeConfig::instance().memory_limit_);
+      bucket_size_ *= lib::mini_mode_resource_ratio();
       bucket_size_ = bucket_size_ > MIN_BUCKET_SIZE ? bucket_size_ : MIN_BUCKET_SIZE;
     }
     const int64_t bucket_cnt = bucket_num % bucket_size_ == 0 ?
@@ -96,7 +96,7 @@ void ObKVCacheMap::destroy()
     if (is_inited_) {
       GlobalHazardVersionGuard hazard_guard(global_hazard_version_);
       if (OB_UNLIKELY(OB_SUCCESS != hazard_guard.get_ret())) {
-        COMMON_LOG(WARN, "Fail to acquire version", K(hazard_guard.get_ret()));
+        COMMON_LOG_RET(WARN, OB_ERR_UNEXPECTED, "Fail to acquire version", K(hazard_guard.get_ret()));
       } else {
         for (int64_t i = 0; i < bucket_num_; i++) {
           Node *&bucket_ptr = get_bucket_node(i);
@@ -198,6 +198,7 @@ int ObKVCacheMap::put(
         } else {
           new_node = new (buf) Node();
           // set new node
+          new_node->tenant_id_ = inst.tenant_id_;
           new_node->inst_ = &inst;
           new_node->hash_code_ = hash_code;
           new_node->seq_num_ = mb_handle->handle_ref_.get_seq_num();
@@ -208,13 +209,13 @@ int ObKVCacheMap::put(
 
           // update mb_handle_ and inst
           if (NULL == iter) {
-            // put new node 
+            // put new node
             (void) ATOMIC_AAF(&inst.status_.kv_cnt_, 1);
           } else {
             // overwrite
             (void) ATOMIC_SAF(&iter->mb_handle_->kv_cnt_, 1);
             (void) ATOMIC_SAF(&iter->mb_handle_->get_cnt_, iter->get_cnt_);
-            
+
           }
           (void) ATOMIC_AAF(&mb_handle->kv_cnt_, 1);
           (void) ATOMIC_AAF(&mb_handle->get_cnt_, 1);
@@ -315,7 +316,7 @@ int ObKVCacheMap::get(
                     COMMON_LOG(WARN, "Failed to check kvcache key equal", K(tmp_ret));
                   } else if (is_equal) {
                     ObKVMemBlockHandle *old_handle = iter->mb_handle_;
-                    if (OB_TMP_FAIL(internal_data_move(prev, iter, bucket_ptr, LFU))) {
+                    if (OB_TMP_FAIL(internal_data_move(prev, iter, bucket_ptr))) {
                       COMMON_LOG(WARN, "Fail to move node to LFU block, ", K(tmp_ret));
                     }
                     store_->de_handle_ref(old_handle);
@@ -492,7 +493,7 @@ int ObKVCacheMap::erase_all(const int64_t cache_id)
   return ret;
 }
 
-int ObKVCacheMap::erase_tenant(const uint64_t tenant_id)
+int ObKVCacheMap::erase_tenant(const uint64_t tenant_id, const bool force_erase)
 {
   int ret = OB_SUCCESS;
 
@@ -531,10 +532,11 @@ int ObKVCacheMap::erase_tenant(const uint64_t tenant_id)
         }
       }
     } // hazard version guard
-    int temp_ret = global_hazard_version_.retire();
-    if (OB_SUCCESS != temp_ret) {
-      COMMON_LOG(WARN, "Fail to retire global hazard version", K(temp_ret));
-    }
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(global_hazard_version_.retire(force_erase ? tenant_id : OB_INVALID_TENANT_ID))) {
+    COMMON_LOG(WARN, "Fail to retire global hazard version", K(ret), K(tenant_id), K(force_erase));
   }
 
   return ret;
@@ -648,9 +650,10 @@ int ObKVCacheMap::clean_garbage_node(int64_t &start_pos, const int64_t clean_num
   return ret;
 }
 
-int ObKVCacheMap::replace_fragment_node(int64_t &start_pos, const int64_t replace_num)
+int ObKVCacheMap::replace_fragment_node(int64_t &start_pos, int64_t &replace_node_count, const int64_t replace_num)
 {
   int ret = OB_SUCCESS;
+  replace_node_count = 0;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     COMMON_LOG(WARN, "The ObKVCacheMap has not been inited, ", K(ret));
@@ -660,9 +663,8 @@ int ObKVCacheMap::replace_fragment_node(int64_t &start_pos, const int64_t replac
     ret = OB_INVALID_ARGUMENT;
     COMMON_LOG(WARN, "Invalid argument, ", K(start_pos), K_(bucket_num), K(replace_num), K(ret));
   } else {
-    int64_t replace_node_count = 0;
     ObTimeGuard tg("replace_fragement_node", 100000);
-    // The variable 'replace_start_pos' do not need atomic operation because it is only used by replace thread 
+    // The variable 'replace_start_pos' do not need atomic operation because it is only used by replace thread
     int64_t replace_start_pos = start_pos % bucket_num_;
     int64_t replace_end_pos = MIN(replace_num + replace_start_pos, bucket_num_);
     Node *iter = NULL;
@@ -784,7 +786,7 @@ void ObKVCacheMap::internal_map_replace(Node *&prev, Node *&iter, Node *&bucket_
   }
 }
 
-int ObKVCacheMap::internal_data_move(Node *&prev, Node *&old_iter, Node *&bucket_ptr, const enum ObKVCachePolicy policy)
+int ObKVCacheMap::internal_data_move(Node *&prev, Node *&old_iter, Node *&bucket_ptr)
 {
   int ret = OB_SUCCESS;
   Node *new_node = NULL;
@@ -794,13 +796,14 @@ int ObKVCacheMap::internal_data_move(Node *&prev, Node *&old_iter, Node *&bucket
   if (NULL == (buf = old_iter->inst_->node_allocator_.alloc(sizeof(Node)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     COMMON_LOG(WARN, "Fail to allocate memory for Node, ", K(ret), "size:", sizeof(Node));
-  } else if (OB_FAIL(store_->store(*old_iter->inst_, *old_iter->key_, *old_iter->value_, new_kvpair, new_mb_handle, policy))) {
+  } else if (OB_FAIL(store_->store(*old_iter->inst_, *old_iter->key_, *old_iter->value_, new_kvpair, new_mb_handle, LFU))) {
     old_iter->inst_->node_allocator_.free(buf);
     COMMON_LOG(WARN, "Fail to move kvpair ", K(ret));
   } else {
     new_node = new(buf) Node();
 
     // set new node
+    new_node->tenant_id_ = old_iter->tenant_id_;
     new_node->inst_ = old_iter->inst_;
     new_node->hash_code_ = old_iter->hash_code_;
     new_node->seq_num_ = new_mb_handle->get_seq_num();
@@ -813,7 +816,7 @@ int ObKVCacheMap::internal_data_move(Node *&prev, Node *&old_iter, Node *&bucket
     // update inst and mb_handle
     (void) ATOMIC_SAF(&old_iter->mb_handle_->kv_cnt_, 1);
     (void) ATOMIC_SAF(&old_iter->mb_handle_->get_cnt_, old_iter->get_cnt_);
-    (void) ATOMIC_AAF(&new_mb_handle->kv_cnt_, 1); 
+    (void) ATOMIC_AAF(&new_mb_handle->kv_cnt_, 1);
     (void) ATOMIC_AAF(&new_mb_handle->get_cnt_, old_iter->get_cnt_);
     ++new_mb_handle->recent_get_cnt_;
 

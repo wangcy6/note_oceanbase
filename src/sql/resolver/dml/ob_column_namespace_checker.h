@@ -56,7 +56,9 @@ public:
    * @param table_item, if exists, will return the table item that contain this column
    * @return
    */
-  int check_table_column_namespace(const ObQualifiedName &q_name, const TableItem *&table_item);
+  int check_table_column_namespace(const ObQualifiedName &q_name,
+                                   const TableItem *&table_item,
+                                   bool is_from_multi_tab_insert = false);
   int check_using_column_namespace(const common::ObString &column_name,
                                    const TableItem *&left_table,
                                    const TableItem *&right_table);
@@ -85,7 +87,8 @@ public:
 
   int check_rowid_table_column_namespace(
       const ObQualifiedName &q_name,
-      const TableItem *&table_item);
+      const TableItem *&table_item,
+      bool is_from_multi_tab_insert = false);
 
   void enable_check_unique() { check_unique_ = true; }
   void disable_check_unique() { check_unique_ = false; }
@@ -115,6 +118,11 @@ private:
                                              const common::ObString &column_name,
                                              const TableItem &table_item,
                                              bool &exist);
+  int check_rowid_existence_in_joined_table(const ObSQLSessionInfo *session_info,
+                                            const ObString &tbl_name,
+                                            const JoinedTable *joined_table,
+                                            bool &found_it,
+                                            const TableItem *&table_item);
 private:
   ObResolverParams &params_;
   //record the table root reference by query

@@ -234,6 +234,7 @@ private:
   int deal_with_local_ls_();
   int update_ls_();
   int generate_tablets_migration_dag_();
+  int report_ls_meta_table_();
   int choose_src_();
   int fetch_ls_info_(const uint64_t tenant_id, const share::ObLSID &ls_id,
       const common::ObAddr &member_addr, obrpc::ObCopyLSInfo &ls_info);
@@ -242,8 +243,6 @@ private:
   int get_tablet_id_array_(common::ObIArray<common::ObTabletID> &tablet_id_array);
   int check_ls_need_copy_data_(bool &need_copy);
   int deal_local_restore_ls_(bool &need_generate_dag);
-  int try_remove_unneeded_tablets_();
-
   int record_server_event_();
 
 private:
@@ -418,10 +417,13 @@ private:
       common::ObIArray<ObTabletGroupMigrationDag *> &tablet_group_dag_array);
   int build_tablet_group_info_();
   int generate_tablet_group_dag_();
+  int try_remove_unneeded_tablets_();
+  int try_offline_ls_();
   int record_server_event_();
 
 private:
   static const int64_t MAX_TABLET_GROUP_SIZE = 2 * 1024L * 1024L * 1024L; //2G
+  static const int64_t MAX_TABLET_COUNT = 100;
   bool is_inited_;
   ObLSHandle ls_handle_;
   ObMigrationCtx *ctx_;

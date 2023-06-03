@@ -1,7 +1,11 @@
 /*
  * (C) Copyright 2022 Alipay Inc. All Rights Reserved.
  * Authors:
+<<<<<<< HEAD
  *     Danling <fengjingkun.fjk@antgroup.com>
+=======
+ *     Danling <>
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
  */
 
 #include "ob_table_range.h"

@@ -56,6 +56,7 @@ private:
   int disable_transfer_();
   int enable_transfer_();
   int do_backup_meta_(ObArray<share::ObBackupLSTaskAttr> &ls_task, int64_t &finish_cnt);
+  int do_backup_root_key_();
   int merge_tablet_to_ls_info_(const ObIArray<share::ObBackupLSTaskAttr> &ls_tasks);
   int construct_ls_task_map_(const ObIArray<share::ObBackupLSTaskAttr> &ls_tasks, 
       hash::ObHashMap<share::ObLSID, const share::ObBackupLSTaskAttr *> &ls_map);
@@ -87,6 +88,7 @@ private:
   int get_change_turn_ls_(ObIArray<share::ObBackupLSTaskAttr> &ls_task, 
       const ObIArray<share::ObBackupDataTabletToLSInfo> &tablets_to_ls,
       ObIArray<share::ObBackupLSTaskAttr *> &need_change_turn_ls_tasks);
+  int persist_deleted_tablets_info_(const common::ObIArray<share::ObBackupSkipTabletAttr> &skip_tablets);
   int update_inner_task_(const ObIArray<share::ObLSID> &new_ls_ids, 
       const ObIArray<share::ObBackupLSTaskAttr *> &need_change_turn_ls_tasks);
   int update_task_type_(const ObIArray<share::ObBackupLSTaskAttr> &ls_task);
@@ -107,6 +109,7 @@ private:
 
   int write_extern_ls_info_(const ObArray<share::ObBackupLSTaskAttr> &ls_tasks);
   int write_tablet_to_ls_infos_(const ObIArray<share::ObBackupDataTabletToLSInfo> &tablets_to_ls, const int64_t turn_id);
+  int write_deleted_tablet_infos_();
   
   int set_backup_set_files_failed_(ObMySQLTransaction &trans);
   int advance_status_(ObMySQLTransaction &trans, const share::ObBackupStatus &next_status, const int result = OB_SUCCESS,

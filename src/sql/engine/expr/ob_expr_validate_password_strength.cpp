@@ -35,7 +35,7 @@ const ObValidatePasswordFunc ObExprValidatePasswordStrength::validate_funcs_[STR
 
 ObExprValidatePasswordStrength::ObExprValidatePasswordStrength(ObIAllocator &alloc)
     : ObFuncExprOperator(alloc, T_FUN_SYS_VALIDATE_PASSWORD_STRENGTH,
-                         N_VALIDATE_PASSWORD_STRENGTH, 1, NOT_ROW_DIMENSION)
+                         N_VALIDATE_PASSWORD_STRENGTH, 1, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -182,7 +182,9 @@ int ObExprValidatePasswordStrength::validate_password_medium(const ObString &pas
     auto handle_char_func = [&lower_count, &upper_count, &digit_count, &special_count]
                             (ObString, int wchar) -> int {
       int ret = OB_SUCCESS;
-      if (islower(wchar)) {
+      if (!ob_isascii(wchar)) {
+        special_count++;
+      } else if (islower(wchar)) {
         lower_count++;
       } else if (isupper(wchar)) {
         upper_count++;

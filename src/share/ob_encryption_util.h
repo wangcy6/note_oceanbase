@@ -94,6 +94,7 @@ public:
   static const int OB_AES_BLOCK_SIZE = 16;
 };
 
+const int64_t OB_ROOT_KEY_LEN = 16;
 const int64_t OB_ORIGINAL_TABLE_KEY_LEN = 15;
 const int64_t OB_ENCRYPTED_TABLE_KEY_LEN = 16;
 const int64_t OB_MAX_MASTER_KEY_LENGTH = 16;
@@ -169,6 +170,32 @@ public:
   static int get_sha_hash_algorightm(const int64_t bit_length, ObHashAlgorithm &algo);
 private:
   static const EVP_MD* get_hash_evp_md(const ObHashAlgorithm algo);
+};
+
+class ObTdeEncryptEngineLoader {
+public:
+  enum ObEncryptEngineType {
+    OB_NONE_ENGINE = 0,
+    OB_INVALID_ENGINE = 1,
+    OB_AES_ENGINE = 2,
+    OB_SM4_ENGINE = 3,
+    OB_MAX_ENGINE
+  };
+  static ObTdeEncryptEngineLoader &get_instance();
+  ObTdeEncryptEngineLoader() {
+    ssl_init();
+    MEMSET(tde_engine_, 0, sizeof(ENGINE*)*OB_MAX_ENGINE);
+  }
+  ~ObTdeEncryptEngineLoader() { destroy(); }
+  void ssl_init();
+  void destroy();
+  int  load(const common::ObString& engine);
+  ObEncryptEngineType get_engine_type(const common::ObString& engine);
+  ENGINE* get_tde_engine(ObAesOpMode &mode) const;
+  int reload_config();
+private:
+  bool is_inited_;
+  ENGINE* tde_engine_[OB_MAX_ENGINE];
 };
 
 }//end share

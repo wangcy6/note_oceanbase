@@ -177,11 +177,11 @@ struct ObSysVarInPC
 
   int64_t hash(int64_t seed) const
   {
-    int64_t hash_val = seed;
+    uint64_t hash_val = seed;
     for (int64_t i = 0; i < system_variables_.count(); ++i) {
-      hash_val = system_variables_.at(i).hash(hash_val);
+      system_variables_.at(i).hash(hash_val, hash_val);
     }
-    return hash_val;
+    return static_cast<int64_t>(hash_val);
   }
 
   void reset()
@@ -268,6 +268,17 @@ struct ObPCParam
   TO_STRING_KV(KP_(node), K_(flag));
 };
 
+struct ObPCParseInfo
+{
+  int64_t raw_text_pos_;
+  int64_t param_idx_;
+  ParamProperty flag_;
+  ObPCParseInfo() : raw_text_pos_(-1), param_idx_(-1), flag_(INVALID_PARAM)
+  {
+  }
+  TO_STRING_KV(K_(raw_text_pos), K_(param_idx), K_(flag));
+};
+
 struct ObPCConstParamInfo
 {
   common::ObSEArray<int64_t, 4> const_idx_;
@@ -275,7 +286,8 @@ struct ObPCConstParamInfo
   TO_STRING_KV(K_(const_idx), K_(const_params));
   bool operator==(const ObPCConstParamInfo &other) const
   {
-    bool cmp_ret = true;
+    bool cmp_ret = const_idx_.count() == other.const_idx_.count()
+                   && const_params_.count() == other.const_params_.count();
     for (int i=0; cmp_ret && i < const_idx_.count(); i++) {
       cmp_ret = const_idx_.at(i) == other.const_idx_.at(i);
     }
@@ -300,6 +312,46 @@ struct ObPCParamEqualInfo
                    use_abs_cmp_ == other.use_abs_cmp_;
 
     return cmp_ret;
+  }
+};
+
+struct ObDupTabConstraint
+{
+  uint64_t first_;
+  uint64_t second_;
+  TO_STRING_KV(K_(first), K_(second));
+  ObDupTabConstraint()
+    : first_(common::OB_INVALID_ID),
+      second_(common::OB_INVALID_ID)
+  {}
+  ObDupTabConstraint(int64_t first, int64_t second)
+    : first_(first),
+      second_(second)
+  {}
+  inline bool operator==(const ObDupTabConstraint &other) const
+  {
+    return first_ == other.first_ && second_ == other.second_;
+  }
+};
+
+struct ObPCPrivInfo
+{
+  share::ObRawPriv sys_priv_;
+  bool has_privilege_;
+  TO_STRING_KV(K_(sys_priv), K_(has_privilege));
+  ObPCPrivInfo() : sys_priv_(PRIV_ID_NONE), has_privilege_(false)
+  {
+  }
+  int assign(const ObPCPrivInfo &other)
+  {
+    int ret = OB_SUCCESS;
+    sys_priv_ = other.sys_priv_;
+    has_privilege_ = other.has_privilege_;
+    return ret;
+  }
+  inline bool operator==(const ObPCPrivInfo &other) const
+  {
+    return sys_priv_ == other.sys_priv_ && has_privilege_ == other.has_privilege_;
   }
 };
 
@@ -490,6 +542,10 @@ struct ObPlanStat
   common::ObString config_str_;
   common::ObString raw_sql_; //记录生成plan时的原始sql
   common::ObCollationType sql_cs_type_;
+  common::ObString rule_name_;
+  bool is_rewrite_sql_;
+  int64_t rule_version_; // the rule version when query rewrite generates a plan
+  bool enable_udr_;
   //******** for spm ******
   //该计划是否正在演进过程中
   bool is_evolution_;
@@ -589,6 +645,10 @@ struct ObPlanStat
       outline_id_(common::OB_INVALID_ID),
       is_last_exec_succ_(true),
       sql_cs_type_(common::CS_TYPE_INVALID),
+      rule_name_(),
+      is_rewrite_sql_(false),
+      rule_version_(OB_INVALID_VERSION),
+      enable_udr_(false),
       is_evolution_(false),
       db_id_(common::OB_INVALID_ID),
       constructed_sql_(),
@@ -660,6 +720,10 @@ struct ObPlanStat
       outline_id_(rhs.outline_id_),
       is_last_exec_succ_(rhs.is_last_exec_succ_),
       sql_cs_type_(rhs.sql_cs_type_),
+      rule_name_(),
+      is_rewrite_sql_(false),
+      rule_version_(OB_INVALID_VERSION),
+      enable_udr_(false),
       is_evolution_(rhs.is_evolution_),
       db_id_(rhs.db_id_),
       evolution_stat_(rhs.evolution_stat_),
@@ -738,8 +802,7 @@ struct ObPlanStat
 
   inline void update_cache_stat(const ObTableScanStat &stat)
   {
-    const int64_t current_time = common::ObTimeUtility::current_time();
-    if (current_time > gen_time_ + CACHE_POLICY_UPDATE_INTERVAL) {
+    if (ObClockGenerator::getClock() > gen_time_ + CACHE_POLICY_UPDATE_INTERVAL) {
       const int64_t update_times = ATOMIC_AAF(&cache_stat_update_times_, 1);
       ATOMIC_AAF(&bf_filter_cnt_, stat.bf_filter_cnt_);
       ATOMIC_AAF(&bf_access_cnt_, stat.bf_access_cnt_);
@@ -929,6 +992,11 @@ public:
     enable_px_batch_rescan_(true),
     bloom_filter_enabled_(true),
     enable_newsort_(true),
+    px_join_skew_handling_(true),
+    is_strict_defensive_check_(true),
+    px_join_skew_minfreq_(30),
+    min_cluster_version_(0),
+    is_enable_px_fast_reclaim_(false),
     cluster_config_version_(-1),
     tenant_config_version_(-1),
     tenant_id_(0)
@@ -965,6 +1033,11 @@ public:
   bool enable_px_ordered_coord_;
   bool bloom_filter_enabled_;
   bool enable_newsort_;
+  bool px_join_skew_handling_;
+  bool is_strict_defensive_check_;
+  int8_t px_join_skew_minfreq_;
+  uint64_t min_cluster_version_;
+  bool is_enable_px_fast_reclaim_;
 
 private:
   // current cluster config version_

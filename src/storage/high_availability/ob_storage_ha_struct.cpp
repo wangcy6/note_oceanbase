@@ -148,7 +148,7 @@ int ObMigrationStatusHelper::trans_fail_status(const ObMigrationStatus &cur_stat
       break;
     }
     case OB_MIGRATION_STATUS_REBUILD: {
-      fail_status = OB_MIGRATION_STATUS_NONE;
+      fail_status = OB_MIGRATION_STATUS_REBUILD;
       break;
     }
     case OB_MIGRATION_STATUS_CHANGE: {
@@ -562,7 +562,9 @@ bool ObMigrationUtils::is_need_retry_error(const int err)
     case OB_LOG_NOT_SYNC :
     case OB_INVALID_DATA :
     case OB_CHECKSUM_ERROR :
-    case OB_DDL_SSTABLE_RANGE_CROSS:
+    case OB_DDL_SSTABLE_RANGE_CROSS :
+    case OB_TENANT_NOT_EXIST :
+    case OB_NO_NEED_REBUILD :
       bret = false;
       break;
     default:
@@ -651,7 +653,7 @@ ObCopyMacroRangeInfo::ObCopyMacroRangeInfo()
     end_macro_block_id_(),
     macro_block_count_(0),
     is_leader_restore_(false),
-    start_macro_block_end_key_(datums_, OB_MAX_ROWKEY_COLUMN_NUMBER),
+    start_macro_block_end_key_(datums_, OB_INNER_MAX_ROWKEY_COLUMN_NUMBER),
     allocator_("CopyMacroRange")
 {
 }
@@ -677,7 +679,7 @@ void ObCopyMacroRangeInfo::reuse()
   macro_block_count_ = 0;
   is_leader_restore_ = false;
   start_macro_block_end_key_.datums_ = datums_;
-  start_macro_block_end_key_.datum_cnt_ = OB_MAX_ROWKEY_COLUMN_NUMBER;
+  start_macro_block_end_key_.datum_cnt_ = OB_INNER_MAX_ROWKEY_COLUMN_NUMBER;
   start_macro_block_end_key_.reuse();
   allocator_.reuse();
 }

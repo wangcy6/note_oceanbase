@@ -14,6 +14,7 @@
 #include "lib/ob_define.h"
 #include "lib/ob_errno.h"
 #include "lib/utility/serialization.h"
+#include "share/rc/ob_tenant_base.h"
 
 namespace oceanbase
 {
@@ -321,9 +322,9 @@ int64_t LogConfigVersion::to_string(char *buf, const int64_t buf_len)
 {
   int64_t pos = 0;
   if (OB_SUCCESS != databuff_print_obj(buf, buf_len, pos, proposal_id_)) {
-    PALF_LOG(WARN, "databuff_print_obj failed", K(pos));
+    PALF_LOG_RET(WARN, OB_ERR_UNEXPECTED, "databuff_print_obj failed", K(pos));
   } else if (OB_SUCCESS != databuff_print_obj(buf, buf_len, pos, config_seq_)) {
-    PALF_LOG(WARN, "databuff_print_obj failed", K(pos));
+    PALF_LOG_RET(WARN, OB_ERR_UNEXPECTED, "databuff_print_obj failed", K(pos));
   } else {
   }
   return pos;
@@ -383,12 +384,43 @@ LogConfigInfo::~LogConfigInfo()
 
 bool LogConfigInfo::is_valid() const
 {
-  const bool is_arb_in_log_sync = log_sync_memberlist_.contains(arbitration_member_.get_server());
+  const bool is_all_list_unique = this->is_all_list_unique();
   return true == log_sync_memberlist_.is_valid() &&
-         false == is_arb_in_log_sync &&
+         true == is_all_list_unique &&
          0 < log_sync_replica_num_ &&
          common::OB_MAX_MEMBER_NUMBER >= log_sync_replica_num_ &&
          config_version_.is_valid();
+}
+
+bool LogConfigInfo::is_all_list_unique() const
+{
+  int ret = OB_SUCCESS;
+  bool is_all_list_unique = true;
+  GlobalLearnerList server_list;
+  server_list = learnerlist_;
+  if (OB_ENTRY_EXIST == (ret = server_list.append(degraded_learnerlist_))) {
+    is_all_list_unique = false;
+    PALF_LOG(WARN, "learnerlist_ should not overlap with degraded_learnerlist_",
+        K_(learnerlist), K_(degraded_learnerlist));
+  } else if (arbitration_member_.is_valid() &&
+      OB_ENTRY_EXIST == (ret = server_list.add_learner(arbitration_member_))) {
+    is_all_list_unique = false;
+    PALF_LOG(WARN, "learnerlist should not overlap with arb_member",
+        K_(learnerlist), K_(degraded_learnerlist), K_(arbitration_member));
+  } else {
+    for (int i = 0; i < log_sync_memberlist_.get_member_number(); i++) {
+      common::ObMember member;
+      if (OB_FAIL(log_sync_memberlist_.get_member_by_index(i, member))) {
+        PALF_LOG(WARN, "get_server_by_index failed", K_(log_sync_memberlist));
+      } else if (OB_ENTRY_EXIST == (ret = server_list.add_learner(member))) {
+        is_all_list_unique = false;
+        PALF_LOG(WARN, "serverlist should not overlap with log_sync_member_list", K_(learnerlist),
+            K_(degraded_learnerlist), K_(log_sync_memberlist), K_(arbitration_member));
+        break;
+      }
+    }
+  }
+  return is_all_list_unique;
 }
 
 void LogConfigInfo::reset()
@@ -419,12 +451,43 @@ int LogConfigInfo::generate(const ObMemberList &memberlist,
   return ret;
 }
 
+int LogConfigInfo::get_expected_paxos_memberlist(common::ObMemberList &paxos_memberlist,
+                                                 int64_t &paxos_replica_num) const
+{
+  int ret = OB_SUCCESS;
+  if (false == log_sync_memberlist_.is_valid() ||
+      0 >= log_sync_replica_num_ ||
+      common::OB_MAX_MEMBER_NUMBER < log_sync_replica_num_) {
+    // memberlist may be empty when bootstraping cluster, just return empty memberlist
+    paxos_memberlist.reset();
+    paxos_replica_num = 0;
+  } else if (OB_UNLIKELY(degraded_learnerlist_.is_valid())) {
+    paxos_memberlist = log_sync_memberlist_;
+    paxos_replica_num = log_sync_replica_num_;
+    common::ObMember tmp_member;
+    const int64_t degraded_count = degraded_learnerlist_.get_member_number();
+    for (int64_t i = 0; i < degraded_count && OB_SUCC(ret); ++i) {
+      if (OB_FAIL(degraded_learnerlist_.get_member_by_index(i, tmp_member))) {
+        PALF_LOG(WARN, "get_member_by_index failed", KR(ret), K(i), K(degraded_learnerlist_));
+      } else if (OB_FAIL(paxos_memberlist.add_member(tmp_member))) {
+        PALF_LOG(WARN, "add_member failed", KR(ret), K(paxos_memberlist), K(tmp_member));
+      } else {
+        paxos_replica_num++;
+      }
+    }
+  } else {
+    paxos_memberlist = log_sync_memberlist_;
+    paxos_replica_num = log_sync_replica_num_;
+  }
+  return ret;
+}
+
 // generate paxos memberlist including arbitration replica
-int LogConfigInfo::convert_to_complete_config(common::ObMemberList &all_paxos_memberlist,
-                                              int64_t &all_paxos_replica_num,
+int LogConfigInfo::convert_to_complete_config(common::ObMemberList &alive_paxos_memberlist,
+                                              int64_t &alive_paxos_replica_num,
                                               GlobalLearnerList &all_learners) const
 {
-  int ret = OB_INVALID_ARGUMENT;
+  int ret = OB_SUCCESS;
   if (false == log_sync_memberlist_.is_valid() ||
       0 >= log_sync_replica_num_ ||
       common::OB_MAX_MEMBER_NUMBER < log_sync_replica_num_) {
@@ -433,15 +496,15 @@ int LogConfigInfo::convert_to_complete_config(common::ObMemberList &all_paxos_me
   } else if (OB_FAIL(all_learners.deep_copy(learnerlist_))) {
   } else if (OB_FAIL(all_learners.append(degraded_learnerlist_))) {
   } else if (OB_UNLIKELY(true == arbitration_member_.is_valid())) {
-    all_paxos_memberlist = log_sync_memberlist_;
-    if (OB_FAIL(all_paxos_memberlist.add_member(arbitration_member_))) {
-      PALF_LOG(WARN, "add_member failed", KR(ret), K(all_paxos_memberlist), K(arbitration_member_));
+    alive_paxos_memberlist = log_sync_memberlist_;
+    if (OB_FAIL(alive_paxos_memberlist.add_member(arbitration_member_))) {
+      PALF_LOG(WARN, "add_member failed", KR(ret), K(alive_paxos_memberlist), K(arbitration_member_));
     } else {
-      all_paxos_replica_num = log_sync_replica_num_ +  1;
+      alive_paxos_replica_num = log_sync_replica_num_ + 1;
     }
   } else {
-    all_paxos_memberlist = log_sync_memberlist_;
-    all_paxos_replica_num = log_sync_replica_num_;
+    alive_paxos_memberlist = log_sync_memberlist_;
+    alive_paxos_replica_num = log_sync_replica_num_;
   }
   return ret;
 }
@@ -516,7 +579,14 @@ DEFINE_GET_SERIALIZE_SIZE(LogConfigInfo)
   return size;
 }
 
-LogConfigMeta::LogConfigMeta() : version_(-1), proposal_id_(INVALID_PROPOSAL_ID), prev_(), curr_()
+LogConfigMeta::LogConfigMeta()
+  : version_(-1),
+    proposal_id_(INVALID_PROPOSAL_ID),
+    prev_(),
+    curr_(),
+    prev_log_proposal_id_(INVALID_PROPOSAL_ID),
+    prev_lsn_(),
+    prev_mode_pid_(INVALID_PROPOSAL_ID)
 {}
 
 LogConfigMeta::~LogConfigMeta()
@@ -524,14 +594,20 @@ LogConfigMeta::~LogConfigMeta()
   reset();
 }
 
-int LogConfigMeta::generate(
-    const int64_t proposal_id, const LogConfigInfo &prev_config_info, const LogConfigInfo &curr_config_info)
+int LogConfigMeta::generate_for_default(
+    const int64_t proposal_id,
+    const LogConfigInfo &prev_config_info,
+    const LogConfigInfo &curr_config_info)
 {
   int ret = OB_SUCCESS;
-  if (INVALID_PROPOSAL_ID == proposal_id || false == curr_config_info.is_valid()) {
+  if (INVALID_PROPOSAL_ID == proposal_id) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    version_ = LOG_CONFIG_META_VERSION;
+    // Note: we generate a default META_VERSION rather than according to DATA_VERSION,
+    //       because DATA_VERSION of the tenant may be empty it the server is just added
+    //       to the cluster. It's fine because real LogConfigMeta will be set by the
+    //       set_initial_member_list interface.
+    version_ = LOG_CONFIG_META_VERSION_INC;
     proposal_id_ = proposal_id;
     prev_ = prev_config_info;
     curr_ = curr_config_info;
@@ -539,10 +615,40 @@ int LogConfigMeta::generate(
   return ret;
 }
 
+int LogConfigMeta::generate(
+    const int64_t proposal_id,
+    const LogConfigInfo &prev_config_info,
+    const LogConfigInfo &curr_config_info,
+    const int64_t prev_log_proposal_id,
+    const LSN &prev_lsn,
+    const int64_t prev_mode_pid)
+{
+  int ret = OB_SUCCESS;
+  uint64_t tenant_data_version = 0;
+  if (INVALID_PROPOSAL_ID == proposal_id || false == curr_config_info.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(GET_MIN_DATA_VERSION(MTL_ID(), tenant_data_version))) {
+    PALF_LOG(WARN, "get tenant data version failed", K(ret));
+  } else {
+    const bool is_cluster_already_4100 = (tenant_data_version >= DATA_VERSION_4_1_0_0);
+    version_ = (is_cluster_already_4100)? LOG_CONFIG_META_VERSION_INC: LOG_CONFIG_META_VERSION;
+    proposal_id_ = proposal_id;
+    prev_ = prev_config_info;
+    curr_ = curr_config_info;
+    if (is_cluster_already_4100) {
+      prev_log_proposal_id_ = prev_log_proposal_id;
+      prev_lsn_ = prev_lsn;
+      prev_mode_pid_ = prev_mode_pid;
+    }
+  }
+  return ret;
+}
+
 bool LogConfigMeta::is_valid() const
 {
   // NB: prev_config_info is invalid before change config
-  return LOG_CONFIG_META_VERSION == version_ && proposal_id_ != INVALID_PROPOSAL_ID;
+  return (LOG_CONFIG_META_VERSION == version_ || LOG_CONFIG_META_VERSION_INC == version_)
+      && proposal_id_ != INVALID_PROPOSAL_ID;
 }
 
 void LogConfigMeta::reset()
@@ -551,6 +657,9 @@ void LogConfigMeta::reset()
   curr_.reset();
   prev_.reset();
   version_ = -1;
+  prev_log_proposal_id_ = INVALID_PROPOSAL_ID;
+  prev_lsn_.reset();
+  prev_mode_pid_ = INVALID_PROPOSAL_ID;
 }
 
 void LogConfigMeta::operator=(const LogConfigMeta &log_config_meta)
@@ -559,6 +668,9 @@ void LogConfigMeta::operator=(const LogConfigMeta &log_config_meta)
   this->proposal_id_ = log_config_meta.proposal_id_;
   this->prev_ = log_config_meta.prev_;
   this->curr_ = log_config_meta.curr_;
+  this->prev_log_proposal_id_ = log_config_meta.prev_log_proposal_id_;
+  this->prev_lsn_ = log_config_meta.prev_lsn_;
+  this->prev_mode_pid_ = log_config_meta.prev_mode_pid_;
 }
 
 DEFINE_SERIALIZE(LogConfigMeta)
@@ -573,6 +685,15 @@ DEFINE_SERIALIZE(LogConfigMeta)
              OB_FAIL(serialization::encode_i64(buf, buf_len, new_pos, proposal_id_)) ||
              OB_FAIL(prev_.serialize(buf, buf_len, new_pos)) || OB_FAIL(curr_.serialize(buf, buf_len, new_pos))) {
     PALF_LOG(ERROR, "LogConfigMeta serialize failed", K(ret), K(new_pos));
+  } else if (LOG_CONFIG_META_VERSION_INC == version_) {
+    if (OB_FAIL(serialization::encode_i64(buf, buf_len, new_pos, prev_log_proposal_id_)) ||
+        OB_FAIL(prev_lsn_.serialize(buf, buf_len, new_pos)) ||
+        OB_FAIL(serialization::encode_i64(buf, buf_len, new_pos, prev_mode_pid_))) {
+      PALF_LOG(ERROR, "LogConfigMeta Version 2 serialize failed", K(ret), K(new_pos));
+    } else {
+      PALF_LOG(TRACE, "LogConfigMeta Version 2 serialize", K(*this), K(buf + pos), KP(buf), K(pos), K(new_pos));
+      pos = new_pos;
+    }
   } else {
     PALF_LOG(TRACE, "LogConfigMeta serialize", K(*this), K(buf + pos), KP(buf), K(pos), K(new_pos));
     pos = new_pos;
@@ -593,6 +714,15 @@ DEFINE_DESERIALIZE(LogConfigMeta)
              OB_FAIL(serialization::decode_i64(buf, data_len, new_pos, &proposal_id_)) ||
              OB_FAIL(prev_.deserialize(buf, data_len, new_pos)) || OB_FAIL(curr_.deserialize(buf, data_len, new_pos))) {
     PALF_LOG(ERROR, "LogConfigMeta deserialize failed", K(ret), K(new_pos));
+  } else if (LOG_CONFIG_META_VERSION_INC == version_) {
+    if (OB_FAIL(serialization::decode_i64(buf, data_len, new_pos, &prev_log_proposal_id_)) ||
+        OB_FAIL(prev_lsn_.deserialize(buf, data_len, new_pos)) ||
+        OB_FAIL(serialization::decode_i64(buf, data_len, new_pos, &prev_mode_pid_))) {
+      PALF_LOG(ERROR, "LogConfigMeta Version 2 deserialize failed", K(ret), K(new_pos));
+    } else {
+      PALF_LOG(TRACE, "LogConfigMeta Version 2 deserialize", K(*this), K(buf + pos), KP(buf), K(pos), K(new_pos));
+      pos = new_pos;
+    }
   } else {
     PALF_LOG(TRACE, "LogConfigMeta deserialize", K(*this), K(buf + pos), KP(buf), K(pos), K(new_pos));
     pos = new_pos;
@@ -607,6 +737,11 @@ DEFINE_GET_SERIALIZE_SIZE(LogConfigMeta)
   size += serialization::encoded_length_i64(proposal_id_);
   size += prev_.get_serialize_size();
   size += curr_.get_serialize_size();
+  if (LOG_CONFIG_META_VERSION_INC == version_) {
+    size += serialization::encoded_length_i64(prev_log_proposal_id_);
+    size += prev_lsn_.get_serialize_size();
+    size += serialization::encoded_length_i64(prev_mode_pid_);
+  }
   return size;
 }
 

@@ -690,6 +690,12 @@ int ObAdminDumpBackupDataExecutor::do_execute_()
       }
       break;
     }
+    case share::ObBackupFileType::BACKUP_DELETED_TABLET_INFO: {
+      if (OB_FAIL(print_deleted_tablet_info_())) {
+        STORAGE_LOG(WARN, "failed to print deleted tablet info", K(ret));
+      }
+      break;
+    }
     case share::ObBackupFileType::BACKUP_TENANT_LOCALITY_INFO: {
       if (OB_FAIL(print_tenant_locality_info_())) {
         STORAGE_LOG(WARN, "failed to print meta index file", K(ret));
@@ -1298,6 +1304,26 @@ int ObAdminDumpBackupDataExecutor::print_tablet_to_ls_info_()
   } else {
     ARRAY_FOREACH_X(tablet_to_ls_desc.tablet_to_ls_, i , cnt, OB_SUCC(ret)) {
       const share::ObBackupDataTabletToLSInfo tablet_to_ls = tablet_to_ls_desc.tablet_to_ls_.at(i);
+      if (OB_FAIL(dump_tablet_to_ls_info_(tablet_to_ls))) {
+        STORAGE_LOG(WARN, "fail to dump ls attr info", K(ret), K(tablet_to_ls));
+      }
+    }
+  }
+  PrintHelper::print_end_line();
+  return ret;
+}
+
+int ObAdminDumpBackupDataExecutor::print_deleted_tablet_info_()
+{
+  int ret = OB_SUCCESS;
+  share::ObBackupDeletedTabletToLSDesc deleted_tablet_to_ls;
+  if (OB_FAIL(inner_print_common_header_(backup_path_, storage_info_))) {
+    STORAGE_LOG(WARN, "fail to inner print common header", K(ret));
+  } else if (OB_FAIL(ObAdminDumpBackupDataUtil::read_backup_info_file(ObString(backup_path_), ObString(storage_info_), deleted_tablet_to_ls))) {
+    STORAGE_LOG(WARN, "fail to read tablet to ls info", K(ret), K(backup_path_), K(storage_info_));
+  } else {
+    ARRAY_FOREACH_X(deleted_tablet_to_ls.deleted_tablet_to_ls_, i , cnt, OB_SUCC(ret)) {
+      const share::ObBackupDataTabletToLSInfo tablet_to_ls = deleted_tablet_to_ls.deleted_tablet_to_ls_.at(i);
       if (OB_FAIL(dump_tablet_to_ls_info_(tablet_to_ls))) {
         STORAGE_LOG(WARN, "fail to dump ls attr info", K(ret), K(tablet_to_ls));
       }
@@ -2124,7 +2150,7 @@ int ObAdminDumpBackupDataExecutor::dump_ls_attr_info_(const share::ObLSAttr &ls_
   PrintHelper::print_dump_title("ls_attr info");
   PrintHelper::print_dump_line("ls_id", ls_attr.get_ls_id().id());
   PrintHelper::print_dump_line("ls_group_id", ls_attr.get_ls_group_id());
-  PrintHelper::print_dump_line("flag", ls_attr.get_ls_flag());
+  PrintHelper::print_dump_line("flag", ls_attr.get_ls_flag().get_flag_value());
   PrintHelper::print_dump_line("status", ls_attr.get_ls_status());
   PrintHelper::print_dump_line("operation_type", ls_attr.get_ls_operatin_type());
   return ret;
@@ -2214,6 +2240,13 @@ int ObAdminDumpBackupDataExecutor::dump_backup_ls_meta_infos_file_(const share::
 int ObAdminDumpBackupDataExecutor::dump_backup_set_info(const share::ObBackupSetFileDesc &backup_set_info)
 {
   int ret = OB_SUCCESS;
+  char tenant_version_display[OB_CLUSTER_VERSION_LENGTH] = "";
+  char cluster_version_display[OB_CLUSTER_VERSION_LENGTH] = "";
+  int64_t pos =  ObClusterVersion::print_version_str(
+    tenant_version_display, OB_CLUSTER_VERSION_LENGTH, backup_set_info.tenant_compatible_);
+  pos =  ObClusterVersion::print_version_str(
+    cluster_version_display, OB_CLUSTER_VERSION_LENGTH, backup_set_info.cluster_version_);
+
   PrintHelper::print_dump_title("backup set info");
   PrintHelper::print_dump_line("tenant_id", backup_set_info.tenant_id_);
   PrintHelper::print_dump_line("backup_set_id", backup_set_info.backup_set_id_);
@@ -2241,7 +2274,12 @@ int ObAdminDumpBackupDataExecutor::dump_backup_set_info(const share::ObBackupSet
   PrintHelper::print_dump_line("backup_path", backup_set_info.backup_path_.ptr());
   PrintHelper::print_dump_line("start_replay_scn", backup_set_info.start_replay_scn_.get_val_for_logservice());
   PrintHelper::print_dump_line("min_restore_scn", backup_set_info.min_restore_scn_.get_val_for_logservice());
+<<<<<<< HEAD
   PrintHelper::print_dump_line("tenant_compatible", backup_set_info.tenant_compatible_);
+=======
+  PrintHelper::print_dump_line("tenant_compatible", tenant_version_display);
+  PrintHelper::print_dump_line("cluster_version", cluster_version_display);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   PrintHelper::print_dump_line("backup_compatible", backup_set_info.backup_compatible_);
   PrintHelper::print_dump_line("meta_turn_id", backup_set_info.meta_turn_id_);
   PrintHelper::print_dump_line("data_turn_id", backup_set_info.data_turn_id_);
@@ -2461,7 +2499,7 @@ int ObAdminDumpBackupDataExecutor::get_tenant_backup_set_infos_path_(
     STORAGE_LOG(WARN, "fail to init tmp_path", K(ret));
   } else if (OB_FAIL(target_path.join_backup_set(backup_set_dir_name))) {
     STORAGE_LOG(WARN, "fail to join backup set dir name", K(ret), K(backup_set_dir_name));
-  } else if (OB_FAIL(target_path.join(OB_STR_TENANT_BACKUP_SET_INFOS))) {
+  } else if (OB_FAIL(target_path.join(OB_STR_TENANT_BACKUP_SET_INFOS, ObBackupFileSuffix::BACKUP))) {
     STORAGE_LOG(WARN, "fail to join tenant backup set infos", K(ret), K(backup_set_dir_name));
   }
   return ret;

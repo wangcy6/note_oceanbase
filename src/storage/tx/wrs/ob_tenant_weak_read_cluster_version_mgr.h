@@ -56,7 +56,11 @@ public:
 
   /// get min server version which not smaller than base_version
   /// if no statisfied server version, return base_version
+<<<<<<< HEAD
   share::SCN get_version(const share::SCN base_version, int64_t &skip_server_count, const bool need_print_server_info) const;
+=======
+  share::SCN get_cluster_version(const share::SCN base_version, int64_t &skip_server_count, const bool need_print_server_info) const;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // get server count in cluster master cached registered servers
   int64_t get_server_count() const;

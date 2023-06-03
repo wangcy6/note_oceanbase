@@ -61,6 +61,7 @@ ObSimpleSynonymSchema &ObSimpleSynonymSchema::operator =(const ObSimpleSynonymSc
     schema_version_ = other.schema_version_;
     database_id_ = other.database_id_;
     object_database_id_ = other.object_database_id_;
+    status_ = other.status_;
     if (OB_FAIL(deep_copy_str(other.synonym_name_, synonym_name_))) {
       LOG_WARN("Fail to deep copy synonym name", K(ret));
     } else if (OB_FAIL(deep_copy_str(other.object_name_, object_name_))) {
@@ -85,6 +86,7 @@ void ObSimpleSynonymSchema::reset()
   object_database_id_ = OB_INVALID_ID;
   synonym_name_.reset();
   object_name_.reset();
+  status_ = ObObjectStatus::VALID;
 }
 
 bool ObSimpleSynonymSchema::is_valid() const
@@ -96,7 +98,8 @@ bool ObSimpleSynonymSchema::is_valid() const
       OB_INVALID_ID == database_id_ ||
       OB_INVALID_ID == object_database_id_||
       synonym_name_.empty() ||
-      object_name_.empty()) {
+      object_name_.empty() ||
+      ObObjectStatus::INVALID == status_) {
     ret = false;
   }
   return ret;
@@ -115,21 +118,21 @@ int64_t ObSimpleSynonymSchema::get_convert_size() const
 
 ObSynonymMgr::ObSynonymMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      synonym_infos_(0, NULL, ObModIds::OB_SCHEMA_SYNONYM),
-      synonym_id_map_(ObModIds::OB_SCHEMA_SYNONYM),
-      synonym_name_map_(ObModIds::OB_SCHEMA_SYNONYM)
+      synonym_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_SYNONYM, ObCtxIds::SCHEMA_SERVICE)),
+      synonym_id_map_(SET_USE_500(ObModIds::OB_SCHEMA_SYNONYM, ObCtxIds::SCHEMA_SERVICE)),
+      synonym_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_SYNONYM, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
 ObSynonymMgr::ObSynonymMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      synonym_infos_(0, NULL, ObModIds::OB_SCHEMA_SYNONYM),
-      synonym_id_map_(ObModIds::OB_SCHEMA_SYNONYM),
-      synonym_name_map_(ObModIds::OB_SCHEMA_SYNONYM)
+      synonym_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_SYNONYM, ObCtxIds::SCHEMA_SERVICE)),
+      synonym_id_map_(SET_USE_500(ObModIds::OB_SCHEMA_SYNONYM, ObCtxIds::SCHEMA_SERVICE)),
+      synonym_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_SYNONYM, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -156,7 +159,7 @@ int ObSynonymMgr::init()
 void ObSynonymMgr::reset()
 {
   if (!is_inited_) {
-    LOG_WARN("synonym manger not init");
+    LOG_WARN_RET(OB_NOT_INIT, "synonym manger not init");
   } else {
     synonym_infos_.clear();
     synonym_id_map_.clear();
@@ -357,7 +360,8 @@ int ObSynonymMgr::get_object(const uint64_t tenant_id,
                              uint64_t &synonym_id,
                              ObString &obj_table_name,
                              bool &do_exist,
-                             bool search_public_schema) const
+                             bool search_public_schema,
+                             bool *is_public) const
 {
   int ret = OB_SUCCESS;
   do_exist = false;
@@ -381,6 +385,9 @@ int ObSynonymMgr::get_object(const uint64_t tenant_id,
       LOG_DEBUG("synonym is not exist", K(tenant_id), K(cur_database_id), K(name), K(ret));
     } else {
       do_exist = true;
+      if (NULL != is_public) {
+        *is_public = is_public_database_id(cur_database_id);
+      }
     }
   }
 

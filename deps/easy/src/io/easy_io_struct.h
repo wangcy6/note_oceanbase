@@ -44,11 +44,7 @@ EASY_CPP_START
 extern easy_atomic_t easy_debug_uuid;
 #endif
 ///// define
-#ifdef PERF_MODE
-#define EASY_MAX_THREAD_CNT         128
-#else
 #define EASY_MAX_THREAD_CNT         64
-#endif
 #define EASY_IOTH_DOING_REQ_CNT     65536
 #define EASY_CONN_DOING_REQ_CNT     65536
 #define EASY_WARN_LOG_INTERVAL      100
@@ -68,6 +64,7 @@ extern easy_atomic_t easy_debug_uuid;
 #define EASY_CONN_CONNECTING        1
 #define EASY_CONN_AUTO_CONN         2
 #define EASY_CONN_CLOSE             3
+#define EASY_CONN_CLOSE_BY_PEER     4
 
 #define EASY_CLIENT_DEFAULT_TIMEOUT 4000
 #define EASY_FIRST_MSGLEN           1024

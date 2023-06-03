@@ -88,8 +88,14 @@ int ObCtxRedoInfo::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(1))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
+  } else {
+    if (OB_FAIL(compat_bytes_.init(1))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
   }
 
   return ret;
@@ -154,7 +160,7 @@ OB_DEF_SERIALIZE_SIZE(ObTxRedoLog)
   int64_t len = 0;
   if (mutator_size_ < 0) {
     len = mutator_size_;
-    TRANS_LOG(WARN, "mutator_buf_ has not set");
+    TRANS_LOG_RET(WARN, OB_ERR_UNEXPECTED, "mutator_buf_ has not set");
   } else {
     len = len + ctx_redo_info_.get_serialize_size();
     len = len + MUTATOR_SIZE_NEED_BYTES;
@@ -179,10 +185,11 @@ OB_TX_SERIALIZE_MEMBER(ObTxActiveInfoLog,
                        /* 11 */ tx_expired_time_,
                        /* 12 */ epoch_,
                        /* 13 */ last_op_sn_,
-                       /* 14 */ first_scn_,
-                       /* 15 */ last_scn_,
+                       /* 14 */ first_sn,
+                       /* 15 */ last_sn,
                        /* 16 */ cluster_version_,
-                       /* 17 */ max_submitted_seq_no_);
+                       /* 17 */ max_submitted_seq_no_,
+                       /* 18 */ xid_);
 
 OB_TX_SERIALIZE_MEMBER(ObTxCommitInfoLog,
                        compat_bytes_,
@@ -235,9 +242,17 @@ int ObTxActiveInfoLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(17))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(18))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(scheduler_.is_valid() == false, 1, compat_bytes_);
     TX_NO_NEED_SER(trans_type_ == TransType::UNKNOWN_TRANS, 2, compat_bytes_); /*trans_type_*/
     TX_NO_NEED_SER(session_id_ == 0, 3, compat_bytes_);
@@ -251,10 +266,11 @@ int ObTxActiveInfoLog::before_serialize()
     TX_NO_NEED_SER(tx_expired_time_ == 0, 11, compat_bytes_);
     TX_NO_NEED_SER(epoch_ == 0, 12, compat_bytes_);
     TX_NO_NEED_SER(last_op_sn_ == 0, 13, compat_bytes_);
-    TX_NO_NEED_SER(first_scn_ == 0, 14, compat_bytes_);
-    TX_NO_NEED_SER(last_scn_ == 0, 15, compat_bytes_);
+    TX_NO_NEED_SER(first_sn == 0, 14, compat_bytes_);
+    TX_NO_NEED_SER(last_sn == 0, 15, compat_bytes_);
     TX_NO_NEED_SER(cluster_version_ == 0, 16, compat_bytes_);
     TX_NO_NEED_SER(max_submitted_seq_no_ == 0, 17, compat_bytes_);
+    TX_NO_NEED_SER(xid_.empty(), 18, compat_bytes_);
   }
 
   return ret;
@@ -264,10 +280,17 @@ int ObTxCommitInfoLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(13))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(13))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
 
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(scheduler_.is_valid() == false, 1, compat_bytes_);
     TX_NO_NEED_SER(participants_.empty(), 2, compat_bytes_);
     TX_NO_NEED_SER(upstream_.is_valid() == false, 3, compat_bytes_);
@@ -290,9 +313,17 @@ int ObTxPrepareLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(2))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(2))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(incremental_participants_.empty(), 1, compat_bytes_);
     TX_NO_NEED_SER(prev_lsn_.is_valid() == false, 2, compat_bytes_);
   }
@@ -303,15 +334,26 @@ int ObTxCommitLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(8))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+<<<<<<< HEAD
+=======
+    if (OB_FAIL(compat_bytes_.init(8))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     TX_NO_NEED_SER(!commit_version_.is_valid(), 1, compat_bytes_);
     TX_NO_NEED_SER(checksum_ == 0, 2, compat_bytes_);
     TX_NO_NEED_SER(incremental_participants_.empty(), 3, compat_bytes_);
     TX_NO_NEED_SER(multi_source_data_.empty(), 4, compat_bytes_);
-    TX_NO_NEED_SER(trans_type_ == TransType::UNKNOWN_TRANS, 5, compat_bytes_);/*trans_type_*/
-    TX_NO_NEED_SER(false, 6, compat_bytes_); // tx_data_backup_
+    TX_NO_NEED_SER(trans_type_ == TransType::UNKNOWN_TRANS, 5, compat_bytes_); /*trans_type_*/
+    TX_NO_NEED_SER(false, 6, compat_bytes_);                                   // tx_data_backup_
     TX_NO_NEED_SER(prev_lsn_.is_valid() == false, 7, compat_bytes_);
     TX_NO_NEED_SER(ls_log_info_arr_.empty(), 8, compat_bytes_);
   }
@@ -322,9 +364,17 @@ int ObTxClearLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(1))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(1))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(incremental_participants_.empty(), 1, compat_bytes_);
   }
 
@@ -335,12 +385,21 @@ int ObTxAbortLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(2))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(2))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(multi_source_data_.empty(), 1, compat_bytes_);
     TX_NO_NEED_SER(false, 2, compat_bytes_); // tx_data_backup_
   }
+
   return ret;
 }
 
@@ -348,9 +407,17 @@ int ObTxRecordLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(2))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(2))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(prev_record_lsn_.is_valid() == false, 1, compat_bytes_);
     TX_NO_NEED_SER(redo_lsns_.empty(), 2, compat_bytes_);
   }
@@ -361,9 +428,17 @@ int ObTxStartWorkingLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(2))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(2))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(leader_epoch_ == 0, 1, compat_bytes_);
   }
   return ret;
@@ -373,9 +448,17 @@ int ObTxRollbackToLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(2))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(2))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(false, 1, compat_bytes_);
     TX_NO_NEED_SER(false, 2, compat_bytes_);
   }
@@ -387,9 +470,17 @@ int ObTxMultiDataSourceLog::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(1))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
+    if (OB_FAIL(compat_bytes_.init(1))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
     TX_NO_NEED_SER(false, 1, compat_bytes_);
   }
 
@@ -454,6 +545,8 @@ void ObTxRedoLog::reset_mutator_buf()
   mutator_size_ = -1;
 }
 
+//TODO: if ob_admin_dump is called by others and clog is encrypted,
+//      unused_encrypt_info can work. This may be perfected in the future.
 int ObTxRedoLog::ob_admin_dump(memtable::ObMemtableMutatorIterator *iter_ptr,
                                ObAdminMutatorStringArg &arg,
                                palf::block_id_t block_id,
@@ -464,6 +557,8 @@ int ObTxRedoLog::ob_admin_dump(memtable::ObMemtableMutatorIterator *iter_ptr,
 {
   int ret = OB_SUCCESS;
   int64_t pos = 0;
+  transaction::ObCLogEncryptInfo unused_encrypt_info;
+  unused_encrypt_info.init();
 
     arg.log_stat_->tx_redo_log_size_ += get_serialize_size();
   if (OB_ISNULL(iter_ptr) || OB_ISNULL(arg.writer_ptr_) || OB_ISNULL(arg.buf_)
@@ -472,7 +567,7 @@ int ObTxRedoLog::ob_admin_dump(memtable::ObMemtableMutatorIterator *iter_ptr,
     TRANS_LOG(WARN, "invalid argument", KP(iter_ptr), KP(arg.writer_ptr_), KP(arg.buf_),
               KP(mutator_buf_), KP(replay_mutator_buf_));
   } else if (OB_FAIL(iter_ptr->deserialize(replay_mutator_buf_, mutator_size_, pos,
-                                           ctx_redo_info_.clog_encrypt_info_))) {
+                                           unused_encrypt_info))) {
     TRANS_LOG(WARN, "deserialize replay_mutator_buf_ failed", K(ret));
   } else {
     bool has_output = false;
@@ -499,7 +594,8 @@ int ObTxRedoLog::ob_admin_dump(memtable::ObMemtableMutatorIterator *iter_ptr,
       //fill info in buf
     }
     bool has_dumped_meta_info = false;
-    while (OB_SUCC(iter_ptr->iterate_next_row())) {
+    memtable::ObEncryptRowBuf unused_row_buf;
+    while (OB_SUCC(iter_ptr->iterate_next_row(unused_row_buf, unused_encrypt_info))) {
       // arg.writer_ptr_->start_object();
       if (arg.filter_.is_tablet_id_valid()) {
         if (arg.filter_.get_tablet_id() != iter_ptr->get_row_head().tablet_id_) {
@@ -849,14 +945,12 @@ int ObTxMultiDataSourceLog::ob_admin_dump(ObAdminMutatorStringArg &arg)
   return ret;
 }
 
-ObTxDataBackup::ObTxDataBackup()
-{
-  reset();
-}
+ObTxDataBackup::ObTxDataBackup() { reset(); }
 
-int ObTxDataBackup::init(const storage::ObTxData *const tx_data)
+int ObTxDataBackup::init(const share::SCN &start_scn)
 {
   int ret = OB_SUCCESS;
+<<<<<<< HEAD
   if (OB_ISNULL(tx_data)) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "invalid argument", KP(tx_data));
@@ -870,13 +964,19 @@ void ObTxDataBackup::reset()
 {
   start_log_ts_.reset();
 }
+=======
+  start_log_ts_ = start_scn;
+  return ret;
+}
 
+void ObTxDataBackup::reset() { start_log_ts_.reset(); }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
-int ObTxCommitLog::init_tx_data_backup(const storage::ObTxData * const tx_data)
+int ObTxCommitLog::init_tx_data_backup(const share::SCN &start_scn)
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(tx_data_backup_.init(tx_data))) {
+  if (OB_FAIL(tx_data_backup_.init(start_scn))) {
     TRANS_LOG(WARN, "init tx_data_backup_ failed", K(ret));
   }
 
@@ -884,11 +984,11 @@ int ObTxCommitLog::init_tx_data_backup(const storage::ObTxData * const tx_data)
   return ret;
 }
 
-int ObTxAbortLog::init_tx_data_backup(const storage::ObTxData * const tx_data)
+int ObTxAbortLog::init_tx_data_backup(const share::SCN &start_scn)
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(tx_data_backup_.init(tx_data))) {
+  if (OB_FAIL(tx_data_backup_.init(start_scn))) {
     TRANS_LOG(WARN, "init tx_data_backup_ failed", K(ret));
   }
 
@@ -898,18 +998,26 @@ int ObTxAbortLog::init_tx_data_backup(const storage::ObTxData * const tx_data)
 
 // ============================== Tx Log Blcok =============================
 
-OB_TX_SERIALIZE_MEMBER(ObTxLogBlockHeader, compat_bytes_, org_cluster_id_, log_entry_no_, tx_id_);
+OB_TX_SERIALIZE_MEMBER(ObTxLogBlockHeader,
+                       compat_bytes_,
+                       org_cluster_id_,
+                       log_entry_no_,
+                       tx_id_,
+                       scheduler_);
 
 int ObTxLogBlockHeader::before_serialize()
 {
   int ret = OB_SUCCESS;
 
-  if (OB_FAIL(compat_bytes_.init(3))) {
-    TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+  if (compat_bytes_.is_inited()) {
+    if (OB_FAIL(compat_bytes_.set_all_member_need_ser())) {
+      TRANS_LOG(WARN, "reset all compat_bytes_ valid failed", K(ret));
+    }
   } else {
-    // do nothing
+    if (OB_FAIL(compat_bytes_.init(4))) {
+      TRANS_LOG(WARN, "init compat_bytes_ failed", K(ret));
+    }
   }
-
   return ret;
 }
 
@@ -920,43 +1028,46 @@ const int32_t ObTxLogBlock::DEFAULT_BIG_ROW_BLOCK_SIZE =
 
 void ObTxLogBlock::reset()
 {
-  if (nullptr != fill_buf_) {
-    ClogBufFactory::release(fill_buf_);
-  }
+  fill_buf_.reset();
   replay_buf_ = nullptr;
-  fill_buf_ = nullptr;
   len_ = pos_ = 0;
   cur_log_type_ = ObTxLogType::UNKNOWN;
   cb_arg_array_.reset();
+  big_segment_buf_ = nullptr;
 }
 
-void ObTxLogBlock::reuse(const int64_t replay_hint, const ObTxLogBlockHeader &block_header)
-{
-  int tmp_ret = OB_SUCCESS;
-  cur_log_type_ = ObTxLogType::UNKNOWN;
-  cb_arg_array_.reset();
-  pos_ = 0;
-  if (OB_TMP_FAIL(serialize_log_block_header_(replay_hint, block_header))) {
-    TRANS_LOG(ERROR, "serialize log block header error when reuse", K(tmp_ret));
-  }
-}
-
-ObTxLogBlock::ObTxLogBlock() : fill_buf_(nullptr), replay_buf_(nullptr)
-{
-  reset();
-}
-
-int ObTxLogBlock::init(const int64_t replay_hint, const ObTxLogBlockHeader &block_header)
+int ObTxLogBlock::reuse(const int64_t replay_hint, const ObTxLogBlockHeader &block_header)
 {
   int ret = OB_SUCCESS;
-  if (OB_NOT_NULL(replay_buf_) || OB_NOT_NULL(fill_buf_) || !block_header.is_valid()) {
+  cur_log_type_ = ObTxLogType::UNKNOWN;
+  cb_arg_array_.reset();
+  big_segment_buf_ = nullptr;
+  pos_ = 0;
+  if (OB_FAIL(serialize_log_block_header_(replay_hint, block_header))) {
+    TRANS_LOG(ERROR, "serialize log block header error when reuse", K(ret), KPC(this));
+  }
+  return ret;
+}
+
+ObTxLogBlock::ObTxLogBlock()
+    : replay_buf_(nullptr), len_(0), pos_(0), cur_log_type_(ObTxLogType::UNKNOWN), cb_arg_array_(),
+      big_segment_buf_(nullptr)
+{
+  // do nothing
+}
+
+int ObTxLogBlock::init(const int64_t replay_hint,
+                       const ObTxLogBlockHeader &block_header,
+                       const bool use_local_buf)
+{
+  int ret = OB_SUCCESS;
+  if (OB_NOT_NULL(replay_buf_) || !block_header.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(replay_hint), K(*this), K(block_header));
-  } else if (OB_ISNULL(fill_buf_ = ClogBufFactory::alloc())) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    TRANS_LOG(ERROR, "alloc clog buffer error", KR(ret));
+  } else if (OB_FAIL(fill_buf_.init(use_local_buf))) {
+    TRANS_LOG(WARN, "fill log buffer init error", K(ret), K(replay_hint), K(block_header), K(use_local_buf));
   } else {
-    len_ = fill_buf_->get_size();
+    len_ = fill_buf_.get_length();
     pos_ = 0;
     if (OB_FAIL(serialize_log_block_header_(replay_hint, block_header))) {
       ret = OB_SERIALIZE_ERROR;
@@ -972,8 +1083,9 @@ int ObTxLogBlock::init_with_header(const char *buf,
                                    ObTxLogBlockHeader &block_header)
 {
   int ret = OB_SUCCESS;
-  if (OB_NOT_NULL(replay_buf_) || OB_NOT_NULL(fill_buf_)
-      || OB_ISNULL(buf) || size <= 0) {
+  if (OB_NOT_NULL(replay_buf_)
+      || OB_ISNULL(buf)
+      || size <= 0) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(buf), K(size), K(*this));
   } else {
@@ -991,8 +1103,7 @@ int ObTxLogBlock::init_with_header(const char *buf,
 int ObTxLogBlock::init(const char *buf, const int64_t &size, int skip_pos, ObTxLogBlockHeader &block_header)
 {
   int ret = OB_SUCCESS;
-  if (OB_NOT_NULL(replay_buf_) || OB_NOT_NULL(fill_buf_)
-      || OB_ISNULL(buf) || size <= 0) {
+  if (OB_ISNULL(buf) || size <= 0) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(buf), K(size), K(*this));
   } else {
@@ -1015,35 +1126,97 @@ int ObTxLogBlock::rewrite_barrier_log_block(int64_t replay_hint,
   char *serialize_buf = nullptr;
   logservice::ObLogBaseHeader header(logservice::ObLogBaseType::TRANS_SERVICE_LOG_BASE_TYPE,
                                      barrier_type, replay_hint);
-  if (OB_ISNULL(fill_buf_) || OB_NOT_NULL(replay_buf_)) {
+  if (OB_ISNULL(fill_buf_.get_buf())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    serialize_buf = fill_buf_->get_buf();
+    serialize_buf = fill_buf_.get_buf();
   }
 
   if (OB_FAIL(ret)) {
     // do nothing
   } else if (OB_ISNULL(serialize_buf)) {
     ret = OB_ERR_UNEXPECTED;
-    TRANS_LOG(WARN, "unexpected empty serialize_buf", KP(serialize_buf), K(*this));
+    TRANS_LOG(WARN, "unexpected empty serialize_buf", K(*this));
   } else if (OB_FAIL(header.serialize(serialize_buf, len_, tmp_pos))) {
     TRANS_LOG(WARN, "serialize log base header error", K(ret));
+  }
+
+
+  return ret;
+}
+
+int ObTxLogBlock::set_prev_big_segment_scn(const share::SCN prev_scn)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(big_segment_buf_)) {
+    ret = OB_NOT_INIT;
+    TRANS_LOG(WARN, "invalid big segment buf", K(ret), KPC(this));
+  } else if (OB_FAIL(
+                 big_segment_buf_->set_prev_part_id(prev_scn.get_val_for_inner_table_field()))) {
+    TRANS_LOG(WARN, "set prev part scn", K(ret), KPC(this));
+  }
+  return ret;
+}
+
+int ObTxLogBlock::acquire_segment_log_buf(const char *&submit_buf,
+                                          int64_t &submit_buf_len,
+                                          const ObTxLogBlockHeader &block_header,
+                                          const ObTxLogType big_segment_log_type,
+                                          ObTxBigSegmentBuf *big_segment_buf)
+{
+  int ret = OB_SUCCESS;
+  bool need_fill_part_scn = false;
+  ObTxBigSegmentBuf *tmp_segment_buf = nullptr;
+  ObTxLogHeader log_type_header(ObTxLogType::TX_BIG_SEGMENT_LOG);
+  if (OB_ISNULL(big_segment_buf_) && OB_NOT_NULL(big_segment_buf) && big_segment_buf->is_active()) {
+    big_segment_buf_ = big_segment_buf;
+  }
+
+  if (OB_ISNULL(big_segment_buf_) || OB_ISNULL(fill_buf_.get_buf())) {
+    ret = OB_INVALID_ARGUMENT;
+    TRANS_LOG(WARN, "invalid argument", K(ret), KPC(this));
+  } else if (OB_ISNULL(big_segment_buf_) || fill_buf_.is_use_local_buf()) {
+    ret = OB_ERR_UNEXPECTED;
+    TRANS_LOG(WARN, " big segment_buf", K(ret), KPC(this));
+  } else if (OB_FALSE_IT(tmp_segment_buf = big_segment_buf_)) {
+  } else if (OB_FAIL(reuse(block_header.get_tx_id(), block_header))) {
+    TRANS_LOG(WARN, "serialize log block header failed", K(ret), K(block_header), KPC(this));
+  } else if (OB_FAIL(log_type_header.serialize(fill_buf_.get_buf(), len_, pos_))) {
+    TRANS_LOG(WARN, "serialize log type header failed", K(ret), KPC(this));
+  } else if (OB_FAIL(cb_arg_array_.push_back(ObTxCbArg(ObTxLogType::TX_BIG_SEGMENT_LOG, NULL)))) {
+    TRANS_LOG(WARN, "push the first log type arg failed", K(ret), K(*this));
+  } else if (OB_FAIL(cb_arg_array_.push_back(ObTxCbArg(big_segment_log_type, NULL)))) {
+    TRANS_LOG(WARN, "push the second log type arg failed", K(ret), K(*this));
+  } else if (OB_FAIL(tmp_segment_buf->split_one_part(fill_buf_.get_buf(), len_, pos_,
+                                                     need_fill_part_scn))) {
+    TRANS_LOG(WARN, "acquire a part of big segment failed", K(ret), K(block_header), KPC(this));
+  } else if (OB_FALSE_IT(submit_buf = fill_buf_.get_buf())) {
+  } else if (OB_FALSE_IT(submit_buf_len = pos_)) {
+  } else if (tmp_segment_buf->is_completed()) {
+    // tmp_segment_buf->reset();
+    // reset big_segment buf after set prev scn
+    ret = OB_ITER_END;
+  } else {
+    big_segment_buf_ = tmp_segment_buf;
+    cb_arg_array_.pop_back();
+    ret = OB_EAGAIN;
   }
 
   return ret;
 }
 
 int ObTxLogBlock::serialize_log_block_header_(const int64_t replay_hint,
-                                              const ObTxLogBlockHeader &block_header)
+                                              const ObTxLogBlockHeader &block_header,
+                                              const logservice::ObReplayBarrierType barrier_type)
 {
   int ret = OB_SUCCESS;
   char *serialize_buf = nullptr;
   logservice::ObLogBaseHeader header(logservice::ObLogBaseType::TRANS_SERVICE_LOG_BASE_TYPE,
-                                     logservice::ObReplayBarrierType::NO_NEED_BARRIER, replay_hint);
-  if (OB_ISNULL(fill_buf_) || OB_NOT_NULL(replay_buf_) || pos_ != 0) {
+                                     barrier_type, replay_hint);
+  if (OB_ISNULL(fill_buf_.get_buf()) || pos_ != 0) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    serialize_buf = fill_buf_->get_buf();
+    serialize_buf = fill_buf_.get_buf();
   }
 
   if (OB_FAIL(ret)) {
@@ -1053,11 +1226,10 @@ int ObTxLogBlock::serialize_log_block_header_(const int64_t replay_hint,
     TRANS_LOG(WARN, "unexpected empty serialize_buf", K(*this));
   } else if (OB_FAIL(header.serialize(serialize_buf, len_, pos_))) {
     TRANS_LOG(WARN, "serialize log base header error", K(ret));
-  // } else if (OB_FAIL(block_header.before_serialize())) {
-  //   TRANS_LOG(WARN, "block header before serialize failed", K(ret));
   } else if (OB_FAIL(block_header.serialize(serialize_buf, len_, pos_))) {
     TRANS_LOG(WARN, "serialize block header error", K(ret));
   }
+
   return ret;
 }
 
@@ -1065,7 +1237,7 @@ int ObTxLogBlock::deserialize_log_block_header_(int64_t &replay_hint, ObTxLogBlo
 {
   int ret = OB_SUCCESS;
   logservice::ObLogBaseHeader header;
-  if (OB_ISNULL(replay_buf_) || OB_NOT_NULL(fill_buf_) || pos_ != 0) {
+  if (OB_ISNULL(replay_buf_) || pos_ != 0) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(header.deserialize(replay_buf_, len_, pos_))) {
     TRANS_LOG(WARN, "deserialize log base header error", K(ret),K(len_),K(pos_));
@@ -1077,20 +1249,11 @@ int ObTxLogBlock::deserialize_log_block_header_(int64_t &replay_hint, ObTxLogBlo
   return ret;
 }
 
-ObTxLogBlock::~ObTxLogBlock()
-{
-  reset();
-  // if (nullptr != fill_buf_) {
-  //   ClogBufFactory::release(fill_buf_);
-  // }
-  // fill_buf_ = nullptr;
-  // replay_buf_ = nullptr;
-}
-
-int ObTxLogBlock::get_next_log(ObTxLogHeader &header)
+int ObTxLogBlock::get_next_log(ObTxLogHeader &header, ObTxBigSegmentBuf *big_segment_buf)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(replay_buf_) || OB_NOT_NULL(fill_buf_)) {
+  int64_t tmp_pos = pos_;
+  if (OB_ISNULL(replay_buf_)) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(*this));
   } else if (OB_SUCC(update_next_log_pos_())) {
@@ -1098,33 +1261,55 @@ int ObTxLogBlock::get_next_log(ObTxLogHeader &header)
       TRANS_LOG(WARN, "deserialize log header error", K(*this));
     } else {
       cur_log_type_ = header.get_tx_log_type();
+
+      if (ObTxLogType::TX_BIG_SEGMENT_LOG == cur_log_type_) {
+        if (OB_ISNULL(big_segment_buf)) {
+          ret = OB_INVALID_ARGUMENT;
+          TRANS_LOG(WARN, "invalid big_segment_buf", KPC(big_segment_buf));
+        } else if (OB_NOT_NULL(big_segment_buf_)) {
+          ret = OB_ERR_UNEXPECTED;
+          TRANS_LOG(WARN, "A completed big segment need be serialized", K(ret), KPC(this),
+                    K(big_segment_buf));
+        } else if (big_segment_buf->is_completed()) {
+          ret = OB_NO_NEED_UPDATE;
+          TRANS_LOG(WARN, "collect all part of big segment", K(ret));
+        } else if (OB_FAIL(big_segment_buf->collect_one_part(replay_buf_, len_, pos_))) {
+          TRANS_LOG(WARN, "merge one part of big segment failed", K(ret), KPC(this));
+          // rollback to the start position
+          pos_ = tmp_pos;
+        } else {
+          if (big_segment_buf->is_completed()) {
+            big_segment_buf_ = big_segment_buf;
+            // deserialize log_header
+            if (OB_FAIL(big_segment_buf_->deserialize_object(header))) {
+              TRANS_LOG(WARN, "deserialize log header from  big segment buf", K(ret), K(header),
+                        KPC(this));
+            } else {
+              cur_log_type_ = header.get_tx_log_type();
+            }
+          } else {
+            TRANS_LOG(INFO, "collect one part of big segment buf, need continue", K(ret),
+                      KPC(big_segment_buf), KPC(this));
+            ret = OB_LOG_TOO_LARGE;
+          }
+        }
+      }
     }
     // TRANS_LOG(INFO, "[TxLogBlock] get_next_log in replay",K(cur_log_type_), K(len_), K(pos_));
   }
   return ret;
 }
 
-char *ObTxLogBlock::get_buf()
-{
-  char *tmp_buf = nullptr;
-  if (OB_NOT_NULL(fill_buf_)) {
-    tmp_buf = fill_buf_->get_buf();
-  }
-  return tmp_buf;
-}
-
 int ObTxLogBlock::prepare_mutator_buf(ObTxRedoLog &redo)
 {
   int ret = OB_SUCCESS;
   char *tmp_buf = get_buf();
-  if (OB_ISNULL(tmp_buf) || OB_NOT_NULL(replay_buf_)) {
+  if (OB_ISNULL(tmp_buf)) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(*this));
-  } else if (ObTxLogType::TX_REDO_LOG == cur_log_type_) {
+  } else if (ObTxLogType::UNKNOWN != cur_log_type_) {
     ret = OB_EAGAIN;
-    TRANS_LOG(WARN, "MutatorBuf is using");
-  // } else if (OB_FAIL(redo.before_serialize())) {
-  //   TRANS_LOG(WARN, "before serialize for redo failed", K(ret), K(redo));
+    TRANS_LOG(WARN, "MutatorBuf is using", K(ret), KPC(this));
   } else if (OB_FAIL(redo.set_mutator_buf(tmp_buf + pos_ + ObTxLogHeader::TX_LOG_HEADER_SIZE))) {
     TRANS_LOG(WARN, "set mutator buf error", K(ret));
   } else if (OB_FAIL(
@@ -1142,7 +1327,7 @@ int ObTxLogBlock::finish_mutator_buf(ObTxRedoLog &redo, const int64_t &mutator_s
   int64_t tmp_pos = pos_;
   char * tmp_buf = get_buf();
   ObTxLogHeader header(ObTxLogType::TX_REDO_LOG);
-  if (OB_ISNULL(tmp_buf) || OB_NOT_NULL(replay_buf_)) {
+  if (OB_ISNULL(tmp_buf)) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(*this));
   } else if (ObTxLogType::TX_REDO_LOG != cur_log_type_) {
@@ -1155,6 +1340,8 @@ int ObTxLogBlock::finish_mutator_buf(ObTxRedoLog &redo, const int64_t &mutator_s
     TRANS_LOG(WARN, "set mutator buf size error after fill", K(ret));
   } else if (OB_FAIL(header.serialize(tmp_buf, len_, tmp_pos))) {
     TRANS_LOG(WARN, "serialize log header error", K(ret), K(header), K(*this));
+  } else if (OB_FAIL(redo.before_serialize())) {
+    TRANS_LOG(WARN, "before serialize for redo failed", K(ret), K(redo));
   } else if (OB_FAIL(redo.serialize(tmp_buf, len_, tmp_pos))) {
     TRANS_LOG(WARN, "serialize redo log body error", K(ret));
   } else {

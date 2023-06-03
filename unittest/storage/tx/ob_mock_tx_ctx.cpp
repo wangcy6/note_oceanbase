@@ -60,8 +60,6 @@ int MockObTxCtx::init(const ObLSID &ls_id,
 // ======================= mock trans ctx end ========================
   } else if (OB_FAIL(init_log_cbs_(ls_id, trans_id))) {
     TRANS_LOG(WARN, "init log cbs failed", KR(ret), K(trans_id), K(ls_id));
-  } else if (OB_FAIL(clog_encrypt_info_.init())) {
-    TRANS_LOG(WARN, "init clog encrypt info failed", K(ret), KPC(this), K(trans_id));
   }
 
   if (OB_SUCC(ret)) {
@@ -100,7 +98,6 @@ int MockObTxCtx::init(const ObLSID &ls_id,
     // self end
     ObPartTransCtx::addr_.parse_from_cstring("127.0.0.1:3001");
     ObPartTransCtx::addr_.set_port(3001 + (int32_t)ls_id.id());
-    need_del_ctx_ = false;
     is_inited_ = true;
   }
 
@@ -124,6 +121,13 @@ int MockObTxCtx::submit_log(const ObTwoPhaseCommitLogType& log_type)
   log_queue_.push_back(log_type);
   TRANS_LOG(INFO, "submit log success", K(log_type), KPC(this));
   return OB_SUCCESS;
+}
+
+int ObPartTransCtx::search_unsubmitted_dup_table_redo_()
+{
+  int ret = OB_SUCCESS;
+
+  return ret;
 }
 
 int MockObTxCtx::register_timeout_task_(const int64_t interval_us)
@@ -431,4 +435,5 @@ void MockObTxCtx::set_exiting_()
 }
 
 } // end namespace transaction
+
 } // end namespace oceanbase

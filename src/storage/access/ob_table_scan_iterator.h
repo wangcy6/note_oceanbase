@@ -26,6 +26,8 @@
 #include "ob_multiple_merge.h"
 #include "ob_multiple_multi_scan_merge.h"
 #include "ob_multiple_scan_merge.h"
+#include "ob_multiple_skip_scan_merge.h"
+#include "ob_multiple_multi_skip_scan_merge.h"
 #include "ob_row_sample_iterator.h"
 #include "ob_single_merge.h"
 #include "storage/tx_storage/ob_access_service.h"
@@ -54,8 +56,11 @@ public:
   void reuse();
   void reset_for_switch();
   virtual void reset();
-
   ObAccessService::ObStoreCtxGuard &get_ctx_guard() { return ctx_guard_; }
+
+  // A offline ls will disable replay status and kill all part_ctx on the follower.
+  // We can not read the uncommitted data which has not replay commit log yet.
+  int check_ls_offline_after_read();
 public:
   static constexpr int64_t RP_MAX_FREE_LIST_NUM = 1024;
   static constexpr const char LABEL[] = "RPTableScanIter";
@@ -64,6 +69,7 @@ private:
   int prepare_table_param(const ObTabletHandle &tablet_handle);
   int prepare_table_context();
   template<typename T> int init_scan_iter(T *&iter);
+  template<typename T> void reset_scan_iter(T *&iter);
   int switch_scan_param(ObMultipleMerge &iter);
   void reuse_row_iters();
   int switch_param_for_iter();
@@ -77,6 +83,7 @@ private:
   ObMultipleGetMerge *get_merge_;
   ObMultipleScanMerge *scan_merge_;
   ObMultipleMultiScanMerge *multi_scan_merge_;
+  ObMultipleSkipScanMerge *skip_scan_merge_;
   ObRowSampleIterator *row_sample_iterator_;
   ObBlockSampleIterator *block_sample_iterator_; // TODO: refactor
   // we should consider the constructor cost

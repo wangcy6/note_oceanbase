@@ -16,8 +16,11 @@
 #include <cstdint>
 #include "common/ob_role.h"     // ObRole
 #include "lib/utility/ob_macro_utils.h"
+#include "share/restore/ob_log_restore_source.h"
+
 namespace oceanbase
 {
+<<<<<<< HEAD
 namespace share
 {
 class ObLSID;
@@ -34,26 +37,25 @@ namespace palf
 {
 struct LSN;
 }
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 namespace logservice
 {
-class ObLogService;
-class ObRemoteFetchWorker;
-using oceanbase::share::ObLSID;
-using oceanbase::storage::ObLS;
-using oceanbase::storage::ObLSService;
-using oceanbase::common::ObRole;
-using oceanbase::palf::LSN;
-
-// Generate Fetch Log Task for LS
+class ObLogRestoreArchiveDriver;
+class ObLogRestoreNetDriver;
 class ObRemoteFetchLogImpl
 {
+  static const int64_t FETCH_LOG_AHEAD_THRESHOLD_US = 3 * 1000 * 1000L;  // 3s
 public:
   ObRemoteFetchLogImpl();
   ~ObRemoteFetchLogImpl();
 
-  int init(const uint64_t tenant_id, ObLSService *ls_svr, ObLogService *log_service, ObRemoteFetchWorker *worker);
+  int init(const uint64_t tenant_id,
+      ObLogRestoreArchiveDriver *archive_driver,
+      ObLogRestoreNetDriver *net_driver);
   void destroy();
+<<<<<<< HEAD
   int do_schedule();
 private:
   int do_fetch_log_(ObLS &ls);
@@ -64,13 +66,17 @@ private:
                               share::SCN &scn, LSN &lsn, int64_t &size);
   int get_palf_base_lsn_scn_(ObLS &ls, LSN &lsn, share::SCN &scn);
   int submit_fetch_log_task_(ObLS &ls, const share::SCN &scn, const LSN &lsn, const int64_t size, const int64_t proposal_id);
+=======
+  int do_schedule(const share::ObLogRestoreSourceItem &source);
+  void clean_resource();
+  void update_restore_upper_limit();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 private:
   bool inited_;
   uint64_t tenant_id_;
-  ObLSService *ls_svr_;
-  ObLogService *log_service_;
-  ObRemoteFetchWorker *worker_;
+  ObLogRestoreArchiveDriver *archive_driver_;
+  ObLogRestoreNetDriver *net_driver_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObRemoteFetchLogImpl);

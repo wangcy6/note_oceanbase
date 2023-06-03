@@ -21,6 +21,7 @@ namespace sql
 {
   class ObDMLStmt;
   class ObSelectStmt;
+  class ObDelUpdStmt;
   class ObLogPlan;
   class ObOptimizerContext;
   class ObRawExpr;
@@ -65,11 +66,6 @@ namespace sql
     EXCHANGE_NUMBERING,                                   // numbering exchange out for px
     GEN_SIGNATURE,                                  // generating plan signature
     GEN_LOCATION_CONSTRAINT,                      //generate plan location constraint, used from plan cache
-    EXPLAIN_COLLECT_WIDTH,                     // explain calculate column width
-    EXPLAIN_WRITE_BUFFER,                            // explain write plan table
-    EXPLAIN_WRITE_BUFFER_OUTPUT,             // explain write output and filters
-    EXPLAIN_WRITE_BUFFER_OUTLINE,            // explain write outline
-    EXPLAIN_INDEX_SELECTION_INFO,            // explain index selection info
     EXTRACT_PARAMS_FOR_SUBPLAN,                 // extract params for subplan
 		/**
 		 * alloc granule iterator after all other operation
@@ -87,20 +83,13 @@ namespace sql
     PX_RESCAN,
     ALLOC_MONITORING_DUMP,
     PX_ESTIMATE_SIZE,
-    BLOOM_FILTER,
+    RUNTIME_FILTER,
 
-    // dblink
-    ALLOC_LINK,
-    GEN_LINK_STMT,
     ALLOC_STARTUP_EXPR,
-    COPY_PART_EXPR,
-    TRAVERSE_OP_END
-  };
+    ADJUST_SHARED_EXPR,
 
-  struct CopyPartExprCtx {
-    common::ObSEArray<ObRawExpr*, 4> used_part_exprs_;
-    common::ObSEArray<ObRawExpr*, 4> cache_lookup_calc_part_id_exprs_;
-    common::ObSEArray<ObRawExpr*, 4> new_lookup_calc_part_id_exprs_;
+    COLLECT_BATCH_EXEC_PARAM,
+    TRAVERSE_OP_END
   };
 
   struct NumberingCtx
@@ -203,29 +192,27 @@ namespace sql
     bool exists_temp_table(const ObIArray<ObSqlTempTableInfo*> &temp_table_infos,
                            const ObSelectStmt *table_query) const;
     int init_env_info(ObDMLStmt &stmt);
-    int get_stmt_max_table_dop(ObDMLStmt &stmt,
-                               int64_t &max_dop);
-    int get_stmt_max_table_parallel_hint(ObDMLStmt &stmt,
-                                         int64_t &max_table_parallel);
-    int get_session_parallel_info(ObDMLStmt &stmt,
-                                  bool use_pdml,
-                                  bool &session_px_enable_parallel,
-                                  uint64_t &session_force_parallel_dop);
+    int get_session_parallel_info(int64_t &force_parallel_dop,
+                                  bool &enable_auto_dop,
+                                  bool &enable_manual_dop);
+    int extract_opt_ctx_basic_flags(const ObDMLStmt &stmt,
+                                    ObSQLSessionInfo &session);
+    int init_parallel_policy(ObDMLStmt &stmt, const ObSQLSessionInfo &session);
+    int set_auto_dop_params(const ObSQLSessionInfo &session);
     int check_pdml_enabled(const ObDMLStmt &stmt,
-                           const ObSQLSessionInfo &session,
-                           bool &is_use_pdml);
-    int check_pdml_supported_feature(const ObDMLStmt &stmt,
+                           const ObSQLSessionInfo &session);
+    int check_pdml_supported_feature(const ObDelUpdStmt &pdml_stmt,
                                      const ObSQLSessionInfo &session,
                                      bool &is_use_pdml);
     int check_is_heap_table(const ObDMLStmt &stmt);
-    int check_unique_index(const common::ObIArray<ObColumnRefRawExpr*> &column_exprs,
-                           bool &has_unique_index) const;
     int extract_column_usage_info(const ObDMLStmt &stmt);
     int analyze_one_expr(const ObDMLStmt &stmt, const ObRawExpr *expr);
     int add_column_usage_arg(const ObDMLStmt &stmt,
                              const ObColumnRefRawExpr &column_expr,
                              int64_t flag);
     int check_whether_contain_nested_sql(const ObDMLStmt &stmt);
+    int check_force_default_stat();
+    int calc_link_stmt_count(const ObDMLStmt &stmt, int64_t &count);
   private:
     ObOptimizerContext &ctx_;
     DISALLOW_COPY_AND_ASSIGN(ObOptimizer);

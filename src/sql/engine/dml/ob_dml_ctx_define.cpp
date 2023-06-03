@@ -116,7 +116,7 @@ OB_SERIALIZE_MEMBER(ObTriggerArg, trigger_id_, trigger_events_.bit_value_, timin
 
 OB_SERIALIZE_MEMBER(ObForeignKeyColumn, name_, idx_, name_idx_);
 
-OB_SERIALIZE_MEMBER(ObForeignKeyArg, ref_action_, table_name_, columns_, database_name_, is_self_ref_);
+OB_SERIALIZE_MEMBER(ObForeignKeyArg, ref_action_, table_name_, columns_, database_name_, is_self_ref_, table_id_);
 
 OB_SERIALIZE_MEMBER(ColumnContent,
                     projector_index_,
@@ -124,7 +124,8 @@ OB_SERIALIZE_MEMBER(ColumnContent,
                     column_name_,
                     is_nullable_,
                     is_implicit_,
-                    is_predicate_column_);
+                    is_predicate_column_,
+                    srs_id_);
 
 int SeRowkeyItem::init(
     const ObExprPtrIArray &row, ObEvalCtx &ctx, ObIAllocator &alloc, const int64_t rowkey_cnt)
@@ -163,7 +164,10 @@ bool SeRowkeyItem::operator==(
   } else {
     for (int64_t i = 0; equal && i < cnt_; ++i) {
       ObExprCmpFuncType cmp_func = row_[i]->basic_funcs_->null_first_cmp_;
-      equal = cmp_func(datums_[i], other.datums_[i]) == 0;
+      // rowkey has no lob col, can ignore ret here
+      int cmp_ret = 0;
+      (void)cmp_func(datums_[i], other.datums_[i], cmp_ret);
+      equal = cmp_ret == 0;
     }
   }
   return equal;
@@ -174,7 +178,7 @@ uint64_t SeRowkeyItem::hash() const
   uint64_t hash_val = 0;
   for (int64_t i = 0; i < cnt_; ++i) {
     ObExprHashFuncType hash_func = row_[i]->basic_funcs_->default_hash_;
-    hash_val = hash_func(datums_[i], hash_val);
+    hash_func(datums_[i], hash_val, hash_val);
   }
   return hash_val;
 }
@@ -204,7 +208,8 @@ OB_SERIALIZE_MEMBER(ObDMLBaseCtDef,
                     view_check_exprs_,
                     is_primary_index_,
                     is_heap_table_,
-                    has_instead_of_trigger_);
+                    has_instead_of_trigger_,
+                    trans_info_expr_);
 
 OB_SERIALIZE_MEMBER(ObMultiInsCtDef,
                     calc_part_id_expr_,

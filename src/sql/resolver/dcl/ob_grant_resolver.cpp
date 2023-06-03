@@ -281,7 +281,8 @@ int ObGrantResolver::priv_exists(
       因此，这里只需要判断原来的privs里是否只有一个select any dictiony即可 */
     if (sys_privs.count() != 1) {
       exists = FALSE;
-    } else if (sys_privs.at(0) != PRIV_ID_SELECT_ANY_DICTIONARY) { 
+    } else if (sys_privs.at(0) != PRIV_ID_SELECT_ANY_DICTIONARY
+               && sys_privs.at(0) != PRIV_ID_EXEMPT_ACCESS_POLICY) {
       exists = FALSE;  
     } else {
       exists = TRUE;
@@ -304,7 +305,7 @@ int ObGrantResolver::push_pack_sys_priv(
   } else {
     for (int i = PRIV_ID_NONE + 1; 
              OB_SUCC(ret) &&  i < PRIV_ID_MAX; i++) {
-      if (i != PRIV_ID_SELECT_ANY_DICTIONARY) {
+      if (i != PRIV_ID_SELECT_ANY_DICTIONARY && i != PRIV_ID_EXEMPT_ACCESS_POLICY) {
         OZ (sys_privs.push_back(i));
       }
     }
@@ -1071,6 +1072,12 @@ int ObGrantResolver::resolve_grant_obj_privileges(
           if (user_name.length() > OB_MAX_USER_NAME_LENGTH) {
             ret = OB_WRONG_USER_NAME_LENGTH;
             LOG_USER_ERROR(OB_WRONG_USER_NAME_LENGTH, user_name.length(), user_name.ptr());
+          } else if (OB_FAIL(check_dcl_on_inner_user(node->type_,
+                                                     session_info_->get_priv_user_id(),
+                                                     user_name,
+                                                     host_name))) {
+            LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user",
+                     K(ret), K(session_info_->get_user_name()), K(user_name));
           } else if (OB_FAIL(grant_stmt->add_grantee(user_name))) {
             LOG_WARN("Add grantee error", K(user_name), K(ret));
           } else if (OB_FAIL(grant_stmt->add_user(user_name, host_name, pwd, need_enc))) {
@@ -1306,6 +1313,12 @@ int ObGrantResolver::resolve_mysql(const ParseNode &parse_tree)
                 if (user_name.length() > OB_MAX_USER_NAME_LENGTH) {
                   ret = OB_WRONG_USER_NAME_LENGTH;
                   LOG_USER_ERROR(OB_WRONG_USER_NAME_LENGTH, user_name.length(), user_name.ptr());
+                } else if (OB_FAIL(check_dcl_on_inner_user(node->type_,
+                                                           session_info_->get_priv_user_id(),
+                                                           user_name,
+                                                           host_name))) {
+                  LOG_WARN("failed to check dcl on inner-user or unsupport to modify reserved user",
+                           K(ret), K(session_info_->get_user_name()), K(user_name));
                 } else if (OB_FAIL(grant_stmt->add_grantee(user_name))) {
                   LOG_WARN("Add grantee error", K(user_name), K(ret));
                 } else if (OB_FAIL(grant_stmt->add_user(user_name, host_name, pwd, need_enc))) {

@@ -177,7 +177,7 @@ private:
   // lsn of last log_entry, may be invalid if haven't generate any log_entry.
   palf::LSN last_lsn_();
 private:
-  TenantLSID tls_id_;
+  logservice::TenantLSID tls_id_;
   ObTxLogBlockBuilder block_builder_;
   ObLogLSNArray lsn_arr_;
   LSN last_record_lsn_;
@@ -199,7 +199,7 @@ private:
 int ObTxLogBlockBuilder::next_log_block()
 {
   int ret = OB_SUCCESS;
-  ObTxLogBlockHeader block_header(cluster_id_, log_entry_no_, tx_id_);
+  ObTxLogBlockHeader block_header(cluster_id_, log_entry_no_, tx_id_, common::ObAddr());
   tx_log_block_.reset();
 
   if (OB_FAIL(tx_log_block_.init(tx_id_, block_header))) {
@@ -228,7 +228,7 @@ int ObTxLogBlockBuilder::fill_redo(ObTxRedoLog &redo_log)
 
     if (OB_FAIL(mmw.append_row_buf(row_str.ptr(), row_str.length()))) {
       LOG_ERROR("append_row failed", KR(ret));
-    } else if (OB_FAIL(mmw.serialize(tmp_flag, mutator_pos))) {
+    } else if (OB_FAIL(mmw.serialize(tmp_flag, mutator_pos, encrypt_info))) {
       LOG_ERROR("serialize memtable_mutator failed", KR(ret));
     } else if (OB_FAIL(tx_log_block_.finish_mutator_buf(redo_log, mutator_pos))) {
       LOG_ERROR("finish_mutator_buf failed", KR(ret), K_(tx_log_block), K(redo_log));

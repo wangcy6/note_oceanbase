@@ -37,7 +37,6 @@ namespace rootserver
 {
 
 class ObUnitManager;
-class ObServerManager;
 class ObZoneManager;
 
 struct DRServerStatInfo
@@ -141,13 +140,11 @@ class DRLSInfo
 public:
   DRLSInfo(const uint64_t resource_tenant_id,
            ObUnitManager *unit_mgr,
-           ObServerManager *server_mgr,
            ObZoneManager *zone_mgr,
            share::schema::ObMultiVersionSchemaService *schema_service)
     : resource_tenant_id_(resource_tenant_id),
       sys_schema_guard_(),
       unit_mgr_(unit_mgr),
-      server_mgr_(server_mgr),
       zone_mgr_(zone_mgr),
       schema_service_(schema_service),
       unit_stat_info_map_(),
@@ -186,6 +183,7 @@ public:
   int64_t get_member_list_cnt() const { return member_list_cnt_; }
   int64_t get_paxos_replica_number() const { return paxos_replica_number_; }
   bool has_leader() const { return has_leader_; }
+  bool is_duplicate_ls() const { return ls_status_info_.is_duplicate_ls(); }
   int get_tenant_id(
       uint64_t &tenant_id) const;
   int get_ls_id(
@@ -201,12 +199,17 @@ public:
       DRUnitStatInfo *&unit_in_group_stat_info);
   int get_ls_status_info(
       const share::ObLSStatusInfo *&ls_status_info);
+  int get_inner_ls_info(share::ObLSInfo &inner_ls_info) const;
   int get_leader(
       common::ObAddr &leader_addr) const;
   int get_leader_and_member_list(
       common::ObAddr &leader_addr,
-      common::ObMemberList &member_list);
+      common::ObMemberList &member_list,
+      GlobalLearnerList &learner_list);
 private:
+  int construct_filtered_ls_info_to_use_(
+      const share::ObLSInfo &input_ls_info,
+      share::ObLSInfo &output_ls_info);
   // init related private func
   int gather_server_unit_stat();
   int fill_servers();
@@ -237,7 +240,6 @@ private:
   uint64_t resource_tenant_id_;
   share::schema::ObSchemaGetterGuard sys_schema_guard_;
   ObUnitManager *unit_mgr_;
-  ObServerManager *server_mgr_;
   ObZoneManager *zone_mgr_;
   share::schema::ObMultiVersionSchemaService *schema_service_;
   UnitStatInfoMap unit_stat_info_map_;

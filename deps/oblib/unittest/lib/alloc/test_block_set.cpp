@@ -37,7 +37,7 @@ public:
   {
     tallocator_.set_tenant_memory_mgr();
     tallocator_.set_limit(1000L << 20);
-    cs_.set_tenant_ctx_allocator(tallocator_, attr);
+    cs_.set_tenant_ctx_allocator(tallocator_);
   }
 
   virtual void TearDown()
@@ -173,7 +173,7 @@ TEST_F(TestBlockSet, BigBlockOrigin)
   void *p = NULL;
 
   while (cnt--) {
-    p = ob_malloc(sz);
+    p = ob_malloc(sz, ObNewModIds::TEST);
     check_ptr(p);
     ob_free(p);
   }

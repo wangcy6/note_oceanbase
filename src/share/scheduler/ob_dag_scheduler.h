@@ -15,6 +15,7 @@
 
 #include "lib/ob_define.h"
 #include "lib/allocator/ob_concurrent_fifo_allocator.h"
+#include "lib/allocator/ob_fifo_allocator.h"
 #include "lib/container/ob_se_array.h"
 #include "lib/hash/ob_hashmap.h"
 #include "lib/list/ob_dlink_node.h"
@@ -23,6 +24,7 @@
 #include "lib/profile/ob_trace_id.h"
 #include "share/rc/ob_tenant_base.h"
 #include "share/scheduler/ob_dag_scheduler_config.h"
+#include "share/ob_table_range.h"
 
 namespace oceanbase
 {
@@ -30,6 +32,8 @@ namespace compaction
 {
 struct ObTabletCompactionProgress;
 struct ObDiagnoseTabletCompProgress;
+class ObMergeDagHash;
+struct ObTabletMergeDagParam;
 }
 namespace share
 {
@@ -332,11 +336,14 @@ public:
   virtual int generate_next_dag(ObIDag *&next_dag) { UNUSED(next_dag); return common::OB_ITER_END; }
   virtual int set_result(const int32_t result) { UNUSED(result); return common::OB_SUCCESS; }
 
+  virtual bool is_ha_dag() const { return false; }
+
   DECLARE_VIRTUAL_TO_STRING;
   DISABLE_COPY_ASSIGN(ObIDag);
 public:
   virtual bool operator == (const ObIDag &other) const = 0;
   virtual int64_t hash() const = 0;
+  virtual int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   virtual int fill_comment(char *buf, const int64_t buf_len) const = 0;
   virtual int init_by_param(const ObIDagInitParam *param)
   {
@@ -346,12 +353,14 @@ public:
   virtual int create_first_task() { return common::OB_SUCCESS; }
   virtual int fill_dag_key(char *buf, const int64_t buf_len) const = 0;
   virtual lib::Worker::CompatMode get_compat_mode() const = 0;
+  virtual uint64_t get_consumer_group_id() const = 0;
   int remove_task(ObITask &task);
 
 protected:
   int dag_ret_;
   int64_t add_time_;
   int64_t start_time_;
+  uint64_t consumer_group_id_;
 
 private:
   typedef common::ObDList<ObITask> TaskList;
@@ -388,7 +397,7 @@ private:
   void dec_running_task_cnt() { --running_task_cnt_; }
   int inner_add_child_without_inheritance(ObIDag &child);
 private:
-  common::ObConcurrentFIFOAllocator allocator_;
+  common::ObFIFOAllocator allocator_;
   bool is_inited_;
   ObDagType::ObDagTypeEnum type_;
   ObDagPrio::ObDagPrioEnum priority_;
@@ -466,6 +475,7 @@ public:
   {
     return OB_SUCCESS;
   }
+  virtual bool is_ha_dag_net() const { return true; }
 public:
   friend class ObTenantDagScheduler;
 
@@ -473,6 +483,7 @@ public:
   virtual int start_running() = 0;
   virtual bool operator == (const ObIDagNet &other) const = 0;
   virtual int64_t hash() const = 0;
+  virtual int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   virtual int fill_dag_net_key(char *buf, const int64_t buf_len) const = 0;
   virtual int fill_comment(char *buf, const int64_t buf_len) const = 0;
 
@@ -498,7 +509,7 @@ struct ObDagInfo
 public:
   ObDagInfo();
   ~ObDagInfo() {}
-  TO_STRING_KV(K_(dag_type), K_(dag_net_type), K_(dag_key), K_(dag_net_key), K_(dag_id),
+  TO_STRING_KV(K_(tenant_id), K_(dag_type), K_(dag_net_type), K_(dag_key), K_(dag_net_key), K_(dag_id),
       "dag_status", ObIDag::get_dag_status_str(dag_status_),
       K_(running_task_cnt), K_(add_time), K_(start_time), K_(indegree), K_(comment));
   ObDagInfo & operator = (const ObDagInfo &other);
@@ -558,7 +569,7 @@ public:
     if (prio >= 0 && prio < PRIO_CNT) {
       bret = dlists_[prio].add_first(item);
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return bret;
   }
@@ -569,7 +580,7 @@ public:
     if (prio >= 0 && prio < PRIO_CNT) {
       bret = dlists_[prio].add_last(item);
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return bret;
   }
@@ -582,7 +593,7 @@ public:
         bret = true;
       }
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return bret;
   }
@@ -593,7 +604,7 @@ public:
     if (prio >= 0 && prio < PRIO_CNT) {
       result = dlists_[prio].get_header();
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return result;
   }
@@ -604,7 +615,7 @@ public:
     if (prio >= 0 && prio < PRIO_CNT) {
       result = dlists_[prio].get_first();
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return result;
   }
@@ -615,7 +626,7 @@ public:
     if (prio >= 0 && prio < PRIO_CNT) {
       result = dlists_[prio].remove_first();
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return result;
   }
@@ -626,7 +637,7 @@ public:
     if (prio >= 0 && prio < PRIO_CNT) {
       result = dlists_[prio].remove_last();
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return result;
   }
@@ -637,7 +648,7 @@ public:
     if (prio >= 0 && prio < PRIO_CNT) {
       bret = dlists_[prio].is_empty();
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
     return bret;
   }
@@ -665,13 +676,13 @@ public:
 
   int64_t size(const int64_t prio)
   {
-    int64_t ret = 0;
+    int64_t len = 0;
     if (prio >= 0 && prio < PRIO_CNT) {
-      ret = dlists_[prio].get_size();
+      len = dlists_[prio].get_size();
     } else {
-      COMMON_LOG(ERROR, "invalid priority", K(prio), K(PRIO_CNT));
+      COMMON_LOG_RET(ERROR, OB_INVALID_ARGUMENT, "invalid priority", K(prio), K(PRIO_CNT));
     }
-    return ret;
+    return len;
   }
 private:
   common::ObDList<T> dlists_[PRIOS];
@@ -702,9 +713,12 @@ public:
   void run1() override;
   void yield();
   void set_task(ObITask *task) { task_ = task; }
+  void set_function_type(const int64_t function_type) { function_type_ = function_type; }
+  int set_dag_resource(const uint64_t group_id);
   bool need_wake_up() const;
   ObITask *get_task() const { return task_; }
   static ObTenantDagWorker *self() { return self_; }
+  uint64_t get_group_id() { return group_id_; }
 private:
   void notify(DagWorkerStatus status);
 private:
@@ -716,6 +730,8 @@ private:
   DagWorkerStatus status_;
   int64_t check_period_;
   int64_t last_check_time_;
+  int64_t function_type_;
+  uint64_t group_id_;
   int tg_id_;
   bool is_inited_;
 };
@@ -772,7 +788,7 @@ public:
   void notify();
   void destroy();
   void get_default_config();
-  int32_t get_work_thread_num() const { return work_thread_num_; }
+  int64_t get_work_thread_num() const { return work_thread_num_; }
   bool is_empty() const
   {
     return dag_list_[READY_DAG_LIST].is_empty() && dag_list_[WAITING_DAG_LIST].is_empty()
@@ -781,8 +797,8 @@ public:
   int64_t get_cur_dag_cnt() const { return dag_cnt_; }
   int sys_task_start(ObIDag *dag);
   int64_t get_dag_count(const ObDagType::ObDagTypeEnum type);
-  int32_t get_running_task_cnt(const ObDagPrio::ObDagPrioEnum priority);
-  int32_t get_up_limit(const int64_t prio, int32_t &up_limit);
+  int64_t get_running_task_cnt(const ObDagPrio::ObDagPrioEnum priority);
+  int32_t get_up_limit(const int64_t prio, int64_t &up_limit);
   int check_dag_exist(const ObIDag *dag, bool &exist);
   int cancel_dag(const ObIDag *dag, ObIDag *parent_dag = nullptr);
   int get_all_dag_info(
@@ -795,12 +811,19 @@ public:
   int get_all_compaction_dag_info(
       ObIAllocator &allocator,
       ObIArray<compaction::ObTabletCompactionProgress *> &progress_array);
+  int get_minor_exe_dag_info(
+      const compaction::ObTabletMergeDagParam &param,
+      ObIArray<share::ObScnRange> &merge_range_array);
+  int diagnose_minor_exe_dag(
+      const compaction::ObMergeDagHash *merge_dag_info,
+      compaction::ObDiagnoseTabletCompProgress &progress);
   int get_max_major_finish_time(const int64_t version, int64_t &estimated_finish_time);
   int diagnose_dag(const ObIDag *dag, compaction::ObDiagnoseTabletCompProgress &input_progress);
   int check_ls_compaction_dag_exist(const ObLSID &ls_id, bool &exist);
   int check_dag_net_exist(
       const ObDagId &dag_id, bool &exist);
   int cancel_dag_net(const ObDagId &dag_id);
+  int get_complement_data_dag_progress(const ObIDag *dag, int64_t &row_scanned, int64_t &row_inserted);
 
 private:
   typedef common::ObDList<ObIDag> DagList;
@@ -864,9 +887,9 @@ private:
   int create_worker();
   int try_reclaim_threads();
   int schedule_one(const int64_t priority);
-  int dispatch_task(ObITask &task, ObTenantDagWorker *&ret_worker);
+  int dispatch_task(ObITask &task, ObTenantDagWorker *&ret_worker, const int64_t priority);
   void destroy_all_workers();
-  int set_thread_score(const int64_t priority, const int32_t concurrency);
+  int set_thread_score(const int64_t priority, const int64_t concurrency);
   bool try_switch(ObTenantDagWorker &worker);
   int try_switch(ObTenantDagWorker &worker, const int64_t src_prio, const int64_t dest_prio, bool &need_pause);
   void pause_worker(ObTenantDagWorker &worker, const int64_t priority);
@@ -910,16 +933,17 @@ private:
   int64_t dag_limit_;
   int64_t check_period_;
   int64_t loop_waiting_dag_list_period_;
-  int32_t total_worker_cnt_;
-  int32_t work_thread_num_;
-  int32_t default_work_thread_num_;
-  int32_t total_running_task_cnt_;
-  int32_t running_task_cnts_[ObDagPrio::DAG_PRIO_MAX];
-  int32_t low_limits_[ObDagPrio::DAG_PRIO_MAX]; // wait to delete
-  int32_t up_limits_[ObDagPrio::DAG_PRIO_MAX]; // wait to delete
+  int64_t total_worker_cnt_;
+  int64_t work_thread_num_;
+  int64_t default_work_thread_num_;
+  int64_t total_running_task_cnt_;
+  int64_t running_task_cnts_[ObDagPrio::DAG_PRIO_MAX];
+  int64_t low_limits_[ObDagPrio::DAG_PRIO_MAX]; // wait to delete
+  int64_t up_limits_[ObDagPrio::DAG_PRIO_MAX]; // wait to delete
   int64_t dag_cnts_[ObDagType::DAG_TYPE_MAX];
   int64_t dag_net_cnts_[ObDagNetType::DAG_NET_TYPE_MAX];
-  common::ObConcurrentFIFOAllocator allocator_;
+  common::ObFIFOAllocator allocator_;
+  common::ObFIFOAllocator ha_allocator_;
   PriorityWorkerList waiting_workers_; // workers waiting for time slice to run
   PriorityWorkerList running_workers_; // running workers
   WorkerList free_workers_; // free workers who have not been assigned to any task
@@ -973,7 +997,9 @@ int ObTenantDagScheduler::alloc_dag(T *&dag)
     ret = common::OB_ALLOCATE_MEMORY_FAILED;
     COMMON_LOG(WARN, "Dag Object is too large", K(ret), K(sizeof(T)));
   } else {
-    if (NULL == (buf = allocator_.alloc(sizeof(T)))) {
+    T tmp_dag;
+    common::ObFIFOAllocator *allocator = tmp_dag.is_ha_dag() ? &ha_allocator_ : &allocator_;
+    if (NULL == (buf = allocator->alloc(sizeof(T)))) {
       ret = common::OB_ALLOCATE_MEMORY_FAILED;
       COMMON_LOG(WARN, "failed to alloc dag", K(ret));
     } else {
@@ -996,8 +1022,13 @@ template<typename T>
 void ObTenantDagScheduler::free_dag_net(T *&dag_net)
 {
   if (OB_NOT_NULL(dag_net)) {
+    const bool ha_dag_net = dag_net->is_ha_dag_net();
     dag_net->~T();
-    allocator_.free(dag_net);
+    if (ha_dag_net) {
+      ha_allocator_.free(dag_net);
+    } else {
+      allocator_.free(dag_net);
+    }
     dag_net = nullptr;
   }
 }
@@ -1013,22 +1044,26 @@ int ObTenantDagScheduler::create_and_add_dag_net(const ObIDagInitParam *param, T
   if (IS_NOT_INIT) {
     ret = common::OB_NOT_INIT;
     COMMON_LOG(WARN, "scheduler is not init", K(ret));
-  } else if (NULL == (buf = allocator_.alloc(sizeof(T)))) {
-    ret = common::OB_ALLOCATE_MEMORY_FAILED;
-    COMMON_LOG(WARN, "failed to alloc dag_net", K(ret));
-  } else if (FALSE_IT(dag_net = new (buf) T())) {
-  } else if (OB_FAIL(dag_net->init_by_param(param))) {
-    COMMON_LOG(WARN, "failed to init dag_net", K(ret), KPC(dag_net));
-  } else if (FALSE_IT(dag_net->init_dag_id_())) {
-  } else if (OB_FAIL(add_dag_net(dag_net))) {
-    if (common::OB_HASH_EXIST == ret) {
-      ret = common::OB_TASK_EXIST;
-      COMMON_LOG(DEBUG, "dag_net is in blocking_dag_net_map now", K(ret), KPC(dag_net));
-    } else {
-      COMMON_LOG(WARN, "failed to add dag_net", K(ret), KPC(dag_net));
-    }
   } else {
-    notify();
+    T tmp_dag_net;
+    common::ObFIFOAllocator *allocator =  tmp_dag_net.is_ha_dag_net() ? &ha_allocator_ : &allocator_;
+    if (NULL == (buf = allocator->alloc(sizeof(T)))) {
+      ret = common::OB_ALLOCATE_MEMORY_FAILED;
+      COMMON_LOG(WARN, "failed to alloc dag_net", K(ret));
+    } else if (FALSE_IT(dag_net = new (buf) T())) {
+    } else if (OB_FAIL(dag_net->init_by_param(param))) {
+      COMMON_LOG(WARN, "failed to init dag_net", K(ret), KPC(dag_net));
+    } else if (FALSE_IT(dag_net->init_dag_id_())) {
+    } else if (OB_FAIL(add_dag_net(dag_net))) {
+      if (common::OB_HASH_EXIST == ret) {
+        ret = common::OB_TASK_EXIST;
+        COMMON_LOG(DEBUG, "dag_net is in blocking_dag_net_map now", K(ret), KPC(dag_net));
+      } else {
+        COMMON_LOG(WARN, "failed to add dag_net", K(ret), KPC(dag_net));
+      }
+    } else {
+      notify();
+    }
   }
   if (OB_FAIL(ret)) {
     free_dag_net(dag_net); // free dag_net
@@ -1084,20 +1119,6 @@ inline void dag_yield()
     worker->yield();
   }
 }
-
-#define REACH_TENANT_TIME_INTERVAL(i) \
-  ({ \
-    bool bret = false; \
-    RLOCAL_STATIC(int64_t, last_time) = ::oceanbase::common::ObTimeUtility::fast_current_time(); \
-    int64_t cur_time = ::oceanbase::common::ObTimeUtility::fast_current_time(); \
-    int64_t old_time = last_time; \
-    if (OB_UNLIKELY((i + last_time) < cur_time) \
-        && old_time == ATOMIC_CAS(&last_time, old_time, cur_time)) \
-    { \
-      bret = true; \
-    } \
-    bret; \
-  })
 
 } // namespace share
 } // namespace oceanbase

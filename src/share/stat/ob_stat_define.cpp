@@ -33,7 +33,7 @@ void ObAnalyzeSampleInfo::set_rows(double row_num)
   sample_value_ = row_num;
 }
 
-bool ObColumnStatParam::is_valid_histogram_type(const ObObjType type)
+bool ObColumnStatParam::is_valid_opt_col_type(const ObObjType type)
 {
   bool ret = false;
   // currently, we only support the following type to collect histogram
@@ -52,7 +52,22 @@ bool ObColumnStatParam::is_valid_histogram_type(const ObObjType type)
       type_class == ColumnTypeClass::ObOTimestampTC ||
       type_class == ColumnTypeClass::ObBitTC ||
       type_class == ColumnTypeClass::ObEnumSetTC ||
+      type_class == ColumnTypeClass::ObIntervalTC ||
       (lib::is_mysql_mode() && type == ObTinyTextType)) {
+    ret = true;
+  }
+  return ret;
+}
+
+bool ObColumnStatParam::is_valid_avglen_type(const ObObjType type)
+{
+  bool ret = false;
+  // currently, we only support the following type to collect avg len
+  ColumnTypeClass type_class = ob_obj_type_class(type);
+  if (is_valid_opt_col_type(type) ||
+      type_class == ColumnTypeClass::ObTextTC ||
+      type_class == ColumnTypeClass::ObRowIDTC ||
+      type_class == ColumnTypeClass::ObLobTC) {
     ret = true;
   }
   return ret;
@@ -74,6 +89,75 @@ int StatTable::assign(const StatTable &other)
   return no_regather_partition_ids_.assign(other.no_regather_partition_ids_);
 }
 
+int ObGatherTableStatsHelper::get_duration_time(sql::ParamStore &params)
+{
+  int ret = OB_SUCCESS;
+  duration_time_ = -1;
+  number::ObNumber num_duration;
+  if (OB_UNLIKELY(params.empty() || params.at(0).is_null())) {
+    // do nothing
+  } else if (lib::is_oracle_mode()) {
+    if (OB_FAIL(params.at(0).get_number(num_duration))) {
+      LOG_WARN("failed to get duration", K(ret), K(params.at(0)));
+    } else if (OB_FAIL(num_duration.extract_valid_int64_with_trunc(duration_time_))) {
+      LOG_WARN("extract_valid_int64_with_trunc failed", K(ret), K(num_duration));
+    }
+  } else if (OB_FAIL(params.at(0).get_int(duration_time_))) {
+    LOG_WARN("failed to get duration", K(ret), K(params.at(0)));
+  }
+  return ret;
+}
+
+/**
+ * @brief
+ *  The order to gather tables
+ *  1. gather user tables
+ *     if table is a 'big table', make it at last
+ *     if table is first time to gather, then gather it at first
+ *     else, gather them according to the last gather duration
+ *  2. gather sys tables
+ *     so as to user tables
+ * @param other
+ * @return true
+ * @return false
+ */
+bool ObStatTableWrapper::operator<(const ObStatTableWrapper &other) const
+{
+  bool bret = true;
+  if (this == &other) {
+    bret = false;
+  } else if (table_type_ == ObStatTableType::ObSysTable && other.table_type_ == ObStatTableType::ObUserTable) {
+    bret = false;
+  } else if ((table_type_ == ObStatTableType::ObUserTable && other.table_type_ == ObStatTableType::ObUserTable) ||
+             (table_type_ == ObStatTableType::ObSysTable && other.table_type_ == ObStatTableType::ObSysTable)) {
+    if (is_big_table_ && !other.is_big_table_) {
+      bret = false;
+    } else if ((is_big_table_ && other.is_big_table_) ||
+               (!is_big_table_ && !other.is_big_table_)) {
+      if (stat_type_ == other.stat_type_) {
+        bret = last_gather_duration_ < other.last_gather_duration_;
+      } else if (stat_type_ == ObStatType::ObStale && other.stat_type_ == ObStatType::ObFirstTimeToGather) {
+        bret = false;
+      }
+    }
+  }
+  return bret;
+}
+
+int ObStatTableWrapper::assign(const ObStatTableWrapper &other)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(stat_table_.assign(other.stat_table_))) {
+    LOG_WARN("failed to assign stat table");
+  } else {
+    table_type_ = other.table_type_;
+    stat_type_ = other.stat_type_;
+    is_big_table_ = other.is_big_table_;
+    last_gather_duration_ = other.last_gather_duration_;
+  }
+  return ret;
+}
+
 int ObTableStatParam::assign(const ObTableStatParam &other)
 {
   int ret = OB_SUCCESS;
@@ -91,10 +175,9 @@ int ObTableStatParam::assign(const ObTableStatParam &other)
   sample_info_.sample_value_ = other.sample_info_.sample_value_;
   method_opt_ = other.method_opt_;
   degree_ = other.degree_;
-  need_global_ = other.need_global_;
-  need_approx_global_ = other.need_approx_global_;
-  need_part_ = other.need_part_;
-  need_subpart_ = other.need_subpart_;
+  global_stat_param_ = other.global_stat_param_;
+  part_stat_param_ = other.part_stat_param_;
+  subpart_stat_param_ = other.subpart_stat_param_;
   granularity_ = other.granularity_;
   cascade_ = other.cascade_;
   stat_tab_ = other.stat_tab_;
@@ -116,6 +199,9 @@ int ObTableStatParam::assign(const ObTableStatParam &other)
   global_data_part_id_ = other.global_data_part_id_;
   data_table_id_ = other.data_table_id_;
   need_estimate_block_ = other.need_estimate_block_;
+  is_temp_table_ = other.is_temp_table_;
+  allocator_ = other.allocator_;
+  ref_table_type_ = other.ref_table_type_;
   if (OB_FAIL(part_infos_.assign(other.part_infos_))) {
     LOG_WARN("failed to assign", K(ret));
   } else if (OB_FAIL(subpart_infos_.assign(other.subpart_infos_))) {
@@ -147,10 +233,9 @@ int ObTableStatParam::assign_common_property(const ObTableStatParam &other)
   sample_info_.sample_value_ = other.sample_info_.sample_value_;
   method_opt_ = other.method_opt_;
   degree_ = other.degree_;
-  need_global_ = other.need_global_;
-  need_approx_global_ = other.need_approx_global_;
-  need_part_ = other.need_part_;
-  need_subpart_ = other.need_subpart_;
+  global_stat_param_ = other.global_stat_param_;
+  part_stat_param_ = other.part_stat_param_;
+  subpart_stat_param_ = other.subpart_stat_param_;
   granularity_ = other.granularity_;
   cascade_ = other.cascade_;
   stat_tab_ = other.stat_tab_;
@@ -162,6 +247,7 @@ int ObTableStatParam::assign_common_property(const ObTableStatParam &other)
   stattype_ = other.stattype_;
   need_approx_ndv_ = other.need_approx_ndv_;
   duration_time_ = other.duration_time_;
+  allocator_ = other.allocator_;
   return ret;
 }
 

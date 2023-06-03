@@ -29,6 +29,7 @@
 #include "share/rc/ob_tenant_base.h"
 #include "share/ls/ob_ls_life_manager.h"
 #include "storage/tx_storage/ob_ls_handle.h"
+#include "rootserver/ob_tenant_recovery_reportor.h"      // ObTenantRecoveryReportor
 #include "share/ob_occam_time_guard.h"
 
 namespace oceanbase
@@ -50,7 +51,7 @@ public:
   bool operator()(const ObAddr &leader, ObLSArray &ls_array)
   {
     if (OB_SUCCESS != (ret_value_ = ls_array.push_back(id_))) {
-      CLOG_LOG(WARN, "ls_array push_back failed", K(ret_value_), K(id_), K(leader));
+      CLOG_LOG_RET(WARN, ret_value_, "ls_array push_back failed", K(ret_value_), K(id_), K(leader));
     }
     return common::OB_SUCCESS == ret_value_;
   }
@@ -77,7 +78,7 @@ public:
   bool operator()(const common::ObAddr &leader, ObLSArray &ls_array)
   {
     if (OB_SUCCESS != (ret_value_ = handle_ls_array_(leader, ls_array))) {
-      CLOG_LOG(WARN, "handle_pg_array_ failed", K(ret_value_), K(ls_array), K(leader));
+      CLOG_LOG_RET(WARN, ret_value_, "handle_pg_array_ failed", K(ret_value_), K(ls_array), K(leader));
     }
     return common::OB_SUCCESS == ret_value_;
   }
@@ -87,7 +88,6 @@ private:
                        const ObLSArray &ls_array);
   int handle_rpc_response_(const ObAddr &leader,
                            const obrpc::ObQueryLSIsValidMemberResponse &response);
-  bool is_normal_readonly_replica_(ObLS *ls) const;
   int try_renew_location_(const ObLSArray &ls_array);
 private:
   obrpc::ObSrvRpcProxy *rpc_proxy_;
@@ -181,18 +181,15 @@ int ObGarbageCollector::QueryLSIsValidMemberFunctor::handle_rpc_response_(const 
         } else {}
       } else if (OB_ISNULL(ls_service_)) {
         ret = OB_ERR_UNEXPECTED;
-        CLOG_LOG(ERROR, "log stream service is NULL", K(ret));
+        CLOG_LOG(WARN, "log stream service is NULL", K(ret));
       } else if (OB_SUCCESS != (tmp_ret = ls_service_->get_ls(id, handle, ObLSGetMod::OBSERVER_MOD))) {
-        CLOG_LOG(ERROR, "get log stream failed", K(id), K(tmp_ret));
+        CLOG_LOG(WARN, "get log stream failed", K(id), K(tmp_ret));
       } else if (OB_ISNULL(ls = handle.get_ls())) {
         tmp_ret = OB_ERR_UNEXPECTED;
-        CLOG_LOG(ERROR, " log stream not exist", K(id), K(tmp_ret));
+        CLOG_LOG(WARN, " log stream not exist", K(id), K(tmp_ret));
       } else if (OB_ISNULL(gc_handler = ls->get_gc_handler())) {
         tmp_ret = OB_ERR_UNEXPECTED;
-        CLOG_LOG(ERROR, "gc_handler is NULL", K(tmp_ret), K(id));
-      } else if (is_normal_readonly_replica_(ls)) {
-        // do nothing, remove by RS
-        CLOG_LOG(INFO, "GC skip R replica", K(id));
+        CLOG_LOG(WARN, "gc_handler is NULL", K(tmp_ret), K(id));
       } else if (!is_valid_member) {
         if (OB_SUCCESS != (tmp_ret = gc_handler->gc_check_invalid_member_seq(gc_seq_, need_gc))) {
           CLOG_LOG(WARN, "gc_check_invalid_member_seq failed", K(tmp_ret), K(id), K(leader), K(gc_seq_), K(need_gc));
@@ -216,11 +213,6 @@ int ObGarbageCollector::QueryLSIsValidMemberFunctor::handle_rpc_response_(const 
     }
   }
   return ret;
-}
-
-bool ObGarbageCollector::QueryLSIsValidMemberFunctor::is_normal_readonly_replica_(ObLS *ls) const
-{
-  return ObReplicaTypeCheck::is_readonly_replica(ls->get_replica_type());
 }
 
 //---------------ObGCLSLog---------------//
@@ -298,7 +290,7 @@ DEFINE_GET_SERIALIZE_SIZE(ObGCLSLog)
 
 //---------------ObGCHandler---------------//
 ObGCHandler::ObGCHandler() : is_inited_(false),
-                             rwlock_(),
+                             rwlock_(common::ObLatchIds::GC_HANDLER_LOCK),
                              ls_(NULL),
                              gc_seq_invalid_member_(-1),
                              gc_start_ts_(OB_INVALID_TIMESTAMP)
@@ -354,7 +346,7 @@ void ObGCHandler::execute_pre_gc_process(ObGarbageCollector::LSStatus &ls_status
   }
 }
 
-int ObGCHandler::check_ls_can_offline()
+int ObGCHandler::check_ls_can_offline(const share::ObLSStatus &ls_status)
 {
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
@@ -369,9 +361,35 @@ int ObGCHandler::check_ls_can_offline()
     } else if (!is_valid_ls_gc_state(gc_state)) {
       ret = OB_STATE_NOT_MATCH;
       CLOG_LOG(WARN, "ls check gc state invalid", K(ls_id), K(gc_state));
-    } else if (is_wait_offline_finished_(gc_state)) {
+    } else if (is_ls_offline_finished_(gc_state)) {
       CLOG_LOG(INFO, "ls check_ls_can_offline success", K(ls_id), K(gc_state));
+    } else if (is_ls_blocked_state_(gc_state)) {
+      share::ObLSStatus current_ls_status = ls_status;
+      ObGarbageCollector::LSStatus ls_gc_status = ObGarbageCollector::LSStatus::LS_INVALID_STATUS;
+      if (ls_is_empty_status(ls_status)) {
+        // rpc from old version, need get real ls status from table
+        ObGarbageCollector *gc_service = MTL(logservice::ObGarbageCollector *);
+        const ObLSID &id = ls_->get_ls_id();
+        if (NULL == gc_service) {
+          CLOG_LOG(WARN, "gc_service is null", K(ret));
+        } else if (OB_FAIL(gc_service->get_ls_status_from_table(id, current_ls_status))) {
+          CLOG_LOG(WARN, "failed to get ls status from table", K(ret), K(id));
+        }
+      }
+      if (ls_is_dropping_status(current_ls_status)) {
+        ls_gc_status = ObGarbageCollector::LSStatus::LS_DROPPING;
+      } else if (ls_is_tenant_dropping_status(current_ls_status)) {
+        ls_gc_status = ObGarbageCollector::LSStatus::LS_TENANT_DROPPING;
+      }
+      // invalid ls_gc_status will return false, ret will be rewritten as OB_EAGAIN
+      if (is_tablet_clear_(ls_gc_status)) {
+        CLOG_LOG(INFO, "ls check_ls_can_offline success", K(ls_id), K(gc_state));
+      } else {
+        ret = OB_EAGAIN;
+        CLOG_LOG(WARN, "ls check_ls_can_offline need retry", K(ls_id), K(gc_state));
+      }
     } else {
+      // block log not flushed
       ret = OB_EAGAIN;
       CLOG_LOG(WARN, "ls check_ls_can_offline need retry", K(ls_id), K(gc_state));
     }
@@ -494,11 +512,6 @@ bool ObGCHandler::is_ls_wait_gc_state_(const LSGCState &state)
   return LSGCState::WAIT_GC == state;
 }
 
-bool ObGCHandler::is_wait_offline_finished_(const LSGCState &state)
-{
-  return LSGCState::WAIT_OFFLINE <= state;
-}
-
 bool ObGCHandler::is_ls_blocked_finished_(const LSGCState &state)
 {
   return LSGCState::LS_BLOCKED <= state;
@@ -535,9 +548,10 @@ int ObGCHandler::get_gts_(const int64_t timeout_us, SCN &gts_scn)
   return ret;
 }
 
-void ObGCHandler::try_check_and_set_tablet_clear_(const ObGarbageCollector::LSStatus &ls_status)
+bool ObGCHandler::is_tablet_clear_(const ObGarbageCollector::LSStatus &ls_status)
 {
   int ret = OB_SUCCESS;
+  bool bool_ret = false;
   ObLSID ls_id = ls_->get_ls_id();
   if (ObGarbageCollector::is_ls_dropping_ls_status(ls_status)) {
     //TODO: transfer完成前先统一检查事务结束
@@ -550,12 +564,12 @@ void ObGCHandler::try_check_and_set_tablet_clear_(const ObGarbageCollector::LSSt
       } else {
         CLOG_LOG(WARN, "check_all_tx_clean_up failed", K(ls_id), K(ret));
       }
-    } else if (OB_FAIL(ls_->set_gc_state(LSGCState::WAIT_OFFLINE))) {
-      CLOG_LOG(WARN, "set_gc_state failed", K(ls_id), K(ret));
     } else {
-      CLOG_LOG(INFO, "try_check_and_set_tablet_clear_ success", K(ls_id), K(ls_status));
+      bool_ret = true;
+      CLOG_LOG(INFO, "tablet is clear", K(ls_id), K(ls_status), K(bool_ret));
     }
   } else if (ObGarbageCollector::is_tenant_dropping_ls_status(ls_status)) {
+    // tenant dropping only check transaction clean
     if (OB_FAIL(ls_->check_all_tx_clean_up())) {
       if (OB_EAGAIN == ret) {
         CLOG_LOG(INFO, "check_all_tx_clean_up need retry", K(ls_id), K(ret));
@@ -565,14 +579,14 @@ void ObGCHandler::try_check_and_set_tablet_clear_(const ObGarbageCollector::LSSt
       } else {
         CLOG_LOG(WARN, "check_all_tx_clean_up failed", K(ls_id), K(ret));
       }
-    } else if (OB_FAIL(ls_->set_gc_state(LSGCState::WAIT_OFFLINE))) {
-      CLOG_LOG(WARN, "set_gc_state failed", K(ls_id), K(ret));
     } else {
-      CLOG_LOG(INFO, "try_check_and_set_tablet_clear_ success", K(ls_id), K(ls_status));
+      bool_ret = true;
+      CLOG_LOG(INFO, "tablet is clear", K(ls_id), K(ls_status));
     }
   } else {
-    CLOG_LOG(INFO, "try_check_and_set_tablet_clear_ invalid ls status", K(ls_id), K(ls_status));
+    CLOG_LOG(WARN, "invalid ls status", K(ls_id), K(ls_status));
   }
+  return bool_ret;
 }
 
 void ObGCHandler::try_check_and_set_wait_gc_(ObGarbageCollector::LSStatus &ls_status)
@@ -583,39 +597,88 @@ void ObGCHandler::try_check_and_set_wait_gc_(ObGarbageCollector::LSStatus &ls_st
   bool ignore = true;
   SCN scn = SCN::min_scn();
   LSN lsn;
+<<<<<<< HEAD
   SCN current_gts_scn = SCN::min_scn();
   LSGCState gc_state = INVALID_LS_GC_STATE;
   ObLSID ls_id = ls_->get_ls_id();
   SCN offline_scn;
+=======
+  SCN readable_scn = SCN::min_scn();
+  LSGCState gc_state = INVALID_LS_GC_STATE;
+  ObLSID ls_id = ls_->get_ls_id();
+  SCN offline_scn;
+  bool tenant_in_archive = false;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   if (OB_FAIL(ls_->get_gc_state(gc_state))) {
     CLOG_LOG(WARN, "get_gc_state failed", K(ls_id), K(ret));
   } else if (OB_FAIL(ls_->get_offline_scn(offline_scn))) {
     CLOG_LOG(WARN, "get_gc_state failed", K(ls_id), K(gc_state), K(ret));
+<<<<<<< HEAD
   } else if (OB_FAIL(get_gts_(GET_GTS_TIMEOUT_US, current_gts_scn))) {
     CLOG_LOG(WARN, "get_gts_ failed", K(ls_id), K(gc_state), K(current_gts_scn), K(ret));
   } else if (current_gts_scn.convert_to_ts() < offline_scn.convert_to_ts() + LS_CLOG_ALIVE_TIMEOUT_US) {
     CLOG_LOG(INFO, "try_check_and_set_wait_gc_ wait clog remove", K(ls_id), K(gc_state), K(current_gts_scn), K(offline_scn));
   // TODO: 归档暂不支持时间戳进度
   } else if (OB_FAIL(archive_service->get_ls_archive_progress(ls_id, lsn, force_wait, ignore))){
+=======
+  } else if (OB_FAIL(get_tenant_readable_scn_(readable_scn))) {
+    CLOG_LOG(WARN, "get_tenant_readable_scn_ failed", K(ret), K(ls_id));
+  } else if (readable_scn < offline_scn) {
+    CLOG_LOG(INFO, "try_check_and_set_wait_gc_ wait readable_scn", K(ret), K(ls_id), K(gc_state), K(offline_scn), K(readable_scn));
+  } else if (OB_FAIL(check_if_tenant_in_archive_(tenant_in_archive))) {
+    CLOG_LOG(WARN, "check_if_tenant_in_archive_ failed", K(ret), K(ls_id), K(gc_state));
+  } else if (! tenant_in_archive) {
+    if (OB_FAIL(ls_->set_gc_state(LSGCState::WAIT_GC))) {
+      CLOG_LOG(WARN, "set_gc_state failed", K(ls_id), K(gc_state), K(ret));
+    }
+    ls_status = ObGarbageCollector::LSStatus::LS_NEED_DELETE_ENTRY;
+    CLOG_LOG(INFO, "try_check_and_set_wait_gc_ success", K(ls_id), K(gc_state), K(offline_scn), K(scn));
+  } else if (OB_FAIL(archive_service->get_ls_archive_progress(ls_id, lsn, scn, force_wait, ignore))){
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     CLOG_LOG(WARN, "get_ls_archive_progress failed", K(ls_id), K(gc_state), K(offline_scn), K(ret));
   } else if (ignore) {
     if (OB_FAIL(ls_->set_gc_state(LSGCState::WAIT_GC))) {
       CLOG_LOG(WARN, "set_gc_state failed", K(ls_id), K(gc_state), K(ret));
     }
     ls_status = ObGarbageCollector::LSStatus::LS_NEED_DELETE_ENTRY;
+<<<<<<< HEAD
     CLOG_LOG(INFO, "try_check_and_set_wait_gc_ success", K(ls_id), K(gc_state), K(current_gts_scn), K(offline_scn), K(scn));
+=======
+    CLOG_LOG(INFO, "try_check_and_set_wait_gc_ success", K(ls_id), K(gc_state), K(offline_scn), K(scn));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else if (scn == offline_scn) {
     if (OB_FAIL(ls_->set_gc_state(LSGCState::WAIT_GC))) {
       CLOG_LOG(WARN, "set_gc_state failed", K(ls_id), K(gc_state), K(ret));
     }
     ls_status = ObGarbageCollector::LSStatus::LS_NEED_DELETE_ENTRY;
+<<<<<<< HEAD
     CLOG_LOG(INFO, "try_check_and_set_wait_gc_ success", K(ls_id), K(gc_state), K(current_gts_scn), K(offline_scn), K(scn));
   } else if (scn > offline_scn) {
     ret = OB_ERR_UNEXPECTED;
     CLOG_LOG(ERROR, "ls_archive_progress larger than offline scn", K(ls_id), K(gc_state), K(current_gts_scn), K(offline_scn), K(scn));
   } else {
     CLOG_LOG(INFO, "try_check_and_set_wait_gc_ wait archive", K(ls_id), K(gc_state), K(current_gts_scn), K(offline_scn), K(scn));
+=======
+    CLOG_LOG(INFO, "try_check_and_set_wait_gc_ success", K(ls_id), K(gc_state), K(offline_scn), K(scn));
+  } else if (scn > offline_scn) {
+    ret = OB_ERR_UNEXPECTED;
+    CLOG_LOG(ERROR, "ls_archive_progress larger than offline scn", K(ls_id), K(gc_state), K(offline_scn), K(scn));
+  } else {
+    CLOG_LOG(INFO, "try_check_and_set_wait_gc_ wait archive", K(ls_id), K(gc_state), K(offline_scn), K(scn));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
+}
+
+int ObGCHandler::get_tenant_readable_scn_(SCN &readable_scn)
+{
+  return MTL(rootserver::ObTenantRecoveryReportor *)->get_tenant_readable_scn(readable_scn);
+}
+
+// 由于日志流GC导致的归档日志不完整是无法被归档检查出来的异常, 因此需要保证GC与归档状态互斥;
+// 其他如clog回收/迁移复制等场景, 仅需考虑本地归档进度即可
+int ObGCHandler::check_if_tenant_in_archive_(bool &in_archive)
+{
+  return MTL(ObArchiveService*)->check_tenant_in_archive(in_archive);
 }
 
 void ObGCHandler::submit_log_(const ObGCLSLOGType log_type)
@@ -666,7 +729,7 @@ void ObGCHandler::submit_log_(const ObGCLSLOGType log_type)
         ob_usleep(WAIT_TIME);
         retry_cnt++;
         if (retry_cnt % 1000 == 0) {
-          CLOG_LOG(WARN, "GC ls log wait cb too much time", K(retry_cnt), K(log_type));
+          CLOG_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "GC ls log wait cb too much time", K(retry_cnt), K(log_type));
         }
       }
     }
@@ -779,15 +842,16 @@ void ObGCHandler::handle_gc_ls_dropping_(const ObGarbageCollector::LSStatus &ls_
       CLOG_LOG(WARN, "get_gc_state failed", K(ls_id), K(gc_state));
     } else if (!is_valid_ls_gc_state(gc_state)) {
       CLOG_LOG(WARN, "ls check gc state invalid", K(ls_id), K(gc_state));
-    } else if (is_wait_offline_finished_(gc_state)) {
+    } else if (is_ls_offline_finished_(gc_state)) {
       CLOG_LOG(INFO, "handle_gc_ls_dropping already finished", K(ls_id), K(gc_state));
     } else if (is_ls_blocked_state_(gc_state)) {
-      (void)try_check_and_set_tablet_clear_(ls_status);
+      // trigger kill all tx
+      (void)is_tablet_clear_(ls_status);
     } else {
       (void)submit_log_(ObGCLSLOGType::BLOCK_TABLET_TRANSFER_IN);
-      (void)try_check_and_set_tablet_clear_(ls_status);
+      (void)is_tablet_clear_(ls_status);
     }
-    CLOG_LOG(INFO, "ls handle_gc_ls_dropping_ finished", K(ls_id), K(role));
+    CLOG_LOG(INFO, "ls handle_gc_ls_dropping_ finished", K(ls_id), K(role), K(gc_state));
   }
 }
 
@@ -810,8 +874,8 @@ void ObGCHandler::handle_gc_ls_offline_(ObGarbageCollector::LSStatus &ls_status)
     } else if (!is_valid_ls_gc_state(gc_state)) {
       ret = OB_STATE_NOT_MATCH;
       CLOG_LOG(WARN, "ls check gc state invalid", K(ls_id), K(gc_state));
-    } else if (!is_wait_offline_finished_(gc_state)) {
-      CLOG_LOG(INFO, "ls not ready for offline", K(ls_id), K(gc_state));
+    } else if (!is_ls_blocked_finished_(gc_state)) {
+      CLOG_LOG(WARN, "ls not ready for offline", K(ls_id), K(gc_state));
     } else if (is_ls_wait_gc_state_(gc_state)) {
       ls_status = ObGarbageCollector::LSStatus::LS_NEED_DELETE_ENTRY;
       CLOG_LOG(INFO, "handle_gc_ls_offline need delete entry", K(ls_id), K(gc_state));
@@ -821,7 +885,7 @@ void ObGCHandler::handle_gc_ls_offline_(ObGarbageCollector::LSStatus &ls_status)
       (void)submit_log_(ObGCLSLOGType::OFFLINE_LS);
       (void)try_check_and_set_wait_gc_(ls_status);
     }
-    CLOG_LOG(INFO, "ls handle_gc_ls_offline finished", K(ls_id), K(role));
+    CLOG_LOG(INFO, "ls handle_gc_ls_offline finished", K(ls_id), K(role), K(gc_state));
   }
 }
 
@@ -962,6 +1026,24 @@ void ObGarbageCollector::run1()
     ob_usleep(gc_interval);
     seq_++;
   }
+}
+
+int ObGarbageCollector::get_ls_status_from_table(const ObLSID &ls_id,
+                                                 share::ObLSStatus &ls_status)
+{
+  int ret = OB_SUCCESS;
+  const int64_t tenant_id = MTL_ID();
+  ObLSStatusOperator ls_op;
+  ObLSStatusInfo status_info;
+  // sys tenant should always return LS_NORMAL
+  if (OB_SYS_TENANT_ID == tenant_id) {
+    ls_status = OB_LS_NORMAL;
+  } else if (OB_FAIL(ls_op.get_ls_status_info(tenant_id, ls_id, status_info, *sql_proxy_))) {
+    CLOG_LOG(INFO, "failed to get ls status info from table", K(ret), K(tenant_id), K(ls_id));
+  } else {
+    ls_status = status_info.status_;
+  }
+  return ret;
 }
 
 bool ObGarbageCollector::is_ls_dropping_ls_status(const LSStatus &status)
@@ -1159,15 +1241,12 @@ int ObGarbageCollector::gc_check_ls_status_(const ObLSID &id,
   ObString status_str;
   const int64_t tenant_id = MTL_ID();
   ObLSStatusOperator ls_op;
-  ObLSStatusInfo status_info;
+  share::ObLSStatus ls_status = OB_LS_NORMAL;
   GCCandidate candidate;
   candidate.ls_id_ = id;
   candidate.ls_status_ = LSStatus::LS_NORMAL;
   candidate.gc_reason_ = GCReason::INVALID_GC_REASON;
-  // sys tenant should always return LS_NORMAL
-  if (OB_SYS_TENANT_ID == tenant_id) {
-    // do nothing
-  } else if (OB_FAIL(ls_op.get_ls_status_info(tenant_id, id, status_info, *sql_proxy_))) {
+  if (OB_FAIL(get_ls_status_from_table(id, ls_status))) {
     // 对应行被删除则说明可以gc
     if (OB_ENTRY_NOT_EXIST == ret) {
       candidate.ls_status_ = LSStatus::LS_NEED_GC;
@@ -1188,7 +1267,7 @@ int ObGarbageCollector::gc_check_ls_status_(const ObLSID &id,
       }
     }
   } else {
-    candidate.set_ls_status(status_info.status_);
+    candidate.set_ls_status(ls_status);
     candidate.gc_reason_ = GCReason::INVALID_GC_REASON;
   }
   if (OB_SUCCESS == ret) {
@@ -1262,7 +1341,7 @@ int ObGarbageCollector::delete_ls_status_(const ObLSID &id)
     CLOG_LOG(WARN, "sql proxy is null", KR(ret));
   } else {
     ObLSLifeAgentManager ls_agent(*sql_proxy_);
-    if (OB_FAIL(ls_agent.drop_ls(tenant_id, id))) {
+    if (OB_FAIL(ls_agent.drop_ls(tenant_id, id, share::NORMAL_SWITCHOVER_STATUS))) {
       CLOG_LOG(WARN, "ls status table delete_ls failed", K(ret), K(id), K(tenant_id));
     } else {
       // do nothing

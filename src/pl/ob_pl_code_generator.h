@@ -77,6 +77,7 @@ public:
     jit::ObLLVMFunction spi_init_collection_;
     jit::ObLLVMFunction spi_reset_collection_;
     jit::ObLLVMFunction spi_copy_datum_;
+    jit::ObLLVMFunction spi_destruct_obj_;
     jit::ObLLVMFunction spi_sub_nestedtable_;
     jit::ObLLVMFunction spi_alloc_complex_var_;
     jit::ObLLVMFunction spi_construct_collection_;
@@ -99,6 +100,7 @@ public:
     jit::ObLLVMFunction spi_check_composite_not_null_;
     jit::ObLLVMFunction spi_update_location_;
     jit::ObLLVMFunction spi_process_resignal_error_;
+    jit::ObLLVMFunction spi_check_autonomous_trans_;
   };
 
   struct EHStack
@@ -192,7 +194,7 @@ public:
     debug_mode_(session_info_.is_pl_debug_on() && func_ast.is_routine()),
     oracle_mode_(oracle_mode)
     {
-      goto_label_map_.create(func_ast.get_body()->get_stmts().count(), ObModIds::OB_PL);
+      goto_label_map_.create(func_ast.get_body()->get_stmts().count(), "PlCodeGen");
     }
 
   virtual ~ObPLCodeGenerator() {}
@@ -200,6 +202,9 @@ public:
   int init();
   int generate(ObPLFunction &pl_func);
   int generate(ObPLPackage &pl_package);
+
+  int generate_normal(ObPLFunction &pl_func);
+  int generate_simple(ObPLFunction &pl_func);
 
   int generate_global_string(const ObString &string, jit::ObLLVMValue &str, jit::ObLLVMValue &len);
   int generate_string(const ObString &string, jit::ObLLVMValue &str, jit::ObLLVMValue &len);
@@ -216,7 +221,7 @@ public:
   int generate_sql(const ObPLSql &sql,
                    jit::ObLLVMValue &str,
                    jit::ObLLVMValue &length,
-                   jit::ObLLVMValue &id,
+                   jit::ObLLVMValue &ps_sql,
                    jit::ObLLVMValue &type,
                    jit::ObLLVMValue &for_update,
                    jit::ObLLVMValue &hidden_rowid,
@@ -242,6 +247,7 @@ public:
                          bool in_notfound,
                          bool in_warning,
                          bool signal);
+  int clean_for_loop_cursor(bool is_from_exception);
   int raise_exception(jit::ObLLVMValue &exception,
                       jit::ObLLVMValue &error_code,
                       jit::ObLLVMValue &sql_staten,
@@ -262,6 +268,7 @@ public:
                      const uint64_t &routine_id,
                      const int64_t &cursor_index,
                      const int64_t &limit,
+                     const ObUserDefinedType *user_defined_type,
                      jit::ObLLVMValue &ret_err);
   int generate_close(const ObPLStmt &s,
                      const uint64_t &package_id,
@@ -612,6 +619,7 @@ public:
                           jit::ObLLVMValue &size,
                           jit::ObLLVMValue &ptr);
   int generate_elem_desc(const ObElemDesc &obj, jit::ObLLVMValue &result);
+  int generate_check_autonomos(const ObPLStmt &s);
   int generate_spi_package_calc(uint64_t package_id,
                                 int64_t expr_idx,
                                 const ObPLStmt &s,
@@ -778,6 +786,7 @@ public:
   virtual int visit(const ObPLTrimStmt &s);
   virtual int visit(const ObPLInterfaceStmt &s);
   virtual int visit(const ObPLDoStmt &s);
+  virtual int visit(const ObPLCaseStmt &s);
 
 private:
   int find_next_procedence_condition(common::ObIArray<std::pair<ObPLConditionType, int64_t>> &conditions,

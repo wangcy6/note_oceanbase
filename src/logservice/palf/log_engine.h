@@ -19,6 +19,7 @@
 #include "log_storage.h"                               // LogStorage
 #include "log_net_service.h"                           // LogNetService
 #include "log_meta.h"                                  // LogMeta
+#include "log_define.h"
 
 namespace oceanbase
 {
@@ -47,18 +48,22 @@ class LogWriteBuf;
 class LogGroupEntryHeader;
 class TruncatePrefixBlocksCbCtx;
 class LogIOTruncatePrefixBlocksTask;
+class LogIOFlashbackTask;
+class FlashbackCbCtx;
+class LogIOPurgeThrottlingTask;
+class PurgeThrottlingCbCtx;
 
 #define OVERLOAD_SUBMIT_CHANGE_CONFIG_META_REQ(type)                                \
   virtual int submit_change_config_meta_req(const type &member_list,                \
                                             const int64_t &msg_proposal_id,         \
                                             const int64_t &prev_log_proposal_id,    \
                                             const LSN &prev_lsn,                    \
-                                            const int64_t &prev_mode_pid,   \
+                                            const int64_t &prev_mode_pid,           \
                                             const LogConfigMeta &config_meta)       \
   {                                                                                 \
     return submit_change_config_meta_req_(                                          \
         member_list, msg_proposal_id, prev_log_proposal_id, prev_lsn,               \
-        prev_mode_pid, config_meta);                                        \
+        prev_mode_pid, config_meta);                                                \
   }
 
 #define OVERLOAD_SUBMIT_PREPARE_META_REQ(type)                                \
@@ -66,6 +71,16 @@ class LogIOTruncatePrefixBlocksTask;
                                       const int64_t &log_proposal_id)         \
   {                                                                           \
     return submit_prepare_meta_req_(member_list, log_proposal_id);            \
+  }
+
+#define OVERLOAD_SUBMIT_CHANGE_MODE_META_REQ(type)                                  \
+  virtual int submit_change_mode_meta_req(const type &member_list,                  \
+                                          const int64_t &msg_proposal_id,           \
+                                          const bool is_applied_mode_meta,          \
+                                          const LogModeMeta &mode_meta)             \
+  {                                                                                 \
+    return submit_change_mode_meta_req_(member_list, msg_proposal_id,               \
+        is_applied_mode_meta, mode_meta);                                           \
   }
 
 class LogEngine
@@ -85,19 +100,28 @@ public:
            const LogMeta &log_meta,
            common::ObILogAllocator *alloc_mgr,
            ILogBlockPool *log_block_pool,
+           LogHotCache *hot_cache,
            LogRpc *log_rpc,
            LogIOWorker *log_io_worker,
-           const int64_t palf_epoch);
+           LogPlugins *plugins,
+           const int64_t palf_epoch,
+           const int64_t log_storage_block_size,
+           const int64_t log_meta_storage_block_size);
   void destroy();
 
   int load(const int64_t palf_id,
            const char *base_dir,
            common::ObILogAllocator *alloc_mgr,
            ILogBlockPool *log_block_pool,
+           LogHotCache *hot_cache,
            LogRpc *log_rpc,
            LogIOWorker *log_io_worker,
+           LogPlugins *plugins,
            LogGroupEntryHeader &entry_header,
-           const int64_t palf_epoch);
+           const int64_t palf_epoch,
+           bool &is_integrity,
+           const int64_t log_storage_size,
+           const int64_t log_meta_storage_size);
 
   // ==================== Submit async task start ================
   //
@@ -126,6 +150,8 @@ public:
 
   int submit_truncate_prefix_blocks_task(
       const TruncatePrefixBlocksCbCtx &truncate_prefix_blocks_ctx);
+  int submit_flashback_task(const FlashbackCbCtx &flashback_ctx);
+  int submit_purge_throttling_task(const PurgeThrottlingType purge_type);
 
   // ==================== Submit aysnc task end ==================
 
@@ -139,6 +165,8 @@ public:
   int read_group_entry_header(const LSN &lsn, LogGroupEntryHeader &log_group_entry_header);
   int truncate(const LSN &lsn);
   int truncate_prefix_blocks(const LSN &lsn);
+  int begin_flashback(const LSN &start_lsn_of_block);
+  int end_flashback(const LSN &start_lsn_of_block);
   int delete_block(const block_id_t &block_id);
 
   const LSN get_begin_lsn() const;
@@ -150,12 +178,14 @@ public:
   // ===================== MetaStorage start =====================
   //
   int update_base_lsn_used_for_gc(const LSN &lsn);
-  int update_max_block_id_for_switch_block_cb(const block_id_t block_id);
+  int update_manifest(const block_id_t block_id);
   int append_meta(const char *buf, const int64_t buf_len);
+  int update_log_snapshot_meta_for_flashback(const LogInfo &prev_log_inf);
   //
   // ===================== MetaStorage end =======================
 
   // ===================== NetService start ======================
+  LogNetService& get_net_service();
   // @brief: this function used to transfer log to remote node
   // @param[in] member_list: remote member list
   // @param[in] msg_proposal_id: the current proposal_id
@@ -184,16 +214,16 @@ public:
                                                             prev_lsn,
                                                             curr_lsn,
                                                             write_buf))) {
-      PALF_LOG(ERROR,
-               "LogNetService submit_group_entry_to_memberlist failed",
-               K(ret),
-               KPC(this),
-               K(member_list),
-               K(prev_log_proposal_id),
-               K(prev_lsn),
-               K(prev_log_proposal_id),
-               K(curr_lsn),
-               K(write_buf));
+      // PALF_LOG(ERROR,
+      //          "LogNetService submit_group_entry_to_memberlist failed",
+      //          K(ret),
+      //          KPC(this),
+      //          K(member_list),
+      //          K(prev_log_proposal_id),
+      //          K(prev_lsn),
+      //          K(prev_log_proposal_id),
+      //          K(curr_lsn),
+      //          K(write_buf));
     } else {
       PALF_LOG(TRACE,
                "submit_group_entry_to_memberlist success",
@@ -239,7 +269,8 @@ public:
                                        const int64_t &msg_proposal_id,
                                        const bool vote_granted,
                                        const int64_t &log_proposal_id,
-                                       const LSN &lsn,
+                                       const LSN &max_flushed_lsn,
+                                       const LSN &committed_end_lsn,
                                        const LogModeMeta &mode_meta);
 
   template <class List>
@@ -262,27 +293,50 @@ public:
     return ret;
   }
 
+  template <class List>
+  int submit_change_mode_meta_req_(
+        const List &member_list,
+        const int64_t &msg_proposal_id,
+        const bool is_applied_mode_meta,
+        const LogModeMeta &mode_meta)
+  {
+    int ret = OB_SUCCESS;
+    if (IS_NOT_INIT) {
+      ret = OB_NOT_INIT;
+    } else {
+      ret = log_net_service_.submit_change_mode_meta_req(member_list, msg_proposal_id,
+          is_applied_mode_meta, mode_meta);
+    }
+    return ret;
+  }
+
   OVERLOAD_SUBMIT_CHANGE_CONFIG_META_REQ(common::ObMemberList);
   OVERLOAD_SUBMIT_CHANGE_CONFIG_META_REQ(common::GlobalLearnerList);
-  OVERLOAD_SUBMIT_CHANGE_CONFIG_META_REQ(ResendConfigLogList);
+  OVERLOAD_SUBMIT_CHANGE_CONFIG_META_REQ(common::ResendConfigLogList);
   OVERLOAD_SUBMIT_PREPARE_META_REQ(common::ObMemberList);
   OVERLOAD_SUBMIT_PREPARE_META_REQ(common::GlobalLearnerList);
+  OVERLOAD_SUBMIT_CHANGE_MODE_META_REQ(common::ObMemberList);
+  OVERLOAD_SUBMIT_CHANGE_MODE_META_REQ(common::ResendConfigLogList);
 
   virtual int submit_change_config_meta_resp(const common::ObAddr &server,
                                              const int64_t msg_proposal_id,
                                              const LogConfigVersion &config_version);
 
-  virtual int submit_change_mode_meta_req(const common::ObMemberList &member_list,
-                                          const int64_t &msg_proposal_id,
-                                          const LogModeMeta &mode_meta);
-
   virtual int submit_change_mode_meta_resp(const common::ObAddr &server,
                                            const int64_t &msg_proposal_id);
 
+<<<<<<< HEAD
   int submit_get_memberchange_status_req(const common::ObAddr &server,
                                          const LogConfigVersion &config_version,
                                          const int64_t timeout_us,
                                          LogGetMCStResp &resp);
+=======
+  virtual int submit_config_change_pre_check_req(const common::ObAddr &server,
+                                                 const LogConfigVersion &config_version,
+                                                 const bool need_purge_throttling,
+                                                 const int64_t timeout_us,
+                                                 LogGetMCStResp &resp);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // @brief: this function used to submit fetch log request to sepcified server
   // @param[in] server: the address of remote server(data source)
@@ -317,9 +371,10 @@ public:
   virtual int submit_learner_keepalive_resp(const common::ObAddr &server,
                                             const LogLearner &sender_itself);
 
-  int submit_notify_rebuild_req(const ObAddr &server,
-                                const LSN &base_lsn,
-                                const LogInfo &base_prev_log_info);
+  virtual int submit_notify_rebuild_req(const ObAddr &server,
+                                        const LSN &base_lsn,
+                                        const LogInfo &base_prev_log_info);
+  int submit_notify_fetch_log_req(const ObMemberList &dst_list);
   int submit_committed_info_req(
       const ObAddr &server,
       const int64_t &msg_proposal_id,
@@ -359,6 +414,11 @@ public:
     return ret;
   }
 
+  int submit_get_stat_req(const common::ObAddr &server,
+                          const int64_t timeout_us,
+                          const LogGetStatReq &req,
+                          LogGetStatResp &resp);
+
   LogMeta get_log_meta() const;
   const LSN &get_base_lsn_used_for_block_gc() const;
   // not thread safe
@@ -368,38 +428,42 @@ public:
   // ===================== NetService end ========================
   LogStorage *get_log_storage() { return &log_storage_; }
   LogStorage *get_log_meta_storage() { return &log_meta_storage_; }
-  int get_total_used_disk_space(int64_t &total_used_size_byte) const;
+  int get_total_used_disk_space(int64_t &total_used_size_byte,
+                                int64_t &unrecyclable_disk_space) const;
   virtual int64_t get_palf_epoch() const { return palf_epoch_; }
   TO_STRING_KV(K_(palf_id), K_(is_inited), K_(min_block_max_scn), K_(min_block_id), K_(base_lsn_for_block_gc),
+<<<<<<< HEAD
       K_(log_meta), K_(log_meta_storage), K_(log_storage), K_(palf_epoch), KP(this));
+=======
+      K_(log_meta), K_(log_meta_storage), K_(log_storage), K_(palf_epoch), K_(last_purge_throttling_ts), KP(this));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 private:
   int submit_flush_meta_task_(const FlushMetaCbCtx &flush_meta_cb_ctx, const LogMeta &log_meta);
   int append_log_meta_(const LogMeta &log_meta);
-  int construct_log_meta_(const LSN &lsn);
+  int construct_log_meta_(const LSN &lsn, block_id_t &expected_next_block_id);
   // =========== Async callback task generate and destroy ==============
   int generate_flush_log_task_(const FlushLogCbCtx &flush_log_cb_ctx,
                                const LogWriteBuf &write_buf,
                                LogIOFlushLogTask *&flush_log_task);
-  int destroy_flush_log_task_(LogIOFlushLogTask *flush_log_task);
 
   int generate_truncate_log_task_(const TruncateLogCbCtx &truncate_log_cb_ctx,
                                   LogIOTruncateLogTask *&truncate_log_task);
-  int destroy_truncate_log_task_(LogIOTruncateLogTask *truncate_log_task);
   int generate_truncate_prefix_blocks_task_(
       const TruncatePrefixBlocksCbCtx &truncate_prefix_blocks_ctx,
       LogIOTruncatePrefixBlocksTask *&truncate_prefix_blocks_task);
-  int destroy_truncate_prefix_blocks_task_(
-      LogIOTruncatePrefixBlocksTask *truncate_prefix_blocks_task);
 
   int generate_flush_meta_task_(const FlushMetaCbCtx &flush_meta_cb_ctx,
                                 const LogMeta &log_meta,
                                 LogIOFlushMetaTask *&flush_meta_task);
-  int destroy_flush_meta_task_(LogIOFlushMetaTask *flush_meta_task);
+  int generate_flashback_task_(const FlashbackCbCtx &flashback_cb_ctx,
+                               LogIOFlashbackTask *&flashback_task);
+  int generate_purge_throttling_task_(const PurgeThrottlingCbCtx &purge_cb_ctx,
+                                      LogIOPurgeThrottlingTask *&purge_task);
   int update_config_meta_guarded_by_lock_(const LogConfigMeta &meta, LogMeta &log_meta);
   int try_clear_up_holes_and_check_storage_integrity_(
       const LSN &last_entry_begin_lsn,
-      const LogGroupEntryHeader &last_group_entry_header,
-      const block_id_t &expected_next_block_id);
+      const block_id_t &expected_next_block_id,
+      LogGroupEntryHeader &last_group_entry_header);
   bool check_last_block_whether_is_integrity_(const block_id_t expected_next_block_id,
                                               const block_id_t max_block_id,
                                               const LSN &log_storage_tail);
@@ -409,9 +473,13 @@ private:
   void reset_min_block_info_guarded_by_lock_(const block_id_t min_block_id,
                                              const share::SCN &min_block_max_scn);
 
+  int integrity_verify_(const LSN &last_meta_entry_start_lsn,
+                        const LSN &last_group_entry_header_lsn,
+                        bool &is_integrity);
 private:
   DISALLOW_COPY_AND_ASSIGN(LogEngine);
 
+  const int64_t PURGE_THROTTLING_INTERVAL = 100 * 1000;//100ml
 private:
   // used for GC
   mutable ObSpinLock block_gc_lock_;
@@ -426,10 +494,13 @@ private:
   LogNetService log_net_service_;
   common::ObILogAllocator *alloc_mgr_;
   LogIOWorker *log_io_worker_;
+  LogPlugins *plugins_;
   // Except for LogNetService, this field is just only used for debug
   int64_t palf_id_;
   // palf_epoch_ is used for identifying an uniq palf instance.
   int64_t palf_epoch_;
+  //used to control frequency of purging throttling
+  int64_t last_purge_throttling_ts_;
   bool is_inited_;
 };
 } // end namespace palf

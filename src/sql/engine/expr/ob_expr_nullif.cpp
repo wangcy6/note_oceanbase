@@ -23,6 +23,7 @@
 #include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "sql/engine/ob_exec_context.h"
+#include "sql/engine/expr/ob_expr_lob_utils.h"
 
 namespace oceanbase
 {
@@ -31,9 +32,10 @@ namespace sql
 {
 
 ObExprNullif::ObExprNullif(ObIAllocator &alloc)
-  : ObFuncExprOperator(alloc, T_FUN_SYS_NULLIF, N_NULLIF, 2, NOT_ROW_DIMENSION),
+  : ObFuncExprOperator(alloc, T_FUN_SYS_NULLIF, N_NULLIF, 2, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION),
   first_param_can_be_null_(true)
-{}
+{
+}
 
 // in engine 3.0, we have 3 copy of params
 // eg:
@@ -74,24 +76,11 @@ int ObExprNullif::se_deduce_type(ObExprResType &type,
   int ret = OB_SUCCESS;
   type.set_meta(type1.get_obj_meta());
   type.set_accuracy(type1.get_accuracy());
-  if (ob_is_string_type(type.get_type()) || ob_is_enumset_tc(type.get_type())) {
-    ObCollationLevel res_cs_level = CS_LEVEL_INVALID;
-    ObCollationType res_cs_type = CS_TYPE_INVALID;
-    OZ(ObCharset::aggregate_collation(type1.get_collation_level(), type1.get_collation_type(),
-                                      type2.get_collation_level(), type2.get_collation_type(),
-                                      res_cs_level, res_cs_type));
-    if (OB_SUCC(ret)) {
-      type.set_collation_level(res_cs_level);
-      type.set_collation_type(res_cs_type);
-      //deduce length
-      if (type.get_collation_type() == CS_TYPE_BINARY) {
-        ObLength len_in_byte = -1;
-        OZ(type1.get_length_for_meta_in_bytes(len_in_byte));
-        OX(type.set_length(len_in_byte));
-      } else {
-        type.set_length(type1.get_length());
-      }
-    }
+  if (ob_is_real_type(type.get_type()) && SCALE_UNKNOWN_YET != type1.get_scale()) {
+    type.set_precision(static_cast<ObPrecision>(ObMySQLUtil::float_length(type1.get_scale())));
+  } else if (ob_is_string_type(type.get_type()) || ob_is_enumset_tc(type.get_type())) {
+    type.set_collation_level(type1.get_collation_level());
+    type.set_collation_type(type1.get_collation_type());
   }
   if (ob_is_enumset_tc(type.get_type()) || ob_is_enumset_inner_tc(type.get_type())) {
     type.set_varchar();
@@ -113,8 +102,6 @@ int ObExprNullif::se_deduce_type(ObExprResType &type,
             type1.set_calc_type(calc_type);
             type1.set_calc_collation_type(cmp_type.get_calc_collation_type());
           }
-          //if (ob_is_enumset_tc(type2.get_type())) {
-          //}
         }
         // set calc type for type2 no matter whether calc_type is varchar or not, and no matther which param is enum.
         type2.set_calc_type(calc_type);
@@ -195,11 +182,16 @@ int ObExprNullif::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
       if (!cmp_meta.is_null()) {
         DatumCmpFunc cmp_func = NULL;
         if (rt_expr.args_[0]->datum_meta_.cs_type_ == rt_expr.args_[1]->datum_meta_.cs_type_) {
+          bool has_lob_header = rt_expr.args_[0]->obj_meta_.has_lob_header() ||
+                                rt_expr.args_[1]->obj_meta_.has_lob_header();
           cmp_func = ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
                                                             rt_expr.args_[0]->datum_meta_.type_,
                                                             rt_expr.args_[1]->datum_meta_.type_,
+                                                            rt_expr.args_[0]->datum_meta_.scale_,
+                                                            rt_expr.args_[1]->datum_meta_.scale_,
                                                             lib::is_oracle_mode(),
-                                                            rt_expr.args_[0]->datum_meta_.cs_type_);
+                                                            rt_expr.args_[0]->datum_meta_.cs_type_,
+                                                            has_lob_header);
         }
         if (NULL != cmp_func) {
           rt_expr.inner_func_cnt_ = 1;
@@ -211,8 +203,11 @@ int ObExprNullif::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
           if (OB_ISNULL(cmp_func = ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
                                                             cmp_meta.get_type(),
                                                             cmp_meta.get_type(),
+                                                            cmp_meta.get_scale(),
+                                                            cmp_meta.get_scale(),
                                                             lib::is_oracle_mode(),
-                                                            cmp_meta.get_collation_type()))){
+                                                            cmp_meta.get_collation_type(),
+                                                            cmp_meta.has_lob_header()))){
             ret = OB_INVALID_ARGUMENT;
             LOG_WARN("cmp func is null", K(ret), K(cmp_meta));
           } else {
@@ -302,8 +297,17 @@ int ObExprNullif::eval_nullif(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
   } else if (ObNullType == cast_info->cmp_meta_.type_) {
     // can compare directly.
     DatumCmpFunc cmp_func = reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[0]);
-    bool equal = cmp_e1->is_null() ? false : (0 == cmp_func(*cmp_e0, *cmp_e1));
-    if (equal) {
+    int cmp_ret = 0;
+    bool equal = false;
+    if (!cmp_e1->is_null()) {
+      if (OB_FAIL(cmp_func(*cmp_e0, *cmp_e1, cmp_ret))) {
+        LOG_WARN("cmp failed", K(ret));
+      } else {
+        equal = (0 == cmp_ret);
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (equal) {
       res.set_null();
     } else if (OB_FAIL(cast_result(*expr.args_[0], expr, ctx, cast_info->cm_, res))) {
       LOG_WARN("cast result failed", K(ret));
@@ -325,8 +329,10 @@ int ObExprNullif::eval_nullif(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
                              tmp_alloc_guard.get_allocator(), datum2))) {
       LOG_WARN("cast param failed", K(ret));
     } else {
-      bool equal = (0 == cmp_func(datum1, datum2));
-      if (equal) {
+      int cmp_ret = 0;
+      if (OB_FAIL(cmp_func(datum1, datum2, cmp_ret))) {
+        LOG_WARN("cmp failed", K(ret));
+      } else if (cmp_ret == 0) {
         res.set_null();
       } else if (OB_FAIL(cast_result(*expr.args_[0], expr, ctx, cast_info->cm_, res))) {
         LOG_WARN("cast result failed", K(ret));

@@ -25,6 +25,11 @@ static void easy_baseth_pool_invoke_debug(struct ev_loop *loop);
 static int easy_monitor_interval = 100;
 static const int64_t easy_monitor_signal = 34;
 
+int ob_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                      void *(*start_routine) (void *), void *arg);
+void ob_set_thread_name(const char* type);
+int64_t ob_update_loop_ts();
+void ob_usleep(const useconds_t v);
 /**
  * start
  */
@@ -239,7 +244,7 @@ static void *easy_baseth_pool_monitor_func(void *args)
     int64_t                 loopcnts[tp->thread_count];
     int64_t                 slowcnts[tp->thread_count];
 
-    prctl(PR_SET_NAME, "EasyBasethPoolMonitor");
+    ob_set_thread_name("EasyBasethPoolMonitor");
 
     memset(loopcnts, 0, sizeof(loopcnts));
     memset(slowcnts, 0, sizeof(slowcnts));
@@ -248,7 +253,8 @@ static void *easy_baseth_pool_monitor_func(void *args)
     easy_info_log("monitor us :%ld sec :%f", us, sec);
 
     while(tp->stoped == 0) {
-        usleep(us);
+        ob_update_loop_ts();
+        ob_usleep(us);
         ev_tstamp now = ev_time();
         easy_thread_pool_for_each(th, tp, 0) {
             ev_tstamp last = th->lastrun;
@@ -293,7 +299,7 @@ static void easy_baseth_pool_sighand(int sig, siginfo_t *sinfo, void *ucontext)
         int i, idx = 0;
         char _buffer_stack_[512];
 
-        int n = backtrace(array, 25);
+        int n = ob_backtrace_c(array, 25);
 
         if (n > 2) {
             for (i = 2; i < n; i++) idx += lnprintf(idx + _buffer_stack_, 20, "%p ", array[i]);
@@ -319,7 +325,7 @@ void easy_baseth_pool_monitor(easy_thread_pool_t *tp)
       sigemptyset(&sa.sa_mask);
       rc = sigaction(easy_monitor_signal, &sa, NULL);
 
-      err = pthread_create(&tp->monitor_tid, NULL, easy_baseth_pool_monitor_func, tp);
+      err = ob_pthread_create(&tp->monitor_tid, NULL, easy_baseth_pool_monitor_func, tp);
       if (err != 0) {
         tp->monitor_tid = 0;
         easy_error_log("sigaction: %d, monitor_thread: 0x%lx, err:%d, errno:%d", rc, tp->monitor_tid, err, errno);

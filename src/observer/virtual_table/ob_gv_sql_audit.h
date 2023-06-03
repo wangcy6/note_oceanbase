@@ -54,6 +54,7 @@ public:
   bool is_index_scan() const { return is_use_index_; }
 
 private:
+  bool is_perf_event_dep_field(uint64_t col_id);
   int fill_cells(obmysql::ObMySQLRequestRecord &record);
   int extract_tenant_ids();
   int extract_request_ids(const uint64_t tenant_id,
@@ -158,7 +159,13 @@ private:
     PLAN_HASH,
     USER_GROUP,
     LOCK_FOR_READ_TIME,
-    PARAMS_VALUE
+    PARAMS_VALUE,
+    RULE_NAME,
+    PROXY_SESSION_ID,
+    TX_INTERNAL_ROUTE_FLAG,
+
+    PARTITION_HIT,
+    TX_INTERNAL_ROUTE_VERSION,
   };
 
   const static int64_t PRI_KEY_IP_IDX        = 0;

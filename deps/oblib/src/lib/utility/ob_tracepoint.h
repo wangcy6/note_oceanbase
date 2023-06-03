@@ -26,6 +26,7 @@
 #include "lib/list/ob_dlist.h"
 #include "lib/coro/co_var.h"
 #include "lib/time/ob_tsc_timestamp.h"
+#include "lib/utility/ob_macro_utils.h"
 
 #define TP_COMMA(x) ,
 #define TP_EMPTY(x)
@@ -102,23 +103,35 @@ private:
 #define EVENT_CALL(event_no, ...) ({ \
       EventItem item; \
       item = ::oceanbase::common::EventTable::instance().get_event(event_no); \
-      item.call(); })
+      item.call(SELECT(1, ##__VA_ARGS__)); })
 
 #define ERRSIM_POINT_DEF(name) void name##name(){}; static oceanbase::common::NamedEventItem name( \
     #name, oceanbase::common::EventTable::global_item_list());
 #define ERRSIM_POINT_CALL(name) name?:
 
+// doc:
+
 // to check if a certain tracepoint is set
-#define E(event_no, ...)  \
+// example: if (E(50) OB_SUCCESS) {...}
+// you can also specify condition:
+// if (E(50, session_id) OB_SUCCESS) { ... }
+// which means:
+//   check whether event 50 of session_id was raised
+#define OB_E(event_no, ...)  \
   EVENT_CALL(event_no, ##__VA_ARGS__)?:
 
 // to set a particular tracepoint
-#define TP_SET_EVENT(id, error_in, occur, trigger_freq)                 \
+// example: TP_SET_EVENT(50, 4016, 1, 1)
+// specify condition: TP_SET_EVENT(50, 4016, 1, 1, 3302201)
+// which means:
+//   when session id is 3302201, trigger event 50 with error -4016
+#define TP_SET_EVENT(id, error_in, occur, trigger_freq, ...)            \
   {                                                                     \
     EventItem item;                                                     \
     item.error_code_ = error_in;                                        \
     item.occur_ = occur;                                                \
     item.trigger_freq_ = trigger_freq;                                  \
+    item.cond_ = SELECT(1, ##__VA_ARGS__, 0);                           \
     ::oceanbase::common::EventTable::instance().set_event(id, item);    \
   }
 
@@ -205,12 +218,16 @@ struct EventItem
   int64_t occur_;            // number of occurrences
   int64_t trigger_freq_;         // trigger frequency
   int64_t error_code_;        // error code to return
+  int64_t cond_;
 
   EventItem()
     : occur_(0),
       trigger_freq_(0),
-      error_code_(0) {}
-  int call(void) const
+      error_code_(0),
+      cond_(0) {}
+
+  int call(const int64_t v) const { return cond_ == v ? call() : 0; }
+  int call() const
   {
     int ret = 0;
     if (OB_LIKELY(trigger_freq_ == 0)) {
@@ -219,7 +236,10 @@ struct EventItem
       ret = 0;
     } else if (trigger_freq_ == 1) {
       ret = static_cast<int>(error_code_);
-      if (REACH_TIME_INTERVAL(1 * 1000 * 1000)) {
+#ifdef NDEBUG
+      if (REACH_TIME_INTERVAL(1 * 1000 * 1000))
+#endif
+      {
         COMMON_LOG(WARN, "[ERRSIM] sim error", K(ret));
       }
     } else {
@@ -310,8 +330,6 @@ class EventTable
       EN_GET_GTS_LEADER = 47,
       ALLOC_LOG_ID_AND_TIMESTAMP_ERROR = 48,
       AFTER_MIGRATE_FINISH_TASK = 49,
-      EN_TRANS_START_TASK_ERROR = 50,
-      EN_TRANS_END_TASK_ERROR = 51,
       EN_VALID_MIGRATE_SRC = 52,
       EN_BALANCE_TASK_EXE_ERR = 53,
       EN_ADD_REBUILD_PARENT_SRC = 54,
@@ -501,7 +519,7 @@ class EventTable
       EN_OPEN_REMOTE_ASYNC_EXECUTION = 244,
       EN_BACKUP_DELETE_EXCEPTION_HANDLING = 245,
       EN_SORT_IMPL_FORCE_DO_DUMP = 246,
-
+      EN_ENFORCE_PUSH_DOWN_WF = 247,
       //
       EN_TRANS_SHARED_LOCK_CONFLICT = 250,
       EN_HASH_JOIN_OPTION = 251,
@@ -543,6 +561,8 @@ class EventTable
       EN_DAS_WRITE_ROW_LIST_LEN = 304,
       EN_DAS_SIMULATE_VT_CREATE_ERROR = 305,
       EN_DAS_SIMULATE_LOOKUPOP_INIT_ERROR = 306,
+      EN_DAS_SIMULATE_ASYNC_RPC_TIMEOUT = 307,
+      EN_DAS_SIMULATE_DUMP_WRITE_BUFFER = 308,
 
       EN_REPLAY_STORAGE_SCHEMA_FAILURE = 351,
       EN_SKIP_GET_STORAGE_SCHEMA = 352,
@@ -580,16 +600,44 @@ class EventTable
       EN_DDL_RELEASE_DDL_KV_FAIL = 514,
       EN_DDL_REPORT_CHECKSUM_FAIL = 515,
       EN_DDL_REPORT_REPLICA_BUILD_STATUS_FAIL = 516,
+      EN_DDL_DIRECT_LOAD_WAIT_TABLE_LOCK_FAIL = 517,
+
+      // SQL Optimizer related 551-599
+      EN_EXPLAIN_GENERATE_PLAN_WITH_OUTLINE = 551,
+      EN_ENABLE_AUTO_DOP_FORCE_PARALLEL_PLAN = 552,
+      EN_GENERATE_PLAN_WITH_RECONSTRUCT_SQL = 553,
 
       // 600-700 For PX use
       EN_PX_SQC_EXECUTE_FAILED = 600,
       EN_PX_SQC_INIT_FAILED = 601,
+      EN_PX_SQC_INIT_PROCESS_FAILED = 602,
+      EN_PX_PRINT_TARGET_MONITOR_LOG = 603,
+      EN_PX_SQC_NOT_REPORT_TO_QC = 604,
+      EN_PX_QC_EARLY_TERMINATE = 605,
+      EN_PX_SINGLE_DFO_NOT_ERASE_DTL_INTERM_RESULT = 606,
+      EN_PX_TEMP_TABLE_NOT_DESTROY_REMOTE_INTERM_RESULT = 607,
+      EN_PX_NOT_ERASE_P2P_DH_MSG = 608,
+      EN_PX_SLOW_PROCESS_SQC_FINISH_MSG = 609,
+      EN_PX_JOIN_FILTER_NOT_MERGE_MSG = 610,
       // please add new trace point after 700 or before 600
 
       // Compaction Related 700-750
       EN_COMPACTION_DIAGNOSE_TABLE_STORE_UNSAFE_FAILED = 700,
       EN_COMPACTION_DIAGNOSE_CANNOT_MAJOR = 701,
-      EN_SESSION_LEAK_COUNT_THRESHOLD = 710,
+      EN_COMPACTION_MERGE_TASK = 702,
+      EN_MEDIUM_COMPACTION_SUBMIT_CLOG_FAILED = 703,
+      EN_MEDIUM_COMPACTION_UPDATE_CUR_SNAPSHOT_FAILED = 704,
+      EN_MEDIUM_REPLICA_CHECKSUM_ERROR = 705,
+      EN_MEDIUM_CREATE_DAG = 706,
+      EN_MEDIUM_VERIFY_GROUP_SKIP_SET_VERIFY = 707,
+      EN_MEDIUM_VERIFY_GROUP_SKIP_COLUMN_CHECKSUM = 708,
+      EN_SCHEDULE_MEDIUM_COMPACTION = 709,
+      EN_SCHEDULE_MAJOR_GET_TABLE_SCHEMA = 710,
+      EN_SKIP_INDEX_MAJOR = 711,
+      EN_BUILD_DATA_MICRO_BLOCK = 712,
+
+      // please add new trace point after 750
+      EN_SESSION_LEAK_COUNT_THRESHOLD = 751,
       EN_END_PARTICIPANT = 800,
 
       //LS Migration Related 900 - 1000
@@ -613,6 +661,7 @@ class EventTable
       EN_LS_REBUILD_PREPARE_FAILED = 917,
       EN_TABLET_GC_TASK_FAILED = 918,
       EN_UPDATE_TABLET_HA_STATUS_FAILED = 919,
+      EN_GENERATE_REBUILD_TASK_FAILED = 920,
 
       // Log Archive and Restore 1001 - 1100
       EN_START_ARCHIVE_LOG_GAP = 1001,
@@ -622,7 +671,7 @@ class EventTable
       EN_RESTORE_FETCH_TABLET_INFO = 1005,
       EN_RESTORE_COPY_MACRO_BLOCK_NUM = 1006,
 
-      //Backup and Restore - 1101 - 1200
+      // START OF STORAGE HA - 1101 - 2000
       EN_BACKUP_META_REPORT_RESULT_FAILED = 1101,
       EN_RESTORE_LS_INIT_PARAM_FAILED = 1102,
       EN_RESTORE_TABLET_INIT_PARAM_FAILED = 1103,
@@ -634,7 +683,34 @@ class EventTable
       EN_ADD_BACKUP_PREFETCH_DAG_FAILED = 1109,
       EN_BACKUP_PERSIST_SET_TASK_FAILED = 1110,
       EN_BACKUP_READ_MACRO_BLOCK_FAILED = 1111,
-      
+      EN_FETCH_TABLE_INFO_RPC = 1112,
+      // END OF STORAGE HA - 1101 - 2000
+
+      // sql parameterization 1170-1180
+      EN_SQL_PARAM_FP_NP_NOT_SAME_ERROR = 1170,
+      // END OF sql parameterization 1170-1180
+
+      // session info verification
+      // The types are used for error verification
+      EN_SESS_INFO_VERI_SYS_VAR_ERROR = 1180,
+      EN_SESS_INFO_VERI_APP_INFO_ERROR = 1181,
+      EN_SESS_INFO_VERI_APP_CTX_ERROR = 1182,
+      EN_SESS_INFO_VERI_CLIENT_ID_ERROR = 1183,
+      EN_SESS_INFO_VERI_CONTROL_INFO_ERROR = 1184,
+      EN_SESS_INFO_VERI_TXN_EXTRA_INFO_ERROR = 1185,
+      EN_ENABLE_NEWSORT_FORCE = 1200,
+
+      // Transaction // 2001 - 2100
+      // Transaction free route
+      EN_TX_FREE_ROUTE_UPDATE_STATE_ERROR = 2001,
+      EN_TX_FREE_ROUTE_ENCODE_STATE_ERROR = 2002,
+      EN_TX_FREE_ROUTE_STATE_SIZE = 2003,
+      // Transaction common
+      EN_TX_RESULT_INCOMPLETE = 2011,
+      EN_THREAD_HANG = 2022,
+
+      EN_ENABLE_SET_TRACE_CONTROL_INFO = 2100,
+
       EVENT_TABLE_MAX = SIZE_OF_EVENT_TABLE
     };
 

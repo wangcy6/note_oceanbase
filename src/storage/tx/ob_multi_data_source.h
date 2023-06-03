@@ -57,6 +57,8 @@ enum class ObTxDataSourceType : int64_t
   DDL_TRANS = 6,
   // for unbind hidden tablet and reuse index tablet
   MODIFY_TABLET_BINDING = 7,
+  // for standby upgrade
+  STANDBY_UPGRADE = 8,
   MAX_TYPE = 100
 };
 
@@ -163,6 +165,10 @@ public:
                     const ObMulSourceDataNotifyArg &arg,
                     ObPartTransCtx *part_ctx,
                     int64_t &total_time);
+  static int notify_table_lock(const ObTxBufferNodeArray &array,
+                               const ObMulSourceDataNotifyArg &arg,
+                               ObPartTransCtx *part_ctx,
+                               int64_t &total_time);
 private:
   static void ob_abort_log_cb_notify_(const NotifyType type, int err_code, bool for_replay);
   static int notify_table_lock(const NotifyType type,
@@ -170,6 +176,9 @@ private:
                                const ObMulSourceDataNotifyArg &arg,
                                memtable::ObMemtableCtx *mt_ctx);
   static int notify_ls_table(const NotifyType type,
+                             const char *buf, const int64_t len,
+                             const ObMulSourceDataNotifyArg &arg);
+  static int notify_standby_upgrade(const NotifyType type,
                              const char *buf, const int64_t len,
                              const ObMulSourceDataNotifyArg &arg);
   static int notify_create_tablet(const NotifyType type,

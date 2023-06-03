@@ -71,10 +71,15 @@ void ObITableArray::reset_table(const int64_t pos)
   // maybe called by thread without tenant, such as iocallback, comment until remove tablet_handle from iocallback
   // } else if (OB_UNLIKELY(meta_mem_mgr_ != MTL(ObTenantMetaMemMgr *) || nullptr == meta_mem_mgr_)) {
   } else if (OB_ISNULL(meta_mem_mgr_) || OB_ISNULL(allocator_)) {
-    LOG_ERROR("[MEMORY LEAK] TenantMetaMemMgr is unexpected not equal!!!", K(meta_mem_mgr_), KP(allocator_), KPC(array_[pos]));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "[MEMORY LEAK] TenantMetaMemMgr is unexpected not equal!!!", K(meta_mem_mgr_), KP(allocator_), KPC(array_[pos]));
   } else if (0 == array_[pos]->dec_ref()) {
     if (meta_mem_mgr_->is_used_obj_pool(allocator_)) {
-      if (array_[pos]->is_sstable()) {
+      if (OB_UNLIKELY(OB_INVALID_TENANT_ID == MTL_ID()
+          && array_[pos]->is_sstable()
+          && reinterpret_cast<ObSSTable*>(array_[pos])->is_small_sstable())) {
+        FLOG_INFO("this thread doesn't have MTL ctx, push sstable into gc queue", KP(array_[pos]), K(array_[pos]->get_key()));
+        meta_mem_mgr_->push_table_into_gc_queue(array_[pos], array_[pos]->get_key().table_type_);
+      } else if (array_[pos]->is_sstable() && !array_[pos]->is_ddl_mem_sstable()) {
         meta_mem_mgr_->gc_sstable(reinterpret_cast<ObSSTable*>(array_[pos]));
       } else {
         meta_mem_mgr_->push_table_into_gc_queue(array_[pos], array_[pos]->get_key().table_type_);
@@ -129,7 +134,7 @@ int ObITableArray::copy(
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(init(allocator, other.count_))) {
-    LOG_ERROR("failed to init ObITableArray for copying", K(ret), K(other));
+    LOG_WARN("failed to init ObITableArray for copying", K(ret), K(other));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
       if (OB_ISNULL(other[i])) {
@@ -443,9 +448,9 @@ int ObExtendTableArray::deserialize(
         LOG_WARN("unexpected error, sstable is nullptr", K(ret), K(table_handle));
       } else if (OB_FAIL(sstable->deserialize(allocator, buf, data_len, pos))) {
         LOG_WARN("failed to deserialize sstable", K(ret));
-      } else if (table_handle.get_table()->is_buf_minor_sstable()) {
-        if (OB_FAIL(assign(ObTabletTableStore::BUF_MINOR, table_handle.get_table()))) {
-          LOG_WARN("failed to add buf minor table", K(ret));
+      } else if (table_handle.get_table()->is_meta_major_sstable()) {
+        if (OB_FAIL(assign(ObTabletTableStore::META_MAJOR, table_handle.get_table()))) {
+          LOG_WARN("failed to add meta major table", K(ret));
         }
       }
     }
@@ -726,7 +731,7 @@ void ObMemtableArray::reset_table(const int64_t pos)
   if (pos < 0 || pos >= count()) { // do nothing
   } else if (OB_ISNULL(table = get_table(pos))) {
   } else if (OB_ISNULL(meta_mem_mgr_)) {
-    LOG_ERROR("[MEMORY LEAK] TenantMetaMemMgr is unexpected not equal!!!", K(meta_mem_mgr_), KPC(table));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "[MEMORY LEAK] TenantMetaMemMgr is unexpected not equal!!!", K(meta_mem_mgr_), KPC(table));
   } else if (0 == table->dec_ref()) {
     meta_mem_mgr_->push_table_into_gc_queue(table, table->get_key().table_type_);
   }
@@ -821,6 +826,18 @@ int ObTableStoreIterator::add_tables(ObITable **start, const int64_t count)
         LOG_WARN("failed to add table to iterator", K(ret));
       }
     }
+  }
+  return ret;
+}
+
+int ObTableStoreIterator::add_table(ObITable *input_table)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(input_table)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), KP(input_table));
+  } else if (OB_FAIL(array_.push_back(input_table))) {
+    LOG_WARN("failed to add table to iterator", K(ret), KP(input_table));
   }
   return ret;
 }
@@ -965,7 +982,11 @@ bool ObTableStoreUtil::ObITableLogTsRangeCompare::operator()(
   bool bret = false;
   if (OB_SUCCESS != result_code_) {
   } else if (OB_SUCCESS != (result_code_ = compare_table_by_scn_range(ltable, rtable, bret))) {
+<<<<<<< HEAD
     LOG_WARN("failed to compare table with LogTsRange", K(result_code_), KPC(ltable), KPC(rtable));
+=======
+    LOG_WARN_RET(result_code_, "failed to compare table with LogTsRange", K(result_code_), KPC(ltable), KPC(rtable));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
   return bret;
 }
@@ -976,7 +997,7 @@ bool ObTableStoreUtil::ObITableSnapshotVersionCompare::operator()(
   bool bret = false;
   if (OB_SUCCESS != result_code_) {
   } else if (OB_SUCCESS != (result_code_ = compare_table_by_snapshot_version(ltable, rtable, bret))) {
-    LOG_WARN("failed to compare table with SnapshotVersion", K(result_code_), KPC(ltable), KPC(rtable));
+    LOG_WARN_RET(result_code_, "failed to compare table with SnapshotVersion", K(result_code_), KPC(ltable), KPC(rtable));
   }
   return bret;
 }
@@ -990,7 +1011,11 @@ bool ObTableStoreUtil::ObTableHandleV2LogTsRangeCompare::operator()(
     const ObITable *ltable = lhandle.get_table();
     const ObITable *rtable = rhandle.get_table();
     if (OB_SUCCESS != (result_code_ = compare_table_by_scn_range(ltable, rtable, bret))) {
+<<<<<<< HEAD
       LOG_WARN("failed to compare table with LogTsRange", K(result_code_), KPC(ltable), KPC(rtable));
+=======
+      LOG_WARN_RET(result_code_, "failed to compare table with LogTsRange", K(result_code_), KPC(ltable), KPC(rtable));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     }
   }
   return bret;
@@ -1007,7 +1032,7 @@ bool ObTableStoreUtil::ObTableHandleV2SnapshotVersionCompare::operator()(
     const ObITable *ltable = lhandle.get_table();
     const ObITable *rtable = rhandle.get_table();
     if (OB_SUCCESS != (result_code_ = compare_table_by_snapshot_version(ltable, rtable, bret))) {
-      LOG_WARN("failed to compare table with SnapshotVersion", K(result_code_), KPC(ltable), KPC(rtable));
+      LOG_WARN_RET(result_code_, "failed to compare table with SnapshotVersion", K(result_code_), KPC(ltable), KPC(rtable));
     }
   }
   return bret;
@@ -1062,7 +1087,7 @@ int ObTableStoreUtil::compare_table_by_snapshot_version(const ObITable *ltable, 
   return ret;
 }
 
-int ObTableStoreUtil::sort_major_tables(ObArray<ObITable *> &tables)
+int ObTableStoreUtil::sort_major_tables(ObSEArray<ObITable *, MAX_SSTABLE_CNT_IN_STORAGE> &tables)
 {
   int ret = OB_SUCCESS;
 

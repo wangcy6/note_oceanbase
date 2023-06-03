@@ -58,7 +58,11 @@ private:
   int scan_all_ls_(bool can_tx_gc, bool can_gc_retain_ctx);
   void do_keep_alive_(ObLS *ls, const share::SCN &min_start_scn, MinStartScnStatus status); // 100ms
   void do_tx_gc_(ObLS *ls, share::SCN &min_start_scn, MinStartScnStatus &status);     // 15s
+<<<<<<< HEAD
   void update_max_commit_ts_(ObLS *ls);
+=======
+  void update_max_commit_ts_();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   void do_retain_ctx_gc_(ObLS * ls);  // 15s
 
 private:

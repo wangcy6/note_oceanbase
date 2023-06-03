@@ -14,6 +14,7 @@
 
 #include "sql/engine/px/ob_px_scheduler.h"
 #include "sql/engine/px/ob_dfo_scheduler.h"
+#include "sql/engine/px/ob_dfo_mgr.h"
 #include "lib/random/ob_random.h"
 #include "share/ob_rpc_share.h"
 #include "share/schema/ob_part_mgr_util.h"
@@ -38,6 +39,7 @@
 #include "sql/engine/px/datahub/components/ob_dh_sample.h"
 #include "sql/engine/px/ob_px_sqc_proxy.h"
 #include "storage/tx/ob_trans_service.h"
+#include "share/detect/ob_detect_manager_utils.h"
 
 namespace oceanbase
 {
@@ -63,25 +65,29 @@ public:
   {
     int ret = OB_SUCCESS;
     ObArray<ObPxSqcMeta *> sqcs;
-    ObDfo *dfo = nullptr;
+    ObDfo *source_dfo = nullptr;
+    ObDfo *target_dfo = nullptr;
     ObPieceMsgCtx *piece_ctx = nullptr;
+    ObDfo *child_dfo = nullptr;
     // FIXME (TODO xiaochu)：这个 dfo id 不是必须的，本地可以维护一个 op_id 到 dfo id 的映射
-    if (OB_FAIL(coord_info.dfo_mgr_.find_dfo_edge(pkt.dfo_id_, dfo))) {
+    if (OB_FAIL(coord_info.dfo_mgr_.find_dfo_edge(pkt.source_dfo_id_, source_dfo))) {
       LOG_WARN("fail find dfo", K(pkt), K(ret));
-    } else if (OB_ISNULL(dfo)) {
+    } else if (OB_FAIL(coord_info.dfo_mgr_.find_dfo_edge(pkt.target_dfo_id_, target_dfo))) {
+      LOG_WARN("fail find dfo", K(pkt), K(ret));
+    } else if (OB_ISNULL(source_dfo) || OB_ISNULL(target_dfo)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("NULL ptr or null session ptr", KP(dfo), K(pkt), K(ret));
-    } else if (OB_FAIL(coord_info.piece_msg_ctx_mgr_.find_piece_ctx(pkt.op_id_, piece_ctx))) {
+      LOG_WARN("NULL ptr or null session ptr", KP(source_dfo), KP(target_dfo), K(pkt), K(ret));
+    } else if (OB_FAIL(coord_info.piece_msg_ctx_mgr_.find_piece_ctx(pkt.op_id_, pkt.type(), piece_ctx))) {
       // 如果找不到则创建一个 ctx
       // NOTE: 这里新建一个 piece_ctx 的方式不会出现并发问题，
       // 因为 QC 是单线程消息循环，逐个处理 SQC 发来的消息
       if (OB_ENTRY_NOT_EXIST != ret) {
         LOG_WARN("fail get ctx", K(pkt), K(ret));
       } else if (OB_FAIL(PieceMsg::PieceMsgCtx::alloc_piece_msg_ctx(pkt, coord_info, ctx,
-            dfo->get_total_task_count(), piece_ctx))) {
+            source_dfo->get_total_task_count(), piece_ctx))) {
         LOG_WARN("fail to alloc piece msg", K(ret));
       } else if (nullptr != piece_ctx) {
-        if (OB_FAIL(coord_info.piece_msg_ctx_mgr_.add_piece_ctx(piece_ctx))) {
+        if (OB_FAIL(coord_info.piece_msg_ctx_mgr_.add_piece_ctx(piece_ctx, pkt.type()))) {
           LOG_WARN("fail add barrier piece ctx", K(ret));
         }
       }
@@ -89,7 +95,7 @@ public:
 
     if (OB_SUCC(ret)) {
       typename PieceMsg::PieceMsgCtx *ctx = static_cast<typename PieceMsg::PieceMsgCtx *>(piece_ctx);
-      if (OB_FAIL(dfo->get_sqcs(sqcs))) {
+      if (OB_FAIL(target_dfo->get_sqcs(sqcs))) {
         LOG_WARN("fail get qc-sqc channel for QC", K(ret));
       } else if (OB_FAIL(PieceMsg::PieceMsgListener::on_message(*ctx, sqcs, pkt))) {
         LOG_WARN("fail process piece msg", K(pkt), K(ret));
@@ -98,8 +104,6 @@ public:
     return ret;
   }
 };
-
-
 
 int ObPxMsgProc::on_process_end(ObExecContext &ctx)
 {
@@ -117,12 +121,24 @@ int ObPxMsgProc::startup_msg_loop(ObExecContext &ctx)
   LOG_TRACE("TIMERECORD ",
             "reserve:=-1 name:=QC dfoid:=-1 sqcid:=-1 taskid:=-1 start:",
             ObTimeUtility::current_time());
-  if (OB_FAIL(scheduler_->init_all_dfo_channel(ctx))) {
+  if (OB_FAIL(scheduler_->prepare_schedule_info(ctx))) {
+    LOG_WARN("fail to prepare schedule info", K(ret));
+  } else if (OB_FAIL(scheduler_->init_all_dfo_channel(ctx))) {
     LOG_WARN("fail to init all dfo channel", K(ret));
   } else if (OB_FAIL(scheduler_->try_schedule_next_dfo(ctx))) {
     LOG_WARN("fail to sched next one dfo", K(ret));
   }
   return ret;
+}
+
+void ObPxMsgProc::clean_dtl_interm_result(ObExecContext &ctx)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(scheduler_)) {
+    LOG_WARN("dfo scheduler is null");
+  } else {
+    scheduler_->clean_dtl_interm_result(ctx);
+  }
 }
 
 // 1. 根据 pkt 信息找到对应 dfo, sqc，标记当前 sqc 线程分配完成
@@ -267,6 +283,8 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
   } else if (OB_ISNULL(phy_plan_ctx = GET_PHY_PLAN_CTX(ctx))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("phy plan ctx NULL", K(ret));
+  } else if (OB_FAIL(ctx.get_feedback_info().merge_feedback_info(pkt.fb_info_))) {
+    LOG_WARN("fail to merge feedback info", K(ret));
   } else if (OB_ISNULL(session->get_tx_desc())) {
   } else if (OB_FAIL(MTL(transaction::ObTransService*)
                      ->add_tx_exec_result(*session->get_tx_desc(),
@@ -296,8 +314,22 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
     } else { /*do nothing.*/ }
   } else { /*do nothing.*/ }
   if (OB_SUCC(ret)) {
+    if (OB_NOT_NULL(edge->get_detect_cb())) {
+#ifdef ERRSIM
+      if (OB_FAIL(OB_E(EventTable::EN_PX_SLOW_PROCESS_SQC_FINISH_MSG) OB_SUCCESS)) {
+        LOG_WARN("qc slow process sqc finish msg by desgin", K(ret));
+        usleep(100 * 1000L);
+        ret = OB_SUCCESS;
+      }
+#endif
+      int set_finish_ret = edge->get_detect_cb()->atomic_set_finished(sqc->get_sqc_addr());
+      if (OB_SUCCESS != set_finish_ret) {
+        LOG_WARN("[DM] failed to atomic_set_finished", K(set_finish_ret), K(sqc->get_sqc_addr()));
+      }
+    }
     sqc->set_thread_finish(true);
-    if (sqc->is_ignore_vtable_error() && OB_SUCCESS != pkt.rc_) {
+    if (sqc->is_ignore_vtable_error() && OB_SUCCESS != pkt.rc_
+        && ObVirtualTableErrorWhitelist::should_ignore_vtable_error(pkt.rc_)) {
        // 如果收到一个sqc finish消息, 如果该sqc涉及虚拟表, 需要忽略所有错误码
        // 如果该dfo是root_dfo的child_dfo, 为了让px走出数据channel的消息循环
        // 需要mock一个eof dtl buffer本地发送至px(实际未经过rpc, attach即可)
@@ -311,6 +343,8 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
                  OB_ID(sqc_id), sqc->get_sqc_id());
 
     LOG_TRACE("[MSG] sqc finish", K(*edge), K(*sqc));
+    LOG_TRACE("on_sqc_finish_msg update feedback info",
+        K(pkt.fb_info_), K(ctx.get_feedback_info()));
   }
 
   if (OB_SUCC(ret)) {
@@ -365,6 +399,10 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
 
   if (OB_SUCC(ret)) {
     if (edge->is_thread_finish()) {
+      if (OB_NOT_NULL(ctx.get_physical_plan_ctx()->get_phy_plan()) &&
+          ctx.get_physical_plan_ctx()->get_phy_plan()->is_enable_px_fast_reclaim()) {
+        (void)ObDetectManagerUtils::qc_unregister_check_item_from_dm(edge);
+      }
       ret = scheduler_->try_schedule_next_dfo(ctx);
       if (OB_ITER_END == ret) {
         coord_info_.all_threads_finish_ = true;
@@ -419,6 +457,30 @@ int ObPxMsgProc::on_piece_msg(
   return proc.on_piece_msg(coord_info_, ctx, pkt);
 }
 
+int ObPxMsgProc::on_piece_msg(
+    ObExecContext &ctx,
+    const ObInitChannelPieceMsg &pkt)
+{
+  ObDhPieceMsgProc<ObInitChannelPieceMsg> proc;
+  return proc.on_piece_msg(coord_info_, ctx, pkt);
+}
+
+int ObPxMsgProc::on_piece_msg(
+    ObExecContext &ctx,
+    const ObReportingWFPieceMsg &pkt)
+{
+  ObDhPieceMsgProc<ObReportingWFPieceMsg> proc;
+  return proc.on_piece_msg(coord_info_, ctx, pkt);
+}
+
+int ObPxMsgProc::on_piece_msg(
+    ObExecContext &ctx,
+    const ObOptStatsGatherPieceMsg &pkt)
+{
+  ObDhPieceMsgProc<ObOptStatsGatherPieceMsg> proc;
+  return proc.on_piece_msg(coord_info_, ctx, pkt);
+}
+
 int ObPxMsgProc::on_eof_row(ObExecContext &ctx)
 {
   int ret = OB_SUCCESS;
@@ -452,104 +514,7 @@ int ObPxMsgProc::on_dfo_pair_thread_inited(ObExecContext &ctx, ObDfo &child, ObD
       LOG_TRACE("dispatch dtl data channel for pair ok", K(parent), K(child));
     }
   }
-  //如果执行计划包含px bloom filter, 判断子dfo是否包含use_filter算子,
-  //如果有, 则为它们建立channel信息, 并dispach给parent dfo
-  if (OB_SUCC(ret) && child.is_px_use_bloom_filter()) {
-    if (parent.is_root_dfo()
-        && OB_FAIL(scheduler_->set_bloom_filter_ch_for_root_dfo(ctx, parent))) {
-      LOG_WARN("fail to set bloom filter ch for root dfo", K(ret));
-    } else if (OB_FAIL(scheduler_->build_bloom_filter_ch(ctx, child, parent))) {
-      LOG_WARN("fail to setup bloom filter channel", K(ret));
-    } else if (OB_FAIL(scheduler_->dispatch_bf_channel_info(ctx, child, parent))) {
-      LOG_WARN("fail setup bloom filter data channel for child-parent pair", K(ret));
-    } else {
-      LOG_TRACE("dispatch px bloom filter channel for pair ok", K(parent), K(child));
-    }
-  }
-  return ret;
-}
 
-int ObPxMsgProc::mark_rpc_filter(ObExecContext &ctx)
-{
-  int ret = OB_SUCCESS;
-  ObJoinFilterDataCtx &bf_ctx = ctx.get_bf_ctx();
-  ObPhysicalPlanCtx *phy_plan_ctx = GET_PHY_PLAN_CTX(ctx);
-  bf_ctx.filter_ready_ = false;
-  common::ObArray<dtl::ObDtlChannel *> channels;
-  uint64_t each_group_size = 0;
-  if (OB_ISNULL(bf_ctx.filter_data_) ||
-      OB_ISNULL(phy_plan_ctx) ||
-      OB_ISNULL(ctx.get_my_session())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("the filter data or phy plan ctx is null", K(ret));
-  } else if (0 == bf_ctx.ch_provider_ptr_) {
-    // root dfo
-    if (bf_ctx.ch_set_.count() <= 0) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("the count of bloom filter chsets is unexpected",
-          K(bf_ctx.ch_set_.count()), K(ret));
-    } else if (OB_FAIL(ObDtlChannelUtil::link_ch_set(bf_ctx.ch_set_, channels,
-        [&](ObDtlChannel *ch) {
-          ch->set_join_filter_owner();
-          ch->set_thread_id(GETTID());
-        }))) {
-      LOG_WARN("fail to link ch channel", K(ret));
-    } else {
-      bf_ctx.filter_data_->bloom_filter_count_ = 1;
-    }
-  } else {
-    int64_t sqc_count = 0;
-    int64_t tenant_id = ctx.get_my_session()->get_effective_tenant_id();
-    ObPxSQCProxy *ch_provider = reinterpret_cast<ObPxSQCProxy *>(bf_ctx.ch_provider_ptr_);
-    if (OB_FAIL(ch_provider->get_bloom_filter_ch(bf_ctx.ch_set_,
-        sqc_count, phy_plan_ctx->get_timeout_timestamp(), false))) {
-      LOG_WARN("fail get data ch sets from provider", K(ret));
-    } else if (OB_FAIL(ObDtlChannelUtil::link_ch_set(bf_ctx.ch_set_, channels,
-        [&](ObDtlChannel *ch) {
-          ch->set_join_filter_owner();
-          ch->set_thread_id(GETTID());
-        }))) {
-      LOG_WARN("fail to link ch channel", K(ret));
-    } else if (channels.count() <= 0) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("channels count is unexpected", K(ret));
-    } else {
-      omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id));
-      if (OB_LIKELY(tenant_config.is_valid())) {
-        const char *ptr = NULL;
-        if (OB_ISNULL(ptr = tenant_config->_px_bloom_filter_group_size.get_value())) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("each group size ptr is null", K(ret));
-        } else if (0 == ObString::make_string("auto").case_compare(ptr)) {
-          each_group_size = sqrt(channels.count());
-        } else {
-          char *end_ptr = nullptr;
-          each_group_size = strtoull(ptr, &end_ptr, 10);
-          if (*end_ptr != '\0') {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("each group size ptr is unexpected", K(ret));
-          }
-        }
-      }
-      each_group_size = (each_group_size <= 0 ? 1 : each_group_size);
-      int64_t send_size = GCONF._send_bloom_filter_size * 125;
-      int64_t send_count = ceil(bf_ctx.filter_data_->filter_.get_bits_array_length() / (double)send_size);
-      bf_ctx.filter_data_->bloom_filter_count_ = sqc_count * send_count;
-      ch_provider->set_filter_data(bf_ctx.filter_data_);
-      OZ(ch_provider->assign_bloom_filter_channels(channels));
-      OZ(ch_provider->assign_bf_ch_set(bf_ctx.ch_set_));
-      OZ(ch_provider->generate_filter_indexes(each_group_size, channels.count()));
-      if (OB_SUCC(ret)) {
-        ch_provider->set_bf_compress_type(ctx.get_bf_ctx().compressor_type_);
-        ch_provider->set_per_channel_bf_count(send_count);
-        ch_provider->set_bloom_filter_ready(true);
-      }
-    }
-    if (OB_FAIL(ret)) {
-      // if failed , need unlink chset
-      IGNORE_RETURN ObPxChannelUtil::unlink_ch_set(bf_ctx.ch_set_, nullptr, false);
-    }
-  }
   return ret;
 }
 
@@ -645,6 +610,8 @@ int ObPxTerminateMsgProc::on_sqc_finish_msg(ObExecContext &ctx, const ObPxFinish
   if (OB_ISNULL(session = ctx.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("NULL ptr session", K(ret));
+  } else if (OB_FAIL(ctx.get_feedback_info().merge_feedback_info(pkt.fb_info_))) {
+    LOG_WARN("fail to merge feedback info", K(ret));
   } else if (OB_ISNULL(session->get_tx_desc())) {
   } else if (OB_FAIL(MTL(transaction::ObTransService*)
                      ->add_tx_exec_result(*session->get_tx_desc(),
@@ -678,6 +645,8 @@ int ObPxTerminateMsgProc::on_sqc_finish_msg(ObExecContext &ctx, const ObPxFinish
                  OB_ID(sqc_id), sqc->get_sqc_id());
 
     LOG_TRACE("terminate msg : sqc finish", K(*edge), K(*sqc));
+    LOG_TRACE("on_sqc_finish_msg update feedback info",
+        K(pkt.fb_info_), K(ctx.get_feedback_info()));
   }
 
   if (OB_SUCC(ret)) {
@@ -792,6 +761,39 @@ int ObPxTerminateMsgProc::on_piece_msg(
     const ObRDWFPieceMsg &)
 {
   return common::OB_SUCCESS;
+}
+
+int ObPxTerminateMsgProc::on_piece_msg(
+    ObExecContext &,
+    const ObInitChannelPieceMsg &)
+{
+  return common::OB_SUCCESS;
+}
+
+int ObPxTerminateMsgProc::on_piece_msg(
+    ObExecContext &,
+    const ObReportingWFPieceMsg &)
+{
+  return common::OB_SUCCESS;
+}
+
+int ObPxTerminateMsgProc::on_piece_msg(
+    ObExecContext &,
+    const ObOptStatsGatherPieceMsg &)
+{
+  return common::OB_SUCCESS;
+}
+
+int ObPxCoordInfo::init()
+{
+  int ret = OB_SUCCESS;
+  const int64_t bucket_num = 32;
+  if (OB_FAIL(p2p_dfo_map_.create(bucket_num,
+      "PxDfoMapKey",
+      "PxDfoMapNode"))) {
+    LOG_WARN("create hash table failed", K(ret));
+  }
+  return ret;
 }
 
 } // end namespace sql

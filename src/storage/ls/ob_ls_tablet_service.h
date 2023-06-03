@@ -104,9 +104,13 @@ public:
   virtual ~ObLSTabletService();
 public:
   int init(ObLS *ls, observer::ObIMetaReport *rs_reporter);
+  int stop();
   void destroy();
   int offline();
   int online();
+  // TODO: delete it if apply sequence
+  // set allocators frozen to reduce active tenant_memory in ObLS::offline_()
+  int set_frozen_for_all_memtables();
 public:
   class AllowToReadMgr final
   {
@@ -239,11 +243,34 @@ public:
   int get_bf_optimal_prefix(int64_t &prefix);
   int64_t get_tablet_count() const;
 
+  // clog replay
+  int replay_update_storage_schema(
+      const share::SCN &scn,
+      const char *buf,
+      const int64_t buf_size,
+      const int64_t pos);
+  int replay_medium_compaction_clog(
+      const share::SCN &scn,
+      const char *buf,
+      const int64_t buf_size,
+      const int64_t pos);
+  int replay_update_reserved_snapshot(
+      const share::SCN &scn,
+      const char *buf,
+      const int64_t buf_size,
+      const int64_t pos);
+
   // update tablet
   int update_tablet_table_store(
       const common::ObTabletID &tablet_id,
       const ObUpdateTableStoreParam &param,
       ObTabletHandle &handle);
+  int update_medium_compaction_info(
+      const common::ObTabletID &tablet_id,
+      ObTabletHandle &handle);
+  int update_tablet_table_store( // only for small sstables defragmentation
+      const ObTabletHandle &old_tablet_handle,
+      const ObIArray<ObTableHandleV2> &table_handles);
   int update_tablet_report_status(const common::ObTabletID &tablet_id);
   int update_tablet_restore_status(
       const common::ObTabletID &tablet_id,
@@ -266,7 +293,8 @@ public:
   int create_memtable(
       const common::ObTabletID &tablet_id,
       const int64_t schema_version,
-      const bool for_replay = false);
+      const bool for_replay = false,
+      const share::SCN clog_checkpoint_scn = share::SCN::min_scn());
   int get_read_tables(
       const common::ObTabletID &tablet_id,
       const int64_t snapshot_version,
@@ -374,6 +402,7 @@ public:
       const ObBatchUpdateTableStoreParam &param);
   void enable_to_read();
   void disable_to_read();
+  int get_all_tablet_ids(const bool except_ls_inner_tablet, common::ObIArray<ObTabletID> &tablet_id_array);
 
 protected:
   virtual int prepare_dml_running_ctx(
@@ -436,11 +465,13 @@ private:
   class GetAllTabletIDOperator final
   {
   public:
-    explicit GetAllTabletIDOperator(common::ObIArray<common::ObTabletID> &tablet_ids)
-      : tablet_ids_(tablet_ids) {}
+    explicit GetAllTabletIDOperator(common::ObIArray<common::ObTabletID> &tablet_ids,
+        const bool except_ls_inner_tablet = false)
+    : except_ls_inner_tablet_(except_ls_inner_tablet), tablet_ids_(tablet_ids) {}
     ~GetAllTabletIDOperator() = default;
     int operator()(const common::ObTabletID &tablet_id);
   private:
+    bool except_ls_inner_tablet_;
     common::ObIArray<common::ObTabletID> &tablet_ids_;
   };
   class DestroyMemtableAndMemberOperator final
@@ -449,6 +480,16 @@ private:
     DestroyMemtableAndMemberOperator(ObLSTabletService *tablet_svr)
       : tablet_svr_(tablet_svr) {}
     ~DestroyMemtableAndMemberOperator() = default;
+    int operator()(const common::ObTabletID &tablet_id);
+    common::ObTabletID cur_tablet_id_;
+    ObLSTabletService *tablet_svr_;
+  };
+  class SetMemtableFrozenOperator final
+  {
+  public:
+    SetMemtableFrozenOperator(ObLSTabletService *tablet_svr)
+      : tablet_svr_(tablet_svr) {}
+    ~SetMemtableFrozenOperator() = default;
     int operator()(const common::ObTabletID &tablet_id);
     common::ObTabletID cur_tablet_id_;
     ObLSTabletService *tablet_svr_;
@@ -546,6 +587,8 @@ private:
       const ObTabletTxMultiSourceDataUnit *&tx_data,
       const ObTabletBindingInfo *&binding_info,
       const share::ObTabletAutoincSeq *&auto_inc_seq);
+
+  static int check_real_leader_for_4377_(const ObLSID ls_id);
 
   static int build_create_sstable_param_for_migration(
       const blocksstable::ObMigrationSSTableParam &migrate_sstable_param,
@@ -647,6 +690,12 @@ private:
       const common::ObNewRow &new_row,
       const int64_t rowkey_len,
       bool &rowkey_change);
+  static int process_delta_lob(
+      ObDMLRunningCtx &run_ctx,
+      const ObColDesc &column,
+      ObObj &old_obj,
+      ObLobLocatorV2 &delta_lob,
+      ObObj &obj);
   static int process_lob_row(
       ObTabletHandle &tablet_handle,
       ObDMLRunningCtx &run_ctx,
@@ -766,6 +815,14 @@ private:
   int set_allow_to_read_(ObLS *ls);
 
 private:
+  int direct_insert_rows(const uint64_t table_id,
+                         const int64_t task_id,
+                         const common::ObTabletID &tablet_id,
+                         const bool is_heap_table,
+                         common::ObNewRowIterator *row_iter,
+                         int64_t &affected_rows);
+
+private:
   friend class ObLSTabletIterator;
 
   ObLS *ls_;
@@ -777,6 +834,7 @@ private:
   observer::ObIMetaReport *rs_reporter_;
   AllowToReadMgr allow_to_read_mgr_;
   bool is_inited_;
+  bool is_stopped_;
 };
 
 inline int64_t ObLSTabletService::get_tablet_count() const

@@ -112,6 +112,8 @@ _UTF8                         { REPUT_TOKEN_NEG_SIGN(_UTF8); }
 _UTF8MB4                      { REPUT_TOKEN_NEG_SIGN(_UTF8MB4); }
 _GBK                          { REPUT_TOKEN_NEG_SIGN(_GBK); }
 _GB18030                      { REPUT_TOKEN_NEG_SIGN(_GB18030); }
+_GB18030_2022                 { REPUT_TOKEN_NEG_SIGN(_GB18030_2022); }
+_LATIN1                       { REPUT_TOKEN_NEG_SIGN(_LATIN1); }
 _BINARY                       { REPUT_TOKEN_NEG_SIGN(_BINARY); }
 _UTF16                        { REPUT_TOKEN_NEG_SIGN(_UTF16); }
 NOT {
@@ -137,6 +139,7 @@ NULL {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return NULLX;
   }
 }
@@ -160,6 +163,7 @@ NULL {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    node->sql_str_off_ = yylloc->first_column - 1;
     setup_token_pos_info(node, yylloc->first_column - 1, node->text_len_);
     return token_ret;
   }
@@ -207,6 +211,7 @@ NULL {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    node->sql_str_off_ = yylloc->first_column - 1;
     return DECIMAL_VAL;
   }
 }
@@ -225,6 +230,7 @@ NULL {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    node->sql_str_off_ = yylloc->first_column - 1;
     return DECIMAL_VAL;
   }
 }
@@ -239,8 +245,19 @@ TRUE {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return BOOL_VALUE;
   }
+}
+
+<hint>TRUE {
+  check_value(yylval);
+  ParseResult *p = (ParseResult *)yyextra;
+  malloc_new_node(yylval->node, p->malloc_pool_, T_BOOL, 0);
+  yylval->node->value_ = 1;
+  COPY_STRING(p->input_sql_ + yylloc->first_column - 1, yyleng, yylval->node->raw_text_);
+  yylval->node->text_len_ = yyleng;
+  return BOOL_VALUE;
 }
 
 FALSE {
@@ -253,9 +270,40 @@ FALSE {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return BOOL_VALUE;
   }
 }
+
+<hint>FALSE {
+  check_value(yylval);
+  ParseResult *p = (ParseResult *)yyextra;
+  malloc_new_node(yylval->node, p->malloc_pool_, T_BOOL, 0);
+  yylval->node->value_ = 0;
+  COPY_STRING(p->input_sql_ + yylloc->first_column - 1, yyleng, yylval->node->raw_text_);
+  yylval->node->text_len_ = yyleng;
+  return BOOL_VALUE;
+}
+
+("N"|"n"){sqbegin} {
+  BEGIN(sq);
+  ParseResult *p = (ParseResult *)yyextra;
+  p->start_col_ = yylloc->first_column;
+  char **tmp_literal = &(p->tmp_literal_);
+  if (NULL == *tmp_literal)
+  {
+    *tmp_literal = (char*) parse_malloc(p->input_sql_len_ + 1, p->malloc_pool_);
+    check_malloc(*tmp_literal);
+  }
+  check_value(yylval);
+  malloc_new_node(yylval->node, p->malloc_pool_, T_NCHAR, 0);
+
+  yylval->node->str_len_ = 0;
+  if (IS_FAST_PARAMETERIZE && !IS_NEED_PARAMETERIZE) {
+    COPY_WRITE();
+  }
+}
+
 
 {sqbegin} {
   BEGIN(sq);
@@ -277,13 +325,15 @@ FALSE {
   check_value(yylval);
   yylloc->first_column = p->start_col_;
   FORMAT_STR_NODE(yylval->node);
+  int32_t token_ret = yylval->node->type_ == T_NCHAR ? NATIONAL_LITERAL : STRING_VALUE;
   yylval->node->text_len_ = yylloc->last_column - p->start_col_ + 1;
   COPY_STRING(p->input_sql_ + p->start_col_ - 1, yylval->node->text_len_, yylval->node->raw_text_);
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column;
     setup_token_pos_info(yylval->node, yylloc->first_column, yylval->node->text_len_ - 2);
-    return STRING_VALUE;
+    return token_ret;
   }
 }
 
@@ -431,6 +481,7 @@ FALSE {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column;
     setup_token_pos_info(yylval->node, yylloc->first_column, yylval->node->str_len_);
     return STRING_VALUE;
   }
@@ -557,6 +608,7 @@ FALSE {
     }
     check_malloc(dup_value);
     yylval->node->str_value_ = dup_value;
+    yylval->node->sql_str_off_ = yylloc->first_column;
     setup_token_pos_info(yylval->node, yylloc->first_column, yylval->node->str_len_);
     return NAME_OB;
   }
@@ -626,6 +678,7 @@ FALSE {
     }
     check_malloc(dup_value);
     yylval->node->str_value_ = dup_value;
+    yylval->node->sql_str_off_ = yylloc->first_column;
     setup_token_pos_info(yylval->node, yylloc->first_column, yylval->node->str_len_);
     return NAME_OB;
   }
@@ -674,6 +727,7 @@ X'([0-9A-F])*'|0X([0-9A-F])+ {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return HEX_STRING_VALUE;
   }
 }
@@ -710,6 +764,7 @@ B'([01])*'|0B([01])+ {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return HEX_STRING_VALUE;
   }
 }
@@ -724,6 +779,7 @@ Date{whitespace}?'[^']*' {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+   yylval->node->sql_str_off_ = yylloc->first_column - 1;
    return DATE_VALUE;
   }
 }
@@ -738,6 +794,7 @@ Time{whitespace}?'[^']*' {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return DATE_VALUE;
   }
 }
@@ -752,6 +809,7 @@ Timestamp{whitespace}?'[^']*' {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return DATE_VALUE;
   }
 }
@@ -765,6 +823,7 @@ Date{whitespace}?\"[^\"]*\" {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return DATE_VALUE;
   }
 }
@@ -779,6 +838,7 @@ Time{whitespace}?\"[^\"]*\" {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return DATE_VALUE;
   }
 }
@@ -793,6 +853,7 @@ Timestamp{whitespace}?\"[^\"]*\" {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return DATE_VALUE;
   }
 }
@@ -881,6 +942,9 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>NO_INDEX { return NO_INDEX_HINT; }
 <hint>USE_DAS { return USE_DAS_HINT; }
 <hint>NO_USE_DAS { return NO_USE_DAS_HINT; }
+<hint>INDEX_SS { return INDEX_SS_HINT; }
+<hint>INDEX_SS_ASC { return INDEX_SS_ASC_HINT; }
+<hint>INDEX_SS_DESC { return INDEX_SS_DESC_HINT; }
 <hint>USE_NL { return USE_NL; }
 <hint>NO_USE_NL { return NO_USE_NL; }
 <hint>USE_NL_MATERIALIZATION { return USE_NL_MATERIALIZATION; }
@@ -896,6 +960,7 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>DEFAULT  { return DEFAULT; }
 <hint>MAX_CONCURRENT { return MAX_CONCURRENT; }
 <hint>PARALLEL { return PARALLEL; }
+<hint>MANUAL { return MANUAL; }
 <hint>NO_PARALLEL { return NO_PARALLEL; }
 <hint>MONITOR  { return MONITOR; }
 <hint>AUTO { return AUTO; }
@@ -912,6 +977,9 @@ Timestamp{whitespace}?\"[^\"]*\" {
     }
   }
 }
+<hint>NO_GATHER_OPTIMIZER_STATISTICS  { return NO_GATHER_OPTIMIZER_STATISTICS; }
+<hint>GATHER_OPTIMIZER_STATISTICS  { return GATHER_OPTIMIZER_STATISTICS; }
+<hint>DBMS_STATS  { return DBMS_STATS; }
 <hint>LOG_LEVEL  { return LOG_LEVEL; }
 <hint>LEADING  { return LEADING_HINT; }
 <hint>ORDERED  { return ORDERED; }
@@ -924,10 +992,14 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>USE_PLAN_CACHE  { return USE_PLAN_CACHE; }
 <hint>USE_HASH_AGGREGATION  { return USE_HASH_AGGREGATION; }
 <hint>NO_USE_HASH_AGGREGATION  { return NO_USE_HASH_AGGREGATION; }
+<hint>PARTITION_SORT  { return PARTITION_SORT; }
+<hint>NO_PARTITION_SORT  { return NO_PARTITION_SORT; }
 <hint>USE_LATE_MATERIALIZATION  { return USE_LATE_MATERIALIZATION; }
 <hint>NO_USE_LATE_MATERIALIZATION  { return NO_USE_LATE_MATERIALIZATION; }
 <hint>TRACE_LOG { return TRACE_LOG; }
 <hint>LOAD_BATCH_SIZE { return LOAD_BATCH_SIZE; }
+<hint>DIRECT { return DIRECT; }
+<hint>APPEND { return APPEND; }
 <hint>TRACING { return TRACING; }
 <hint>DOP { return DOP; }
 <hint>FORCE_REFRESH_LOCATION_CACHE { return FORCE_REFRESH_LOCATION_CACHE; }
@@ -942,6 +1014,7 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>OPTIMIZER_FEATURES_ENABLE { return OPTIMIZER_FEATURES_ENABLE; }
 <hint>NO_QUERY_TRANSFORMATION { return NO_QUERY_TRANSFORMATION; }
 <hint>NO_COST_BASED_QUERY_TRANSFORMATION { return NO_COST_BASED_QUERY_TRANSFORMATION; }
+<hint>FLASHBACK_READ_TX_UNCOMMITTED { return FLASHBACK_READ_TX_UNCOMMITTED; }
 <hint>TRANS_PARAM { return TRANS_PARAM; }
 <hint>PQ_DISTRIBUTE { return PQ_DISTRIBUTE; }
 <hint>PQ_DISTRIBUTE_WINDOW { return PQ_DISTRIBUTE_WINDOW; }
@@ -1029,6 +1102,7 @@ Timestamp{whitespace}?\"[^\"]*\" {
 <hint>NO_PULLUP_EXPR { return NO_PULLUP_EXPR; }
 <hint>OPT_PARAM { return OPT_PARAM; }
 <hint>OB_DDL_SCHEMA_VERSION { return OB_DDL_SCHEMA_VERSION; }
+<hint>DYNAMIC_SAMPLING { return DYNAMIC_SAMPLING; }
 <hint>{identifier} {
   if (!(IS_FAST_PARAMETERIZE)) {
     check_value(yylval);
@@ -1047,6 +1121,7 @@ Timestamp{whitespace}?\"[^\"]*\" {
     check_malloc(dup_value);
     node->str_value_ = str_tolower(dup_value, strlen(dup_value));
     node->str_len_ = out_len;
+    node->sql_str_off_ = yylloc->first_column - 1;
     setup_token_pos_info(node, yylloc->first_column - 1, yylval->node->str_len_);
   }
   return NAME_OB;
@@ -1079,6 +1154,7 @@ Timestamp{whitespace}?\"[^\"]*\" {
   if (IS_FAST_PARAMETERIZE) {
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column;
     setup_token_pos_info(yylval->node, yylloc->first_column, yylval->node->text_len_ - 2);
     return STRING_VALUE;
   }
@@ -1138,6 +1214,7 @@ Timestamp{whitespace}?\"[^\"]*\" {
     }
     check_malloc(dup_value);
     yylval->node->str_value_ = dup_value;
+    yylval->node->sql_str_off_ = yylloc->first_column;
     setup_token_pos_info(yylval->node, yylloc->first_column, yylval->node->str_len_);
     return NAME_OB;
   }
@@ -1323,9 +1400,11 @@ BEGIN(in_c_comment);
   }
   if (IS_FAST_PARAMETERIZE) {
     yylval->node->raw_text_ = parse_strdup(yytext, p->malloc_pool_, &(yylval->node->text_len_));
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     check_malloc(yylval->node->raw_text_);
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     return QUESTIONMARK;
   }
 }
@@ -1342,9 +1421,38 @@ BEGIN(in_c_comment);
   yylval->node->value_ = get_question_mark(&p->question_mark_ctx_, p->malloc_pool_, yytext);
   if (IS_FAST_PARAMETERIZE) {
     yylval->node->raw_text_ = parse_strdup(yytext, p->malloc_pool_, &(yylval->node->text_len_));
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
     check_malloc(yylval->node->raw_text_);
     STORE_PARAM_NODE();
   } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
+    return QUESTIONMARK;
+  }
+}
+":"{identifier} {
+  ParseResult *p = (ParseResult *)yyextra;
+  check_value(yylval);
+  malloc_new_node(yylval->node, p->malloc_pool_, T_QUESTIONMARK, 0);
+  if (p->question_mark_ctx_.by_defined_name_) {
+    yylval->node->value_ = get_question_mark_by_defined_name(&p->question_mark_ctx_, yytext);
+    if (yylval->node->value_ < 0) {
+      YY_UNEXPECTED_ERROR("Invalid question mark idx\n");
+    }
+  } else {
+    yylval->node->value_ = get_question_mark(&p->question_mark_ctx_, p->malloc_pool_, yytext);
+  }
+  p->question_mark_ctx_.by_name_ = true;
+  if (OB_UNLIKELY(p->question_mark_ctx_.by_ordinal_)) {
+    YY_UNEXPECTED_ERROR("Ordinal binding and Named binding cannot be combined\n");
+  }
+  if (IS_FAST_PARAMETERIZE) {
+    yylval->node->raw_text_ = parse_strdup(yytext, p->malloc_pool_, &(yylval->node->text_len_));
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
+    check_malloc(yylval->node->raw_text_);
+    STORE_PARAM_NODE();
+  } else {
+    yylval->node->sql_str_off_ = yylloc->first_column - 1;
+    yylval->node->pos_ = yylloc->first_column - 1;
     return QUESTIONMARK;
   }
 }
@@ -1359,9 +1467,11 @@ BEGIN(in_c_comment);
     yylval->node->value_ = get_question_mark(&p->question_mark_ctx_, p->malloc_pool_, yytext);
     if (IS_FAST_PARAMETERIZE) {
       yylval->node->raw_text_ = parse_strdup(yytext, p->malloc_pool_, &(yylval->node->text_len_));
+      yylval->node->sql_str_off_ = yylloc->first_column - 1;
       check_malloc(yylval->node->raw_text_);
       STORE_PARAM_NODE();
     } else {
+      yylval->node->sql_str_off_ = yylloc->first_column - 1;
       return QUESTIONMARK;
     }
   } else {
@@ -1382,7 +1492,7 @@ BEGIN(in_c_comment);
     if (NULL != node->str_value_
     		&& *(yytext + 2) == *(yytext + 1 + node->str_len_)
     		&& (*(yytext + 2) == '`')) {
-      // bugfix: https://work.aone.alibaba-inc.com/issue/36863983
+      // bugfix:
       // support "select @@`xxx`;" as "select @@xxx;"
 			node->str_value_ += 1;
 			node->str_len_ -= 2;
@@ -1432,14 +1542,7 @@ BEGIN(in_c_comment);
   if (IS_FAST_PARAMETERIZE) {
     ParseResult *p = (ParseResult *)yyextra;
     REPUT_NEG_SIGN(p);
-    if (strcasecmp("nowait", yytext) == 0
-        || strcasecmp("no_wait", yytext) == 0) {
-      //语法阶段for update nowait 会给默认值0，所以如果是fast parse也需要给0, 从而保证常量个数识别的一致性
-      char num[2] = "0";
-      STORE_UNIT_TYPE_NODE(num);
-    } else {
-      return NAME_OB;
-    }
+    return NAME_OB;
   } else {
     int ret = NAME_OB;
     if (NULL == (word = mysql_non_reserved_keyword_lookup(yytext)))
@@ -1457,6 +1560,7 @@ BEGIN(in_c_comment);
         node->str_value_ = parse_strdup(yytext, p->malloc_pool_, &(node->str_len_));
       }
       check_malloc(node->str_value_);
+      node->sql_str_off_ = yylloc->first_column-1;
       setup_token_pos_info(node, yylloc->first_column - 1, node->str_len_);
       ret = NAME_OB;
     } else {

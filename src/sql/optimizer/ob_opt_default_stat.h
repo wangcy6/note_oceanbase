@@ -23,7 +23,7 @@ const double LN_2 = 0.69314718055994530941723212145818;
 
 const double DEFAULT_CACHE_HIT_RATE = 0.8;
 
-const double VIRTUAL_INDEX_GET_COST = 20;
+const int64_t DEFAULT_TABLE_ROW_COUNT = 1;
 
 const int64_t DEFAULT_ROW_SIZE = 200;
 
@@ -60,14 +60,14 @@ const double DEFAULT_EQ_SEL = 0.005;
 const double DEFAULT_INEQ_SEL = 1.0 / 3.0;
 
 /**
+ *@brief　空间表达式的默认选择率: 1 / OB_GEO_S2REGION_OPTION_MAX_CELL
+ */
+const double DEFAULT_SPATIAL_SEL = 0.25;
+
+/**
  *@brief　猜都没办法猜的默认选择率：一半一半
  */
 const double DEFAULT_SEL = 0.5;
-
-///Update一行数据的代价.暂时写的
-const int64_t UPDATE_ONE_ROW_COST = 1;
-///DELETE一行数据的代价.暂时写的
-const int64_t DELETE_ONE_ROW_COST = 1;
 
 // [agg(expr) <|>|btw cosnt]的默认选择率，参考oracle
 const double DEFAULT_AGG_RANGE = 0.05;

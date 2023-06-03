@@ -30,6 +30,7 @@
 #include "lib/thread_local/ob_tsi_factory.h"
 #include "lib/list/ob_dlist.h"
 #include "lib/hash/ob_hashmap.h"
+#include "common/ob_clock_generator.h"
 
 #ifdef OB_USE_ASAN
 #include "lib/allocator/ob_asan_allocator.h"
@@ -69,7 +70,6 @@ namespace lib
 
 using std::nullptr_t;
 using lib::ObMemAttr;
-using oceanbase::common::default_memattr;
 class Flow;
 class __MemoryContext__;
 enum class ContextSource
@@ -259,7 +259,7 @@ struct DynamicInfo
 {
   DynamicInfo()
     : tid_(GETTID()), cid_(0lu),
-      create_time_(common::ObTimeUtility::fast_current_time())
+      create_time_(common::ObClockGenerator::getClock())
   {}
   TO_STRING_KV(K(tid_), K(cid_), K(create_time_));
   int64_t tid_;
@@ -331,14 +331,12 @@ public:
   const DynamicInfo &get_dynamic_info() const { return di_; }
   const StaticInfo &get_static_info() const { return *reinterpret_cast<StaticInfo*>(static_id_); }
   void *allocf(const int64_t size,
-               const ObMemAttr &attr=default_memattr)
+               const ObMemAttr &attr)
   {
     return freeable_alloc_->alloc(size, attr);
   }
-  void *allocp(const int64_t size,
-               const ObMemAttr &attr=default_memattr)
+  void *allocp(const int64_t size)
   {
-    UNUSEDx(attr);
     void *ptr = nullptr;
     ptr = arena_alloc_.alloc(size);
     return ptr;
@@ -416,8 +414,7 @@ public:
     ObMemAttr inner_attr = param_.attr_;
     auto *ma = ObMallocAllocator::get_instance();
     // tenant_allocator is created synchronously when the tenant is built, and 500 tenant memory is used when there is no such tenant
-    ObTenantCtxAllocator *ta = ma != nullptr ?
-      ma->get_tenant_ctx_allocator(inner_attr.tenant_id_, inner_attr.ctx_id_) : nullptr;
+    auto ta = ma->get_tenant_ctx_allocator(inner_attr.tenant_id_, inner_attr.ctx_id_);
     if (nullptr == ta) {
       inner_attr.tenant_id_ = common::OB_SERVER_TENANT_ID;
     }
@@ -760,15 +757,14 @@ private:
 };
 
 inline void *ctxalf(const int64_t size,
-                    const ObMemAttr &attr=default_memattr)
+                    const ObMemAttr &attr)
 {
   return CURRENT_CONTEXT->allocf(size, attr);
 }
 
-inline void *ctxalp(const int64_t size,
-                    const ObMemAttr &attr=default_memattr)
+inline void *ctxalp(const int64_t size)
 {
-  return CURRENT_CONTEXT->allocp(size, attr);
+  return CURRENT_CONTEXT->allocp(size);
 }
 
 inline void ctxfree(void *ptr)
@@ -790,7 +786,7 @@ public:
   ~_SBase()
   {
     if (OB_UNLIKELY(0 == i_)) {
-      OB_LOG(ERROR, "has break statement!!!");
+      OB_LOG_RET(WARN, OB_ERROR, "has break statement!!!");
     }
   }
   int i_;

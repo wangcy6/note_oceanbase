@@ -27,7 +27,7 @@ namespace sql
 {
 
 ObExprOracleDecode::ObExprOracleDecode(ObIAllocator &alloc)
-    : ObExprOperator(alloc, T_FUN_SYS_ORA_DECODE, N_ORA_DECODE, MORE_THAN_TWO, NOT_ROW_DIMENSION),
+    : ObExprOperator(alloc, T_FUN_SYS_ORA_DECODE, N_ORA_DECODE, MORE_THAN_TWO, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION),
       param_flags_(0)
 {
 }
@@ -110,6 +110,21 @@ int ObExprOracleDecode::calc_result_typeN(ObExprResType &type,
       type.set_type(ObRawType);
       type.set_collation_level(CS_LEVEL_NUMERIC);
       type.set_collation_type(CS_TYPE_BINARY);
+    } else if (lib::is_mysql_mode() && types_stack[RESULT_TYPE_INDEX].is_integer_type()) {
+      bool has_number = false;
+      for (int64_t i = RESULT_TYPE_INDEX; i < param_num && !has_number; i += 2 /*skip conditions */) {
+        if (ob_is_number_tc(types_stack[i].get_type())) {
+          has_number = true;
+        }
+      }
+      if (has_default && !has_number) {
+        has_number = ob_is_number_tc(types_stack[param_num - 1].get_type());
+      }
+      if (has_number) {
+        type.set_number();
+      } else {
+        type.set_type(types_stack[RESULT_TYPE_INDEX].get_type());
+      }
     } else {
       type.set_type(types_stack[RESULT_TYPE_INDEX].get_type());
     }
@@ -176,8 +191,31 @@ int ObExprOracleDecode::calc_result_typeN(ObExprResType &type,
         }
       }
     }
-    if (lib::is_oracle_mode() && type.is_number()) {
-      type.set_scale(ORA_NUMBER_SCALE_UNKNOWN_YET);
+    if (OB_FAIL(ret)) {
+    } else if (type.is_number()) {
+      if (lib::is_oracle_mode()) {
+        type.set_scale(ORA_NUMBER_SCALE_UNKNOWN_YET);
+      } else {
+        ObExprResTypes res_types;
+        for (int64_t i = RESULT_TYPE_INDEX; OB_SUCC(ret) && i < param_num; i += 2) {
+          if (OB_FAIL(res_types.push_back(types_stack[i]))) {
+            LOG_WARN("fail to push back res type", K(ret));
+          }
+        }
+        if (has_default) {
+          if (OB_FAIL(res_types.push_back(types_stack[param_num - 1]))) {
+            LOG_WARN("fail to push back res type", K(ret));
+          }
+        }
+        if (OB_FAIL(ret)) {
+        } else if (res_types.count() == 0) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected result type count", K(ret));
+        } else if (OB_FAIL(aggregate_numeric_accuracy_for_merge(type, &res_types.at(0),
+                                                                res_types.count(), false))) {
+          LOG_WARN("fail to merge numeric accuracy", K(ret));
+        }
+      }
     } else {
       type.set_scale(SCALE_UNKNOWN_YET);//the scale of res in decode should be calced dynamically during runtime
     }
@@ -417,9 +455,12 @@ int ObExprOracleDecode::eval_decode(const ObExpr &expr, ObEvalCtx &ctx, ObDatum 
     LOG_WARN("cmp_func is NULL", K(ret), K(expr));
   }
   for (int64_t i = 1; OB_SUCC(ret) && i < expr.arg_cnt_ - 1; i += 2) {
+    int cmp_ret = 0;
     if (OB_FAIL(expr.args_[i]->eval(ctx, search_i))) {
       LOG_WARN("eval search expr failed", K(ret), K(i));
-    } else if (0 == cmp_func(*e_0, *search_i)) {
+    } else if (OB_FAIL(cmp_func(*e_0, *search_i, cmp_ret))) {
+      LOG_WARN("do cmp failed", K(ret), K(i));
+    } else if (cmp_ret == 0) {
       has_res = true;
       res_idx = i + 1;
       break;
@@ -485,7 +526,8 @@ int ObExprOracleDecode::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_e
     rt_expr.inner_functions_[0] = reinterpret_cast<void*>(
         ObDatumFuncs::get_nullsafe_cmp_func(cmp_meta.type_, cmp_meta.type_,
                                             default_null_pos(), cmp_meta.cs_type_,
-                                            lib::is_oracle_mode()));
+                                            cmp_meta.scale_, lib::is_oracle_mode(),
+                                            rt_expr.args_[0]->obj_meta_.has_lob_header()));
   }
   return ret;
 }

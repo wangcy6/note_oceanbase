@@ -46,7 +46,7 @@ ObMySQLResultImpl::~ObMySQLResultImpl()
   // must call close() before destroy
 }
 
-int ObMySQLResultImpl::init()
+int ObMySQLResultImpl::init(bool enable_use_result)
 {
   int ret = OB_SUCCESS;
   int64_t field_count = 0;
@@ -55,18 +55,26 @@ int ObMySQLResultImpl::init()
   if (OB_ISNULL(stmt = stmt_.get_stmt_handler())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("stmt handler is null", K(ret));
-  } else if (OB_ISNULL(result_ = mysql_store_result(stmt))) {
-    ret = -mysql_errno(stmt_.get_conn_handler());
-    LOG_WARN("fail to store mysql result", "err_msg", mysql_error(stmt_.get_conn_handler()), K(ret));
-    if (OB_SUCC(ret)) {
-      // if we execute a ResultSet sql, but observer just return an ok packet(casued by bugs),
-      // we will arrive here.
-      ret = OB_ERR_SQL_CLIENT;
-      LOG_WARN("fail to store mysql result, but can not get mysql errno,"
-                     " maybe recieved an ok pkt, covert it to ob err", K(ret));
-    }
   } else {
-    result_column_count_ = static_cast<int>(mysql_num_fields(result_));
+    if (enable_use_result) {
+      result_ = mysql_use_result(stmt);
+      LOG_DEBUG("enabled mysql_use_result", K(enable_use_result), K(result_), K(mysql_get_client_version()), K(mysql_get_client_info()));
+    } else {
+      result_ = mysql_store_result(stmt);
+    }
+    if (OB_ISNULL(result_)) {
+      ret = -mysql_errno(stmt_.get_conn_handler());
+      LOG_WARN("fail to store mysql result", "err_msg", mysql_error(stmt_.get_conn_handler()), K(ret));
+      if (OB_SUCC(ret)) {
+        // if we execute a ResultSet sql, but observer just return an ok packet(casued by bugs),
+        // we will arrive here.
+        ret = OB_ERR_SQL_CLIENT;
+        LOG_WARN("fail to store mysql result, but can not get mysql errno,"
+                      " maybe recieved an ok pkt, covert it to ob err", K(ret));
+      }
+    } else {
+      result_column_count_ = static_cast<int>(mysql_num_fields(result_));
+    }
   }
 
   if (OB_SUCC(ret)) {
@@ -623,6 +631,7 @@ int ObMySQLResultImpl::get_ob_type(ObObjType &ob_type, obmysql::EMySQLFieldType 
       ob_type = ObInt32Type;
       break;
     case obmysql::EMySQLFieldType::MYSQL_TYPE_LONGLONG:
+    case obmysql::EMySQLFieldType::MYSQL_TYPE_INT24:
       ob_type = ObIntType;
       break;
     case obmysql::EMySQLFieldType::MYSQL_TYPE_FLOAT:
@@ -686,6 +695,9 @@ int ObMySQLResultImpl::get_ob_type(ObObjType &ob_type, obmysql::EMySQLFieldType 
     case obmysql::EMySQLFieldType::MYSQL_TYPE_JSON:
       ob_type = ObJsonType;
       break;
+    case obmysql::EMySQLFieldType::MYSQL_TYPE_GEOMETRY:
+      ob_type = ObGeometryType;
+      break;
     case obmysql::EMySQLFieldType::MYSQL_TYPE_BIT:
       ob_type = ObBitType;
       break;
@@ -740,7 +752,7 @@ int ObMySQLResultImpl::get_type(const int64_t col_idx, ObObjMeta &type) const
 }
 int ObMySQLResultImpl::get_col_meta(const int64_t col_idx, bool old_max_length,
                                     oceanbase::common::ObString &name, ObObjMeta &meta,
-                                    int16_t &precision, int16_t &scale, int32_t &length) const
+                                    ObAccuracy &acc) const
 {
   int ret = OB_SUCCESS;
   return ret;
@@ -785,7 +797,7 @@ int ObMySQLResultImpl::get_obj(const int64_t col_idx, ObObj &obj,
       case ObUDoubleType:
         if (OB_SUCC(get_double(col_idx, obj_value.double_)))
         {
-          obj.set_double(obj_value.double_);
+          obj.set_double(type.get_type(), obj_value.double_);
         }
         break;
       case ObVarcharType:
@@ -819,7 +831,9 @@ int ObMySQLResultImpl::get_obj(const int64_t col_idx, ObObj &obj,
       case ObRawType:
         if (OB_SUCC(get_raw(col_idx, obj_str)))
         {
-          if (OB_ISNULL(allocator)) {
+          if (obj_str.empty()) {
+            obj.set_null();
+          } else if (OB_ISNULL(allocator)) {
             ret = OB_INVALID_ARGUMENT;
             LOG_WARN("allocator is NULL", K(ret));
           } else if (OB_FAIL(ObHexUtilsBase::unhex(obj_str, *allocator, obj))) {
@@ -833,7 +847,7 @@ int ObMySQLResultImpl::get_obj(const int64_t col_idx, ObObj &obj,
       case ObUFloatType:
         if (OB_SUCC(get_float(col_idx, obj_value.float_)))
         {
-          obj.set_float(obj_value.float_);
+          obj.set_float(type.get_type(), obj_value.float_);
         }
         break;
       case ObDateTimeType:
@@ -843,9 +857,10 @@ int ObMySQLResultImpl::get_obj(const int64_t col_idx, ObObj &obj,
         }
         break;
       case ObTimestampType:
-        //TODO::need fill available timezone here @zhuweng
-        if (OB_SUCC(get_timestamp(col_idx, nullptr, obj_value.datetime_)))
-        {
+        if (OB_ISNULL(tz_info)) {
+          ret = OB_INVALID_ARGUMENT;
+          LOG_WARN("tz info is NULL", K(ret));
+        } else if (OB_SUCC(get_timestamp(col_idx, tz_info, obj_value.datetime_))) {
           obj.set_timestamp(obj_value.datetime_);
         }
         break;
@@ -875,6 +890,27 @@ int ObMySQLResultImpl::get_obj(const int64_t col_idx, ObObj &obj,
           }
         }
         break;
+      case ObDateType: {
+        if (OB_SUCC(get_date(col_idx, obj_value.date_)))
+        {
+          obj.set_date(obj_value.date_);
+        }
+        break;
+      }
+      case ObTimeType: {
+        if (OB_SUCC(get_time(col_idx, obj_value.time_)))
+        {
+          obj.set_time(obj_value.time_);
+        }
+        break;
+      }
+      case ObYearType: {
+        if (OB_SUCC(get_year(col_idx, obj_value.year_)))
+        {
+          obj.set_year(obj_value.year_);
+        }
+        break;
+      }
       case ObIntervalYMType: {
         ObIntervalYMValue ym_val;
         if (OB_SUCC(get_interval_ym(col_idx, ym_val))) {
@@ -905,9 +941,63 @@ int ObMySQLResultImpl::get_obj(const int64_t col_idx, ObObj &obj,
         }
         break;
       }
-      case ObDateType:
-      case ObTimeType:
-      case ObYearType:
+      case ObTinyTextType:
+      case ObTextType:
+      case ObMediumTextType:
+      case ObLongTextType: {
+        if (lib::is_oracle_mode()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("oracle mode dblink not support lob type", K(ret), K(type.get_type()));
+        } else if (OB_SUCC(get_varchar(col_idx, obj_str))) {
+          obj.set_lob_value(type.get_type(), obj_str.ptr(), obj_str.length());
+          obj.set_collation_type(type.get_collation_type());
+        }
+        break;
+      }
+      case ObEnumType: {
+        if (OB_SUCC(get_varchar(col_idx, obj_str)))
+        {
+          obj.set_enum_inner(obj_str);
+          obj.set_collation_type(type.get_collation_type());
+        }
+        break;
+      }
+      case ObSetType: {
+        if (OB_SUCC(get_varchar(col_idx, obj_str)))
+        {
+          obj.set_set_inner(obj_str);
+          obj.set_collation_type(type.get_collation_type());
+        }
+        break;
+      }
+      case ObGeometryType: {
+        /*
+        if (OB_SUCC(get_varchar(col_idx, obj_str)))
+        {
+          obj.set_geometry_value(type.get_type(), obj_str.ptr(), obj_str.length());
+
+        }*/
+        ret = OB_NOT_SUPPORTED;
+        break;
+      }
+      case ObJsonType: {
+        /*if (OB_SUCC(get_varchar(col_idx, obj_str)))
+        {
+          obj.set_json_value(type.get_type(), obj_str.ptr(), obj_str.length());
+          obj.set_collation_type(type.get_collation_type());
+        }*/
+        ret = OB_NOT_SUPPORTED;
+        break;
+      }
+      case ObBitType: {
+        /*
+        if (OB_SUCC(get_uint(col_idx, obj_value.uint64_)))//ailing to do
+        {
+          obj.set_bit(obj_value.uint64_);
+        }*/
+        ret = OB_NOT_SUPPORTED;
+        break;
+      }
       default:
         ret = OB_NOT_SUPPORTED;
         LOG_WARN("not supported object type", "obj_type", obj.get_type(), K(ret));

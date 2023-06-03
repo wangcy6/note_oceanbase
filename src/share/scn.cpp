@@ -107,6 +107,14 @@ bool SCN::is_min() const
   return bool_ret;
 }
 
+<<<<<<< HEAD
+=======
+bool SCN::is_base_scn() const
+{
+ return (SCN_VERSION == v_) && (OB_BASE_SCN_TS_NS == ts_ns_);
+}
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 void SCN::set_base()
 {
   v_ = SCN_VERSION;
@@ -257,9 +265,15 @@ int64_t SCN::convert_to_ts(bool ignore_invalid) const
     ts_us = ts_ns_ / 1000UL;
   } else {
     if (ignore_invalid) {
+<<<<<<< HEAD
       PALF_LOG(WARN, "invalid scn should not convert to ts ", K(val_));
     } else {
       PALF_LOG(ERROR, "invalid scn should not convert to ts ", K(val_), K(lbt()));
+=======
+      PALF_LOG_RET(WARN, OB_ERR_UNEXPECTED, "invalid scn should not convert to ts ", K(val_));
+    } else {
+      PALF_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid scn should not convert to ts ", K(val_), K(lbt()));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     }
   }
   return ts_us;
@@ -354,7 +368,11 @@ int SCN::convert_for_tx(int64_t val)
   int ret = OB_SUCCESS;
   if (INT64_MAX == val) {
     val_ = OB_MAX_SCN_TS_NS;
+<<<<<<< HEAD
   } else if (OB_UNLIKELY(OB_MAX_SCN_TS_NS < val || OB_MIN_SCN_TS_NS > val)) {
+=======
+  } else if (OB_UNLIKELY(val < 0 || OB_MAX_SCN_TS_NS < val)) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     ret = OB_INVALID_ARGUMENT;
     PALF_LOG(ERROR, "invalid argument", K(val), K(lbt()));
   } else {
@@ -363,6 +381,7 @@ int SCN::convert_for_tx(int64_t val)
   return ret;
 }
 
+<<<<<<< HEAD
 int64_t SCN::get_val_for_tx() const
 {
   int64_t result_val = 0;
@@ -370,6 +389,19 @@ int64_t SCN::get_val_for_tx() const
     result_val = INT64_MAX;
   } else if (!is_valid()) {
     PALF_LOG(ERROR, "invalid SCN", K(val_));
+=======
+int64_t SCN::get_val_for_tx(const bool ignore_invalid_scn) const
+{
+  int64_t result_val = -1;
+  if (!is_valid()) {
+    if (!ignore_invalid_scn) {
+      PALF_LOG_RET(ERROR, OB_INVALID_ARGUMENT, "invalid SCN", K(val_));
+    } else {
+      PALF_LOG_RET(WARN, OB_INVALID_ARGUMENT, "invalid SCN", K(val_));
+    }
+  } else if (OB_MAX_SCN_TS_NS == ts_ns_) {
+    result_val = INT64_MAX;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else {
     result_val = ts_ns_;
   }
@@ -472,7 +504,11 @@ int SCN::to_yson(char *buf, const int64_t buf_len, int64_t &pos) const
   return oceanbase::yson::databuff_encode_elements(buf, buf_len, pos, OB_ID(scn_val), val_);
 }
 
+<<<<<<< HEAD
 int SCN::fixed_deserialize(const char* buf, const int64_t data_len, int64_t& pos)
+=======
+int SCN::fixed_deserialize_without_transform(const char* buf, const int64_t data_len, int64_t& pos)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   int ret = OB_SUCCESS;
   int64_t new_pos = pos;
@@ -484,6 +520,19 @@ int SCN::fixed_deserialize(const char* buf, const int64_t data_len, int64_t& pos
     PALF_LOG(WARN, "failed to decode val_", K(buf), K(data_len), K(new_pos), K(ret));
   } else {
     pos = new_pos;
+<<<<<<< HEAD
+=======
+  }
+  return ret;
+}
+
+int SCN::fixed_deserialize(const char* buf, const int64_t data_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(fixed_deserialize_without_transform(buf, data_len, pos))) {
+    PALF_LOG(WARN, "failed to fixed_deserialize_without_transform", K(buf), K(data_len), K(pos), K(ret));
+  } else {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     (void)transform_max_();
   }
   return ret;

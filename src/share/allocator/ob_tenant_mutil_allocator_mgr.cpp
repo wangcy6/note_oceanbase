@@ -49,19 +49,6 @@ int ObTenantMutilAllocatorMgr::get_tenant_log_allocator(const uint64_t tenant_id
   return ret;
 }
 
-// Get the replay allocator for specified tenant, create it when tenant not exist
-int ObTenantMutilAllocatorMgr::get_tenant_replay_allocator(const uint64_t tenant_id,
-                                                           ObIReplayTaskAllocator *&out_allocator)
-{
-  int ret = OB_SUCCESS;
-  ObTenantMutilAllocator *allocator = NULL;
-  if (OB_FAIL(get_tenant_mutil_allocator(tenant_id, allocator))) {
-  } else {
-    out_allocator = allocator;
-  }
-  return ret;
-}
-
 int ObTenantMutilAllocatorMgr::get_tenant_mutil_allocator(const uint64_t tenant_id,
                                                           ObTenantMutilAllocator *&out_allocator)
 {
@@ -126,6 +113,7 @@ int ObTenantMutilAllocatorMgr::construct_allocator_(const uint64_t tenant_id,
     OB_LOG(WARN, "invalid arguments", K(ret), K(tenant_id));
   } else {
     ObMemAttr attr(OB_SERVER_TENANT_ID, ObModIds::OB_TENANT_MUTIL_ALLOCATOR);
+    SET_USE_500(attr);
     void *buf = ob_malloc(sizeof(TMA), attr);
     if (NULL == buf) {
       ret = OB_ALLOCATE_MEMORY_FAILED;

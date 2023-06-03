@@ -35,11 +35,10 @@ public:
 
   void reset();
   int assign(const ObOptTabletLoc &partition_location);
-  int assign_with_only_readable_replica(
-                                        const ObObjectID &partition_id,
+  int assign_with_only_readable_replica(const ObObjectID &partition_id,
+                                        const ObObjectID &first_level_part_id,
                                         const common::ObTabletID &tablet_id,
-                                        const share::ObLSLocation &partition_location,
-                                        const common::ObIArray<common::ObAddr> &invalid_servers);
+                                        const share::ObLSLocation &partition_location);
 
   bool is_valid() const;
   bool operator==(const ObOptTabletLoc &other) const;
@@ -49,16 +48,20 @@ public:
   int get_strong_leader(share::ObLSReplicaLocation &replica_location) const;
 
   void set_tablet_info(common::ObTabletID tablet_id,
-                       common::ObPartID part_id)
+                       common::ObPartID part_id,
+                       common::ObPartID first_level_part_id)
   {
     tablet_id_ = tablet_id;
     partition_id_ = part_id;
+    first_level_part_id_ = first_level_part_id;
   }
   inline int64_t get_partition_id() const { return partition_id_; }
 
+  inline int64_t get_first_level_part_id() const { return first_level_part_id_; }
+
   inline common::ObTabletID get_tablet_id() const { return tablet_id_; }
 
-  inline share::ObLSID get_ls_id() const { return ls_id_; }
+  inline const share::ObLSID &get_ls_id() const { return ls_id_; }
 
   inline int64_t get_renew_time() const { return renew_time_; }
 
@@ -70,6 +73,8 @@ public:
 
 private:
   int64_t partition_id_;
+  // first level part id, only valid for subpartitioned table
+  int64_t first_level_part_id_;
   common::ObTabletID tablet_id_;
   share::ObLSID ls_id_;
   ObSmartReplicaLocationArray replica_locations_;
@@ -80,7 +85,7 @@ class ObCandiTabletLoc
 {
 public:
   ObCandiTabletLoc();
-  virtual ~ObCandiTabletLoc();
+  ~ObCandiTabletLoc();
 
   void reset();
   int assign(const ObCandiTabletLoc &other);
@@ -90,18 +95,17 @@ public:
   int add_priority_replica_idx(int64_t priority_replica_idx);
   int64_t get_selected_replica_idx() const { return selected_replica_idx_; }
   bool has_selected_replica() const { return common::OB_INVALID_INDEX != selected_replica_idx_; }
-
+  const share::ObLSID &get_ls_id() const { return opt_tablet_loc_.get_ls_id(); }
   int get_selected_replica(share::ObLSReplicaLocation &replica_loc) const;
   int get_selected_replica(ObRoutePolicy::CandidateReplica &replica_loc) const;
   int get_priority_replica(int64_t idx, share::ObLSReplicaLocation &replica_loc) const;
   int get_priority_replica(int64_t idx, ObRoutePolicy::CandidateReplica &replica_loc) const;
   template<class T>
   int get_priority_replica_base(int64_t selected_replica_idx, T &replica_loc) const;
-  int set_part_loc_with_only_readable_replica(
-      const ObObjectID &partition_id,
-      const common::ObTabletID &tablet_id,
-      const share::ObLSLocation &partition_location,
-      const common::ObIArray<common::ObAddr> &invalid_servers);
+  int set_part_loc_with_only_readable_replica(const ObObjectID &partition_id,
+                                              const ObObjectID &first_level_part_id,
+                                              const common::ObTabletID &tablet_id,
+                                              const share::ObLSLocation &partition_location);
   const ObOptTabletLoc &get_partition_location() const { return opt_tablet_loc_; }
   ObOptTabletLoc &get_partition_location() { return opt_tablet_loc_; }
   const common::ObIArray<int64_t> &get_priority_replica_idxs() const { return priority_replica_idxs_; }
@@ -151,7 +155,7 @@ public:
                                          common::ObAddr &same_server,
                                          const common::ObAddr &local_server);
   int all_select_fixed_server(const common::ObAddr &fixed_server);
-
+  int get_all_servers(common::ObIArray<common::ObAddr> &servers) const;
   bool is_duplicate_table() const { return ObDuplicateType::NOT_DUPLICATE != duplicate_type_; }
   bool is_duplicate_table_not_in_dml() const { return ObDuplicateType::DUPLICATE == duplicate_type_; }
   void set_duplicate_type(ObDuplicateType v) { duplicate_type_ = v; }

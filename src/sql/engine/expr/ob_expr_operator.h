@@ -69,7 +69,7 @@ public:
                   calc_meta_(calc_meta), max_length_(max_length), flag_(flag)
   {
     if (OB_UNLIKELY(calc_meta.get_type() >= common::ObMaxType)) {
-      SQL_LOG(ERROR, "the wrong type");
+      SQL_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "the wrong type");
     }
   }
   virtual ~ObFuncInputType() {}
@@ -234,6 +234,11 @@ public:
     TWO_OR_THREE = -7,
     OCCUR_AS_PAIR = -8,
   };
+  enum ObValidForGeneratedColFlag
+  {
+    VALID_FOR_GENERATED_COL = true,
+    NOT_VALID_FOR_GENERATED_COL = false
+  };
 
   static const int32_t NOT_ROW_DIMENSION = -1;
   static const bool INTERNAL_IN_MYSQL_MODE = true;
@@ -242,6 +247,7 @@ public:
                  ObExprOperatorType type,
                  const char *name,
                  int32_t param_num,
+                 ObValidForGeneratedColFlag valid_for_generated_col,
                  int32_t row_dimension = NOT_ROW_DIMENSION,
                  bool is_internal_for_mysql = false,
                  bool is_internal_for_oracle = false);
@@ -460,7 +466,7 @@ public:
     const ObExprResType *types,
     int64_t param_num,
     const common::ObCollationType conn_coll_type);
-  //skip_null for expr COALESCE https://work.aone.alibaba-inc.com/issue/31824340
+  //skip_null for expr COALESCE
   static int aggregate_result_type_for_merge(
     ObExprResType &type,
     const ObExprResType *types,
@@ -546,6 +552,11 @@ public:
                                                  const ObExprResType *types,
                                                  int64_t param_num);
 
+  static int aggregate_user_defined_sql_type(
+      ObExprResType &type,
+      const ObExprResType *types,
+      int64_t param_num);
+
   int calc_cmp_type2(ObExprResType &type,
                     const ObExprResType &type1,
                     const ObExprResType &type2,
@@ -565,6 +576,8 @@ public:
                                       common::ObExprTypeCtx &type_ctx) const;
 public:
   virtual common::ObCastMode get_cast_mode() const;
+  virtual int is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const;
+  static int check_first_param_not_time(const common::ObIArray<ObRawExpr *> &exprs, bool &not_time);
 protected:
   ObExpr *get_rt_expr(const ObRawExpr &raw_expr) const;
 
@@ -667,6 +680,7 @@ protected:
   // 上面的限制而无法实现。因此在ObExprOperator中添加extra_serialize_，每个子类可以对它进行解释。
   // 例如对于ObExprCast, 它的含义是is_implicit_cast, 即是否为隐式cast
   int64_t extra_serialize_;
+  bool is_valid_for_generated_col_;
   bool is_internal_for_mysql_;
   bool is_internal_for_oracle_;
 };
@@ -682,6 +696,7 @@ inline ObExprOperator::ObExprOperator(common::ObIAllocator &alloc,
                                       ObExprOperatorType type,
                                       const char *name,
                                       int32_t param_num,
+                                      ObValidForGeneratedColFlag valid_for_generated_col,
                                       int32_t row_dimension,
                                       bool is_internal_for_mysql,
                                       bool is_internal_for_oracle)
@@ -700,6 +715,7 @@ inline ObExprOperator::ObExprOperator(common::ObIAllocator &alloc,
       raw_expr_(NULL),
       is_called_in_sql_(true),
       extra_serialize_(0),
+      is_valid_for_generated_col_(valid_for_generated_col == 1),
       is_internal_for_mysql_(is_internal_for_mysql),
       is_internal_for_oracle_(is_internal_for_oracle)
 {
@@ -712,7 +728,7 @@ inline int ObExprOperator::calc_result_type0(ObExprResType &type,
   UNUSED(type);
   UNUSED(type_ctx);
   UNUSED(arg_arrs);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -725,7 +741,7 @@ inline int ObExprOperator::calc_result_type1(ObExprResType &type,
   UNUSED(type1);
   UNUSED(type_ctx);
   UNUSED(arg_arrs);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -740,7 +756,7 @@ inline int ObExprOperator::calc_result_type2(ObExprResType &type,
   UNUSED(type2);
   UNUSED(type_ctx);
   UNUSED(arg_arrs);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -757,7 +773,7 @@ inline int ObExprOperator::calc_result_type3(ObExprResType &type,
   UNUSED(type3);
   UNUSED(type_ctx);
   UNUSED(arg_arrs);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -772,7 +788,7 @@ inline int ObExprOperator::calc_result_typeN(ObExprResType &type,
   UNUSED(param_num);
   UNUSED(type_ctx);
   UNUSED(arg_arrs);
-  SQL_LOG(ERROR, "not implement", K(type_), K(get_type_name(type_)));
+  SQL_LOG_RET(ERROR, common::OB_NOT_IMPLEMENT, "not implement", K(type_), K(get_type_name(type_)));
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -781,7 +797,7 @@ inline int ObExprOperator::calc_result_type0(ObExprResType &type,
 {
   UNUSED(type);
   UNUSED(type_ctx);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -792,7 +808,7 @@ inline int ObExprOperator::calc_result_type1(ObExprResType &type,
   UNUSED(type);
   UNUSED(type1);
   UNUSED(type_ctx);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -805,7 +821,7 @@ inline int ObExprOperator::calc_result_type2(ObExprResType &type,
   UNUSED(type1);
   UNUSED(type2);
   UNUSED(type_ctx);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -820,7 +836,7 @@ inline int ObExprOperator::calc_result_type3(ObExprResType &type,
   UNUSED(type2);
   UNUSED(type3);
   UNUSED(type_ctx);
-  SQL_LOG(WARN, "not implement");
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement");
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -833,7 +849,7 @@ inline int ObExprOperator::calc_result_typeN(ObExprResType &type,
   UNUSED(types);
   UNUSED(param_num);
   UNUSED(type_ctx);
-  SQL_LOG(ERROR, "not implement", K(type_), K(get_type_name(type_)));
+  SQL_LOG_RET(ERROR, common::OB_NOT_IMPLEMENT, "not implement", K(type_), K(get_type_name(type_)));
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -945,7 +961,7 @@ inline void ObExprOperator::calc_result_flagN(ObExprResType &type,
 
   bool not_null = true;
   if (OB_ISNULL(types) || OB_UNLIKELY(param_num < 0)) {
-    SQL_LOG(ERROR, "null types or the wrong param_num");
+    SQL_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "null types or the wrong param_num");
   } else {
     for (int64_t i = 0; i < param_num; ++i) {
       if (!types[i].has_result_flag(NOT_NULL_FLAG)) {
@@ -963,9 +979,9 @@ inline void ObExprOperator::calc_result_flagN(ObExprResType &type,
 class ObFuncExprOperator : public ObExprOperator
 {
 public:
-    ObFuncExprOperator(common::ObIAllocator &alloc, ObExprOperatorType type, const char *name, int32_t param_num, int32_t dimension,
+    ObFuncExprOperator(common::ObIAllocator &alloc, ObExprOperatorType type, const char *name, int32_t param_num, ObValidForGeneratedColFlag valid_for_generated_col, int32_t dimension,
                        bool is_internal_for_mysql = false, bool is_internal_for_oracle = false)
-      : ObExprOperator(alloc, type, name, param_num, dimension, is_internal_for_mysql, is_internal_for_oracle)
+      : ObExprOperator(alloc, type, name, param_num, valid_for_generated_col, dimension, is_internal_for_oracle)
   {};
 
   virtual ~ObFuncExprOperator() {};
@@ -997,7 +1013,7 @@ public:
                            int32_t dimension = NOT_ROW_DIMENSION,
                            bool is_internal_for_mysql = false,
                            bool is_internal_for_oracle = false)
-      : ObExprOperator(alloc, type, name, param_num, dimension, is_internal_for_mysql, is_internal_for_oracle),
+      : ObExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension, is_internal_for_mysql, is_internal_for_oracle),
         cmp_op_func2_(NULL)
   {
   }
@@ -1198,18 +1214,19 @@ public:
       common::ObCmpOp cmp_op)
   {
     bool need_no_cast = false;
+    bool has_lob_header = type1.has_lob_header() || type2.has_lob_header();
     //特殊处理显示调用compare(例如：c1 > c2)，此时enum/set均应该转换成string处理
     //内部比较（order by）,enum/set不需要转换。
     if (common::ObDatumFuncs::is_string_type(type1.get_type()) &&
         common::ObDatumFuncs::is_string_type(type2.get_type())) {
-      need_no_cast =
-          common::ObCharset::charset_type_by_coll(
-              type1.get_collation_type()) ==
-          common::ObCharset::charset_type_by_coll(type2.get_collation_type());
+      // if locator v2 enabled, cannot compare string/text directly remove this comment
+      // since cannot known whether a datum has locator in compare funcs
+      need_no_cast = common::ObCharset::charset_type_by_coll(type1.get_collation_type())
+                     == common::ObCharset::charset_type_by_coll(type2.get_collation_type());
     } else {
       auto func_ptr = ObExprCmpFuncsHelper::get_eval_expr_cmp_func(
-          type1.get_type(), type2.get_type(), cmp_op,
-          lib::is_oracle_mode(), common::CS_TYPE_MAX);
+          type1.get_type(), type2.get_type(), type1.get_scale(), type2.get_scale(), cmp_op,
+          lib::is_oracle_mode(), common::CS_TYPE_MAX, has_lob_header);
       need_no_cast = (func_ptr != nullptr);
     }
     return need_no_cast;
@@ -1217,10 +1234,6 @@ public:
 
   static int eval_pl_udt_compare(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
 
-protected:
-  static bool is_int_cmp_const_str(const ObExprResType *type1,
-                                   const ObExprResType *type2,
-                                   common::ObObjType &cmp_type);
   OB_INLINE static common::ObCmpOp get_cmp_op(const ObExprOperatorType type) {
     /*
      * maybe we can use associative array(table lookup) to get a better
@@ -1277,6 +1290,10 @@ protected:
     return cmp_op;
   }
 
+protected:
+  static bool is_int_cmp_const_str(const ObExprResType *type1,
+                                   const ObExprResType *type2,
+                                   common::ObObjType &cmp_type);
   OB_INLINE static bool is_expected_cmp_ret(const common::ObCmpOp cmp_op,
                                             const int cmp_ret)
   {
@@ -1346,7 +1363,7 @@ public:
                            int32_t dimension = NOT_ROW_DIMENSION,
                            bool is_internal_for_mysql = false,
                            bool is_internal_for_oracle = false)
-      : ObExprOperator(alloc, type, name, param_num, dimension, is_internal_for_mysql, is_internal_for_oracle),
+      : ObExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension, is_internal_for_mysql, is_internal_for_oracle),
       subquery_key_(T_WITH_NONE),
       left_is_iter_(false),
       right_is_iter_(false)
@@ -1446,16 +1463,17 @@ protected:
 
   static int subquery_cmp_eval_with_none(
       const ObExpr &expr, ObEvalCtx &l_ctx, ObDatum &res,
-      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter);
+      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter, bool left_all_null);
   static int subquery_cmp_eval_with_any(
       const ObExpr &expr, ObEvalCtx &l_ctx, ObDatum &res,
-      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter);
+      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter, bool left_all_null);
   static int subquery_cmp_eval_with_all(
       const ObExpr &expr, ObEvalCtx &l_ctx, ObDatum &res,
-      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter);
+      ObExpr **l_row, ObEvalCtx &r_ctx, ObExpr **r_row, ObSubQueryIterator *r_iter, bool left_all_null);
 
   static int cmp_one_row(const ObExpr &expr, ObDatum &res,
-                         ObExpr **l_row, ObEvalCtx &l_ctx, ObExpr **r_row, ObEvalCtx &r_ctx);
+                         ObExpr **l_row, ObEvalCtx &l_ctx, ObExpr **r_row, ObEvalCtx &r_ctx,
+                         bool left_all_null, bool right_all_null);
 
   static int check_exists(const ObExpr &expr, ObEvalCtx &ctx, bool &exists);
 
@@ -1492,11 +1510,12 @@ public:
                       ObResultTypeFunc result_type_func,
                       ObCalcTypeFunc calc_type_func,
                       const ObArithFunc *arith_funcs)
-      : ObExprOperator(alloc, type, name, param_num, dimension),
+      : ObExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension),
       result_type_func_(result_type_func),
       calc_type_func_(calc_type_func),
       arith_funcs_(arith_funcs)
-  {};
+  {
+  };
 
   virtual ~ObArithExprOperator() {};
 
@@ -1617,7 +1636,7 @@ public:
                        const char *name,
                        int32_t param_num,
                        int32_t dimension)
-      : ObExprOperator(alloc, type, name, param_num, dimension)
+      : ObExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension)
   {
   }
   virtual ~ObVectorExprOperator()
@@ -1655,7 +1674,7 @@ public:
                         const char *name,
                         int32_t param_num,
                         int32_t dimension)
-      : ObExprOperator(alloc, type, name, param_num, dimension)
+      : ObExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension)
   {
   }
 
@@ -1748,10 +1767,11 @@ public:
                        ObExprOperatorType type,
                        const char *name,
                        int32_t param_num,
+                       ObValidForGeneratedColFlag valid_for_generated_col,
                        bool is_internal_for_mysql = false,
                        bool is_internal_for_oracle = false)
-      :ObExprOperator(alloc, type, name, param_num, NOT_ROW_DIMENSION,
-                     is_internal_for_mysql, is_internal_for_oracle)
+      :ObExprOperator(alloc, type, name, param_num, valid_for_generated_col, NOT_ROW_DIMENSION,
+                      is_internal_for_mysql, is_internal_for_oracle)
   {}
   virtual ~ObStringExprOperator() {}
   static int convert_result_collation(const ObExprResType &result_type,
@@ -1781,7 +1801,7 @@ public:
                         const char *name,
                         int32_t param_num,
                         int32_t dimension)
-      : ObExprOperator(alloc, type, name, param_num, dimension)
+      : ObExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension)
   {
   }
   virtual ~ObBitwiseExprOperator()
@@ -1871,7 +1891,7 @@ public:
                         int32_t dimension,
                         bool is_internal_for_mysql = false,
                         bool is_internal_for_oracle = false)
-      : ObExprOperator(alloc, type, name, param_num, dimension, is_internal_for_mysql, is_internal_for_oracle), need_cast_(true)
+      : ObExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension, is_internal_for_mysql, is_internal_for_oracle), need_cast_(true)
   {
   }
 
@@ -1954,8 +1974,9 @@ public:
                          int32_t dimension,
                          bool is_internal_for_mysql = false,
                          bool is_internal_for_oracle = false)
-      : ObFuncExprOperator(alloc, type, name, param_num, dimension, is_internal_for_mysql, is_internal_for_oracle)
-  {};
+      : ObFuncExprOperator(alloc, type, name, param_num, VALID_FOR_GENERATED_COL, dimension, is_internal_for_mysql, is_internal_for_oracle)
+  {
+  };
 
   virtual ~ObLocationExprOperator() {};
   virtual int calc_result_type2(ObExprResType &type,
@@ -2161,14 +2182,14 @@ private:
     if (lib::is_oracle_mode()) {                                           \
       if (common::OB_SUCCESS != (expr_ctx).my_session_->                   \
           get_collation_server(cast_coll_type)) {                          \
-        SQL_LOG(ERROR, "fail to get server collation");                    \
+        SQL_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "fail to get server collation");                    \
         cast_coll_type = ObCharset::get_default_collation(                 \
             ObCharset::get_default_charset());                             \
       }                                                                    \
     } else if (lib::is_mysql_mode()) {                                     \
       if (common::OB_SUCCESS != (expr_ctx).my_session_->                   \
           get_collation_connection(cast_coll_type)) {                      \
-        SQL_LOG(ERROR, "fail to get collation_connection, "                \
+        SQL_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "fail to get collation_connection, "                \
                 "set it to default collation");                            \
         cast_coll_type = ObCharset::get_default_collation(                 \
             ObCharset::get_default_charset());                             \
@@ -2176,10 +2197,10 @@ private:
     }                                                                      \
     if (common::OB_SUCCESS != ObSQLUtils::set_compatible_cast_mode(        \
                                 (expr_ctx).my_session_, cp_cast_mode_)) {  \
-      SQL_LOG(ERROR, "fail to get compatible mode for cast_mode");         \
+      SQL_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "fail to get compatible mode for cast_mode");         \
     }                                                                      \
   } else {                                                                 \
-    SQL_LOG(WARN, "session is null");                                      \
+    SQL_LOG_RET(WARN, common::OB_ERR_UNEXPECTED, "session is null");                                      \
     cast_coll_type = ObCharset::get_system_collation();                    \
   }                                                                        \
   const ObDataTypeCastParams dtc_params = ObBasicSessionInfo::create_dtc_params((expr_ctx).my_session_);\

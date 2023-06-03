@@ -28,23 +28,32 @@ int ObPxAdmission::get_parallel_session_target(ObSQLSessionInfo &session,
                                                int64_t &session_target)
 {
   int ret = OB_SUCCESS;
+  int64_t parallel_servers_target = INT64_MAX; // default to unlimited
   session_target = INT64_MAX; // default to unlimited
   uint64_t tenant_id = session.get_effective_tenant_id();
   omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id));
-  if (tenant_config.is_valid()) {
+  if (OB_FAIL(OB_PX_TARGET_MGR.get_parallel_servers_target(tenant_id, parallel_servers_target))) {
+    LOG_WARN("get parallel_servers_target failed", K(ret));
+  } else if (OB_LIKELY(tenant_config.is_valid())) {
     int64_t pmas = tenant_config->_parallel_max_active_sessions;
-    int64_t target = INT64_MAX; // default to unlimited
     int64_t parallel_session_count;
-    if (OB_FAIL(OB_PX_TARGET_MGR.get_parallel_servers_target(tenant_id, target))) {
-      LOG_WARN("get parallel_servers_target failed", K(ret));
-    } else if (OB_FAIL(OB_PX_TARGET_MGR.get_parallel_session_count(tenant_id, parallel_session_count))) {
+    if (OB_FAIL(OB_PX_TARGET_MGR.get_parallel_session_count(tenant_id, parallel_session_count))) {
       LOG_WARN("get parallel_px_session failed", K(ret));
-    } else if (pmas > 0 && target != INT64_MAX && parallel_session_count > 0) {
+    } else if (pmas > 0 && parallel_servers_target != INT64_MAX && parallel_session_count > 0) {
       // when pmas is TOO large, session target could be less than one,
       // this is not good! We ensure this query can run with minimal threads here
-      session_target = std::max(target / pmas, minimal_session_target);
+      session_target = std::max(parallel_servers_target / pmas, minimal_session_target);
     }
+  } else if (OB_UNLIKELY(minimal_session_target > parallel_servers_target)) {
+    ret = OB_ERR_PARALLEL_SERVERS_TARGET_NOT_ENOUGH;
+    LOG_WARN("minimal_session_target is more than parallel_servers_target", K(ret),
+                                      K(minimal_session_target), K(parallel_servers_target));
+  } else {
+    // tenant_config is invalid, use parallel_servers_target
+    session_target = parallel_servers_target;
   }
+  LOG_TRACE("PX get parallel session target", K(tenant_id), K(tenant_config.is_valid()),
+                        K(parallel_servers_target), K(minimal_session_target), K(session_target));
   return ret;
 }
 
@@ -95,12 +104,16 @@ int64_t ObPxAdmission::admit(ObSQLSessionInfo &session, ObExecContext &exec_ctx,
 
 int ObPxAdmission::enter_query_admission(ObSQLSessionInfo &session,
                                          ObExecContext &exec_ctx,
+                                         sql::stmt::StmtType stmt_type,
                                          ObPhysicalPlan &plan)
 {
   int ret = OB_SUCCESS;
   // 对于只有dop=1 的场景跳过检查，因为这种场景走 RPC 线程，不消耗 PX 线程
-  // https://yuque.antfin-inc.com/ob/sql/xzrw9m
-  if (plan.is_use_px() && 1 != plan.get_px_dop() && plan.get_expected_worker_count() > 0) {
+  //
+  if (stmt::T_EXPLAIN != stmt_type
+      && plan.is_use_px()
+      && 1 != plan.get_px_dop()
+      && plan.get_expected_worker_count() > 0) {
     // use for appointment
     const ObHashMap<ObAddr, int64_t> &req_px_worker_map = plan.get_expected_worker_map();
     ObHashMap<ObAddr, int64_t> &acl_px_worker_map = exec_ctx.get_admission_addr_map();
@@ -155,10 +168,11 @@ int ObPxAdmission::enter_query_admission(ObSQLSessionInfo &session,
           plan_ctx->set_worker_count(admit_worker_count);
           // 表示 optimizer 计算的数量
           task_exec_ctx->set_expected_worker_cnt(req_worker_count);
+          task_exec_ctx->set_minimal_worker_cnt(minimal_px_worker_count);
           // 表示 admission 根据当前资源排队情况实际分配的数量
           task_exec_ctx->set_admited_worker_cnt(admit_worker_count);
         }
-        LOG_TRACE("PX admission set the plan worker count", K(admit_worker_count));
+        LOG_TRACE("PX admission set the plan worker count", K(req_worker_count), K(minimal_px_worker_count), K(admit_worker_count));
       }
     }
   }
@@ -167,9 +181,13 @@ int ObPxAdmission::enter_query_admission(ObSQLSessionInfo &session,
 
 void ObPxAdmission::exit_query_admission(ObSQLSessionInfo &session,
                                          ObExecContext &exec_ctx,
+                                         sql::stmt::StmtType stmt_type,
                                          ObPhysicalPlan &plan)
 {
-  if (plan.is_use_px() && 1 != plan.get_px_dop() && exec_ctx.get_admission_version() != UINT64_MAX) {
+  if (stmt::T_EXPLAIN != stmt_type
+      && plan.is_use_px()
+      && 1 != plan.get_px_dop()
+      && exec_ctx.get_admission_version() != UINT64_MAX) {
     int ret = OB_SUCCESS;
     uint64_t tenant_id = session.get_effective_tenant_id();
     hash::ObHashMap<ObAddr, int64_t> &addr_map = exec_ctx.get_admission_addr_map();
@@ -192,12 +210,17 @@ void ObPxSubAdmission::acquire(int64_t max, int64_t min, int64_t &acquired_cnt)
   oceanbase::omt::ObThWorker *worker = nullptr;
   int64_t upper_bound = 1;
   if (nullptr == (worker = THIS_THWORKER_SAFE)) {
-    LOG_ERROR("Oooops! can't find tenant. Unexpected!", K(max), K(min));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "Oooops! can't find tenant. Unexpected!", K(max), K(min));
   } else if (nullptr == (tenant = worker->get_tenant())) {
-    LOG_ERROR("Oooops! can't find tenant. Unexpected!", KP(worker), K(max), K(min));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "Oooops! can't find tenant. Unexpected!", KP(worker), K(max), K(min));
   } else {
     oceanbase::omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant->id()));
-    upper_bound = tenant->unit_min_cpu() * tenant_config->cpu_quota_concurrency;
+    if (!tenant_config.is_valid()) {
+      LOG_WARN_RET(OB_ERR_UNEXPECTED, "get tenant config failed, use default cpu_quota_concurrency");
+      upper_bound = tenant->unit_min_cpu() * 4;
+    } else {
+      upper_bound = tenant->unit_min_cpu() * tenant_config->px_workers_per_cpu_quota;
+    }
   }
   acquired_cnt = std::min(max, upper_bound);
 }

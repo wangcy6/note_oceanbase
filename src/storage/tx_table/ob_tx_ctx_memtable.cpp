@@ -123,13 +123,15 @@ int ObTxCtxMemtable::set(storage::ObStoreCtx &ctx,
                          const uint64_t table_id,
                          const storage::ObTableReadInfo &read_info,
                          const common::ObIArray<share::schema::ObColDesc> &columns,
-                         const storage::ObStoreRow &row)
+                         const storage::ObStoreRow &row,
+                         const share::ObEncryptMeta *encrypt_meta)
 {
   UNUSED(ctx);
   UNUSED(table_id);
   UNUSED(read_info);
   UNUSED(columns);
   UNUSED(row);
+  UNUSED(encrypt_meta);
   return OB_NOT_SUPPORTED;
 }
 
@@ -274,7 +276,11 @@ int ObTxCtxMemtable::flush(SCN recycle_scn, bool need_freeze)
       int64_t cur_time_us = ObTimeUtility::current_time();
       ObScnRange scn_range;
       scn_range.start_scn_.set_base();
+<<<<<<< HEAD
       if (OB_FAIL(scn_range.end_scn_.convert_from_ts(cur_time_us))) {
+=======
+      if (OB_FAIL(scn_range.end_scn_.convert_for_tx(cur_time_us))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         TRANS_LOG(WARN, "failed to convert_from_ts", K(ret), K(cur_time_us));
       } else {
         set_scn_range(scn_range);
@@ -289,7 +295,7 @@ int ObTxCtxMemtable::flush(SCN recycle_scn, bool need_freeze)
     param.ls_id_ = ls_id_;
     param.tablet_id_ = LS_TX_CTX_TABLET;
     param.merge_type_ = MINI_MERGE;
-    param.merge_version_ = ObVersion::MIN_VERSION;
+    param.merge_version_ = ObVersionRange::MIN_VERSION;
     if (OB_FAIL(compaction::ObScheduleDagFunc::schedule_tx_table_merge_dag(param))) {
       if (OB_EAGAIN != ret && OB_SIZE_OVERFLOW != ret) {
           TRANS_LOG(WARN, "failed to schedule tablet merge dag", K(ret));

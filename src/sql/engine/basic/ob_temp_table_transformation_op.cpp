@@ -164,6 +164,17 @@ int ObTempTableTransformationOp::destory_interm_results()
       }
     }
   }
+
+#ifdef ERRSIM
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  int64_t query_timeout = 0;
+  session->get_query_timeout(query_timeout);
+  if (OB_FAIL(OB_E(EventTable::EN_PX_TEMP_TABLE_NOT_DESTROY_REMOTE_INTERM_RESULT) OB_SUCCESS)) {
+    LOG_WARN("ObTempTableTransformationOp not destory_remote_interm_results by design", K(ret), K(query_timeout));
+    return OB_SUCCESS;
+  }
+#endif
+
   if (OB_SUCC(ret) && !svrs.empty() &&
       OB_FAIL(destory_remote_interm_results(svrs, args))) {
     LOG_WARN("failed to destory interm results", K(ret));
@@ -222,7 +233,12 @@ int ObTempTableTransformationOp::destory_local_interm_results(ObIArray<uint64_t>
     dtl_int_key.channel_id_ = result_ids.at(i);
     if (OB_FAIL(dtl::ObDTLIntermResultManager::getInstance().erase_interm_result_info(
                                                                             dtl_int_key))) {
-      LOG_WARN("failed to erase interm result info in manager.", K(ret));
+      if (OB_HASH_NOT_EXIST == ret) {
+        ret = OB_SUCCESS;
+        LOG_WARN("interm result may erased by DM", K(ret));
+      } else {
+        LOG_WARN("failed to erase interm result info in manager.", K(ret));
+      }
     }
   }
   return ret;

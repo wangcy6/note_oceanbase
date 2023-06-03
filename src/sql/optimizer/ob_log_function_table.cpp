@@ -82,22 +82,31 @@ int ObLogFunctionTable::allocate_expr_post(ObAllocExprContext &ctx)
   return ret;
 }
 
-int ObLogFunctionTable::print_my_plan_annotation(char *buf,
-                                                 int64_t &buf_len,
-                                                 int64_t &pos,
-                                                 ExplainType type)
+int ObLogFunctionTable::get_plan_item_info(PlanText &plan_text,
+                                           ObSqlPlanItem &plan_item)
 {
   int ret = OB_SUCCESS;
-  const ObRawExpr* value = get_value_expr();
-  int64_t tmp_pos = pos;
-  CK (OB_NOT_NULL(buf));
-  CK (OB_NOT_NULL(value));
-  OZ (BUF_PRINTF("\n      "));
-  OZ (BUF_PRINTF("TABLE("));
-  OZ (value->get_name(buf, buf_len, pos, type));
-  OZ (BUF_PRINTF(")"));
-  if (OB_FAIL(ret)) {
-    pos = tmp_pos;
+  if (OB_FAIL(ObLogicalOperator::get_plan_item_info(plan_text, plan_item))) {
+    LOG_WARN("failed to get plan item info", K(ret));
+  } else if (OB_ISNULL(get_value_expr())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null value expr", K(ret));
+  } else {
+    BEGIN_BUF_PRINT;
+    const ObRawExpr* value = get_value_expr();
+    EXPLAIN_PRINT_EXPR(value, type);
+    END_BUF_PRINT(plan_item.special_predicates_,
+                  plan_item.special_predicates_len_);
+  }
+  if (OB_SUCC(ret)) {
+    const ObString &name = get_table_name();
+    BUF_PRINT_OB_STR(name.ptr(),
+                     name.length(),
+                     plan_item.object_alias_,
+                     plan_item.object_alias_len_);
+    BUF_PRINT_STR("FUNCTION TABLE",
+                  plan_item.object_type_,
+                  plan_item.object_type_len_);
   }
   return ret;
 }
@@ -107,6 +116,12 @@ uint64_t ObLogFunctionTable::hash(uint64_t seed) const
   seed = do_hash(table_name_, seed);
   seed = ObLogicalOperator::hash(seed);
   return seed;
+}
+
+int ObLogFunctionTable::is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed)
+{
+  is_fixed = ObOptimizerUtil::find_item(access_exprs_, expr);
+  return OB_SUCCESS;
 }
 
 } // namespace sql

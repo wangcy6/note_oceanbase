@@ -47,6 +47,10 @@ public:
   int set_scn(const uint64_t scn_val);
   int set_scn(const uint64_t scn_val, const bool need_update);
   const SCN &get_scn() const { return scn_; }
+<<<<<<< HEAD
+=======
+  //this interface is just used for operations of reading or writing inner tables
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   uint64_t get_scn_val() const { return scn_.get_val_for_inner_table_field(); }
   int64_t get_value() const { return value_; }
 
@@ -176,12 +180,80 @@ public:
 
   ObMergeProgress() 
     : tenant_id_(0), zone_(), unmerged_tablet_cnt_(0), unmerged_data_size_(0),
+<<<<<<< HEAD
       merged_tablet_cnt_(0), merged_data_size_(0), smallest_snapshot_scn_()
   {}
   ~ObMergeProgress() {}
 
   TO_STRING_KV(K_(tenant_id), K_(zone), K_(unmerged_tablet_cnt), K_(unmerged_data_size),
     K_(smallest_snapshot_scn));
+=======
+      merged_tablet_cnt_(0), merged_data_size_(0), smallest_snapshot_scn_(SCN::min_scn())
+  {}
+  ~ObMergeProgress() {}
+
+  bool is_merge_finished() const { return (0 == unmerged_tablet_cnt_); }
+
+  TO_STRING_KV(K_(tenant_id), K_(zone), K_(unmerged_tablet_cnt), K_(unmerged_data_size),
+    K_(smallest_snapshot_scn));
+};
+
+enum ObTabletCompactionStatus
+{
+  INITIAL = 0,
+  // tablet finished compaction
+  COMPACTED,
+  // tablet finished compaction and no need to verify checksum
+  // 1. compaction_scn of this tablet > frozen_scn of this round major compaction. i.e., already
+  //    launched another medium compaction for this tablet.
+  // 2. report_scn of this tablet > frozen_scn of this round major compaction. i.e., already
+  //    finished verification on the old leader.
+  CAN_SKIP_VERIFYING,
+  STATUS_MAX
+};
+
+struct ObTableCompactionInfo {
+public:
+  enum Status
+  {
+    INITIAL = 0,
+    // already finished compaction and verified tablet checksum
+    COMPACTED,
+    // already verified index checksum
+    INDEX_CKM_VERIFIED,
+    // already verified all kinds of checksum (i.e., tablet checksum, index checksum, cross-cluster checksum)
+    VERIFIED,
+    TB_STATUS_MAX
+  };
+
+  ObTableCompactionInfo()
+    : table_id_(OB_INVALID_ID), tablet_cnt_(0),
+      status_(Status::INITIAL) {}
+  ~ObTableCompactionInfo() { reset(); }
+
+  void reset()
+  {
+    table_id_ = OB_INVALID_ID;
+    tablet_cnt_ = 0;
+    status_ = Status::INITIAL;
+  }
+
+  ObTableCompactionInfo &operator=(const ObTableCompactionInfo &other);
+
+  bool is_uncompacted() const { return Status::INITIAL == status_; }
+  void set_compacted() { status_ = Status::COMPACTED; }
+  bool is_compacted() const { return Status::COMPACTED == status_; }
+  void set_index_ckm_verified() { status_ = Status::INDEX_CKM_VERIFIED; }
+  bool is_index_ckm_verified() const { return Status::INDEX_CKM_VERIFIED == status_; }
+  void set_verified() { status_ = Status::VERIFIED; }
+  bool is_verified() const { return Status::VERIFIED == status_; }
+
+  TO_STRING_KV(K_(table_id), K_(tablet_cnt), K_(status));
+
+  uint64_t table_id_;
+  int64_t tablet_cnt_;
+  Status status_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 
 typedef common::ObArray<ObMergeProgress> ObAllZoneMergeProgress;

@@ -40,16 +40,16 @@ public:
   {
   }
   virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
+  virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
   ObSelectLogPlan *get_left_plan() const;
   ObSelectLogPlan *get_right_plan() const;
   const ObSelectStmt *get_left_stmt() const;
   const ObSelectStmt *get_right_stmt() const;
   int get_my_set_exprs(ObIArray<ObRawExpr*> &set_exprs);
-  int is_my_set_expr(const ObRawExpr *expr, bool &bret);
   const char *get_name() const;
   inline void assign_set_distinct(const bool is_distinct) { is_distinct_ = is_distinct; }
   inline void set_recursive_union(bool is_recursive_union) { is_recursive_union_ = is_recursive_union; }
-  inline void set_is_breadth_search(bool is_breadth_search) { is_breadth_search_ = is_breadth_search;}
+  inline void set_is_breadth_search(bool is_breadth_search) { is_breadth_search_ = is_breadth_search; }
   inline bool is_recursive_union() { return is_recursive_union_; }
   inline bool is_breadth_search() { return is_breadth_search_; }
   inline bool is_set_distinct() const { return is_distinct_; }
@@ -60,7 +60,7 @@ public:
   //hash set 全部都是从left 建立hash表，0号孩子是block input
   virtual bool is_block_input(const int64_t child_idx) const override 
   {
-    return HASH_SET == set_algo_ && 0 == child_idx;
+    return HASH_SET == set_algo_ && 0 == child_idx && ObSelectStmt::UNION != get_set_op();
   }
   inline void assign_set_op(const ObSelectStmt::SetOperator set_op) { set_op_ = set_op; }
   inline ObSelectStmt::SetOperator get_set_op() const { return set_op_; }
@@ -72,11 +72,14 @@ public:
   int set_set_directions(const common::ObIArray<ObOrderDirection> &directions) { return set_directions_.assign(directions); }
   int add_set_direction(const ObOrderDirection direction = default_asc_direction()) { return set_directions_.push_back(direction); }
   int get_set_exprs(ObIArray<ObRawExpr *> &set_exprs);
-  int extra_set_exprs(ObIArray<ObRawExpr *> &set_exprs);
+  int get_pure_set_exprs(ObIArray<ObRawExpr *> &set_exprs);
   virtual int est_cost() override;
   virtual int est_width() override;
-  virtual int re_est_cost(EstimateCostInfo &param, double &card, double &cost) override;
-  int get_children_cost_info(ObIArray<ObBasicCostInfo> &children_cost_info);
+  virtual int do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost) override;
+  int get_re_est_cost_infos(const EstimateCostInfo &param,
+                            ObIArray<ObBasicCostInfo> &cost_infos,
+                            double &child_cost,
+                            double &card);
   int set_search_ordering(const common::ObIArray<OrderItem> &search_ordering);
   int set_cycle_items(const common::ObIArray<ColumnItem> &cycle_items);
   virtual uint64_t hash(uint64_t seed) const override;
@@ -90,11 +93,11 @@ public:
   virtual int compute_op_ordering() override;
   virtual int compute_one_row_info() override;
   virtual int compute_sharding_info() override;
+  virtual int compute_op_parallel_and_server_info() override;
 
   int get_equal_set_conditions(ObIArray<ObRawExpr*> &equal_conds);
   virtual int allocate_granule_post(AllocGIContext &ctx) override;
   virtual int allocate_granule_pre(AllocGIContext &ctx) override;
-  virtual int generate_link_sql_post(GenLinkStmtPostContext &link_ctx) override;
   ObIArray<int64_t> &get_map_array() { return map_array_; }
   int set_map_array(const ObIArray<int64_t> &map_array)
   {
@@ -109,11 +112,10 @@ public:
   inline SetAlgo get_algo() const { return set_algo_; }
   inline void set_algo_type(const SetAlgo type) { set_algo_ = type; }
   inline void set_distributed_algo(const DistAlgo set_dist_algo) { set_dist_algo_ = set_dist_algo; }
-  int estimate_row_count(double &rows);
+  inline DistAlgo get_distributed_algo() { return set_dist_algo_; }
   int allocate_startup_expr_post() override;
-  virtual int print_outline(planText &plan) override;
-  int print_used_hint(planText &plan_text);
-  int print_outline_data(planText &plan_text);
+  virtual int print_outline_data(PlanText &plan_text) override;
+  virtual int print_used_hint(PlanText &plan_text) override;
   int get_used_pq_set_hint(const ObPQSetHint *&used_hint);
   int construct_pq_set_hint(ObPQSetHint &hint);
 private:

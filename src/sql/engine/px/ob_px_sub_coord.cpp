@@ -28,6 +28,7 @@
 #include "sql/engine/dml/ob_table_insert_op.h"
 #include "sql/engine/join/ob_join_filter_op.h"
 #include "sql/engine/join/ob_hash_join_op.h"
+#include "sql/engine/window_function/ob_window_function_op.h"
 #include "sql/engine/basic/ob_temp_table_insert_op.h"
 #include "sql/engine/basic/ob_temp_table_access_op.h"
 #include "sql/engine/px/ob_px_sqc_handler.h"
@@ -41,6 +42,7 @@
 #include "storage/ddl/ob_direct_insert_sstable_ctx.h"
 #include "sql/engine/px/ob_granule_pump.h"
 #include "sql/das/ob_das_utils.h"
+#include "sql/engine/px/p2p_datahub/ob_p2p_dh_mgr.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -80,20 +82,18 @@ int ObPxSubCoord::pre_process()
     LOG_WARN("fail try prealloc data channel", K(ret));
   } else {
     // ObOperator *op = NULL;
-    ObSEArray<const ObTableScanSpec*, 1> all_scan_ops;
     if (OB_ISNULL(sqc_arg_.op_spec_root_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpected status: op root is null", K(ret));
     } else if (OB_FAIL(rebuild_sqc_access_table_locations())) {
-      LOG_WARN("fail to rebuild sqc access table locations", K(ret));
-    } else if (OB_FAIL(ObTaskSpliter::find_scan_ops(all_scan_ops, *sqc_arg_.op_spec_root_))) {
-      LOG_WARN("fail get scan ops", K(ret));
+      LOG_WARN("fail to rebuild locations and tsc ops", K(ret));
+    } else if (OB_FAIL(construct_p2p_dh_map())) {
+      LOG_WARN("fail to construct p2p dh map", K(ret));
     } else if (OB_FAIL(setup_op_input(*sqc_arg_.exec_ctx_,
                                       *sqc_arg_.op_spec_root_,
                                       sqc_ctx_,
                                       sqc_arg_.sqc_.get_access_table_locations(),
-                                      sqc_arg_.sqc_.get_access_table_location_keys(),
-                                      all_scan_ops))) {
+                                      sqc_arg_.sqc_.get_access_table_location_keys()))) {
       LOG_WARN("fail to setup receive/transmit op input", K(ret));
     }
   }
@@ -174,8 +174,7 @@ int ObPxSubCoord::init_exec_env(ObExecContext &exec_ctx)
   } else if (OB_ISNULL(plan_ctx = GET_PHY_PLAN_CTX(exec_ctx))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("deserialized exec ctx without phy plan ctx set. Unexpected", K(ret));
-  } else if (OB_FAIL(init_first_buffer_cache(sqc_arg_.sqc_.is_rpc_worker(),
-                                            sqc_arg_.des_phy_plan_->get_px_dop()))) {
+  } else if (OB_FAIL(init_first_buffer_cache(sqc_arg_.des_phy_plan_->get_px_dop()))) {
     LOG_WARN("failed to init first buffer cache", K(ret));
   } else {
     session->set_cur_phy_plan(sqc_arg_.des_phy_plan_);
@@ -214,41 +213,78 @@ int ObPxSubCoord::get_tsc_or_dml_op_tablets(
   return ret;
 }
 
-int ObPxSubCoord::init_px_bloom_filter_advance(ObExecContext *ctx, ObOpSpec *root)
+int ObPxSubCoord::setup_gi_op_input(ObExecContext &ctx,
+    ObOpSpec &root,
+    ObSqcCtx &sqc_ctx,
+    const DASTabletLocIArray &tsc_locations,
+    const ObIArray<ObSqcTableLocationKey> &tsc_location_keys)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(ctx) || OB_ISNULL(root)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("init bloom filter ctx or root is null", K(ret), KP(ctx), KP(root));
-  } else if (IS_PX_BLOOM_FILTER(root->get_type())) {
-    ObJoinFilterSpec *filter_op = reinterpret_cast<ObJoinFilterSpec *>(root);
-    if (filter_op->is_use_mode() && filter_op->is_shuffle()) {
-      ObPxBloomFilter *filter_use = NULL;
-      ObPXBloomFilterHashWrapper bf_key;
-      bf_key.init(ctx->get_my_session()->get_effective_tenant_id(), filter_op->get_filter_id(),
-                  filter_op->get_server_id(), ctx->get_my_session()->get_current_execution_id());
-      if (OB_FAIL(ObPxBloomFilterManager::init_px_bloom_filter(filter_op->get_filter_length(),
-                                                               ctx->get_allocator(),
-                                                               filter_use))) {
-        LOG_WARN("fail to init px bloom filter", K(ret));
-      } else if (OB_FAIL(filter_use->generate_receive_count_array())) {
-        LOG_WARN("fail to generate receive count array", K(ret));
-      } else if (OB_FAIL(ObPxBloomFilterManager::instance().set_px_bloom_filter(bf_key, filter_use))) {
-        LOG_WARN("fail to set bloom filter to bloom filter manager", K(ret));
+  if (IS_PX_GI(root.get_type())) {
+    ObPxSqcMeta &sqc = sqc_arg_.sqc_;
+    common::ObArray<DASTabletLocArray> tablets_array;
+    ObSEArray<const ObTableScanSpec*, 1> scan_ops;
+    ObTableModifySpec *dml_op = NULL;
+    if (OB_SUCC(ret)) {
+      IGNORE_RETURN try_get_dml_op(root, dml_op);
+    }
+    // pre query range and init scan input (for compatible)
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(get_tsc_or_dml_op_tablets(root,
+          tsc_locations, tsc_location_keys, scan_ops,
+          tablets_array))) {
+        LOG_WARN("fail get scan ops", K(ret));
       } else {
-        sqc_arg_.sqc_handler_->add_flag(OB_SQC_HANDLER_BLOOM_FILTER_NEED_CLEAR);
-        bf_key_ = bf_key;
+        ObGranuleIteratorSpec *gi_op = reinterpret_cast<ObGranuleIteratorSpec *>(&root);
+        ObOperatorKit *kit = ctx.get_operator_kit(gi_op->id_);
+        if (OB_ISNULL(kit) || OB_ISNULL(kit->input_)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("operator is NULL", K(ret), KP(kit));
+        } else {
+          ObGIOpInput *gi_input = static_cast<ObGIOpInput*>(kit->input_);
+          if (OB_FAIL(sqc_ctx.gi_pump_.init_pump_args(&ctx, scan_ops, tablets_array,
+              sqc_ctx.partitions_info_, sqc.get_access_external_table_files(),
+              dml_op, sqc.get_task_count(),
+              gi_op->get_tablet_size(), gi_op->get_gi_flags()))) {
+            LOG_WARN("fail to init pump args", K(ret));
+          } else {
+            gi_input->set_granule_pump(&sqc_ctx.gi_pump_);
+            gi_input->add_table_location_keys(scan_ops);
+            LOG_TRACE("setup gi op input", K(gi_input), K(&sqc_ctx.gi_pump_), K(gi_op->id_), K(sqc_ctx.gi_pump_.get_task_array_map()));
+          }
+        }
       }
     }
   }
+  return ret;
+}
 
-  if (IS_PX_RECEIVE(root->get_type())) {
-    // 遇到 receive 算子后，终止向下迭代
-  } else {
-    for (int32_t i = 0; i < root->get_child_num() && OB_SUCC(ret); ++i) {
-      ObOpSpec *child = root->get_child(i);
-      if (OB_FAIL(SMART_CALL(init_px_bloom_filter_advance(ctx, child)))) {
-        LOG_WARN("init bloom filter advance failed", K(ret));
+int ObPxSubCoord::pre_setup_op_input(ObExecContext &ctx,
+    ObOpSpec &root,
+    ObSqcCtx &sqc_ctx,
+    const DASTabletLocIArray &tsc_locations,
+    const ObIArray<ObSqcTableLocationKey> &tsc_location_keys)
+{
+  int ret = OB_SUCCESS;
+  if (IS_PX_GI(root.get_type())) {
+    // if it's not single tsc leaf dfo,
+    // setup_gi_op_input will be called later by subcoord preprocess func
+    if (is_single_tsc_leaf_dfo_ &&
+        OB_FAIL(setup_gi_op_input(ctx, root, sqc_ctx,
+        tsc_locations, tsc_location_keys))) {
+      LOG_WARN("fail to setup gi op input", K(ret));
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (IS_PX_RECEIVE(root.get_type())) {
+      // 遇到 receive 算子后，终止向下迭代
+    } else {
+      for (int32_t i = 0; i < root.get_child_num() && OB_SUCC(ret); ++i) {
+        ObOpSpec *child = root.get_child(i);
+        if (OB_FAIL(SMART_CALL((pre_setup_op_input(ctx, *child,
+            sqc_ctx, tsc_locations, tsc_location_keys))))) {
+          LOG_WARN("pre_setup_op_input failed", K(ret));
+        }
       }
     }
   }
@@ -259,8 +295,7 @@ int ObPxSubCoord::setup_op_input(ObExecContext &ctx,
                                  ObOpSpec &root,
                                  ObSqcCtx &sqc_ctx,
                                  const DASTabletLocIArray &tsc_locations,
-                                 const ObIArray<ObSqcTableLocationKey> &tsc_location_keys,
-                                 ObIArray<const ObTableScanSpec*> &all_scan_ops)
+                                 const ObIArray<ObSqcTableLocationKey> &tsc_location_keys)
 {
   int ret = OB_SUCCESS;
   if (IS_PX_RECEIVE(root.get_type())) {
@@ -301,71 +336,64 @@ int ObPxSubCoord::setup_op_input(ObExecContext &ctx,
         LOG_WARN("start ddl failed", K(ret));
       }
 #ifdef ERRSIM
-      ret = E(EventTable::EN_DDL_START_FAIL) OB_SUCCESS;
+      ret = OB_E(EventTable::EN_DDL_START_FAIL) OB_SUCCESS;
 #endif
     }
   } else if (IS_PX_GI(root.get_type())) {
     ObPxSqcMeta &sqc = sqc_arg_.sqc_;
-    common::ObArray<DASTabletLocArray> tablets_array;
-    ObSEArray<const ObTableScanSpec*, 1> scan_ops;
-    ObTableModifySpec *dml_op = NULL;
-    if (OB_SUCC(ret)) {
-      IGNORE_RETURN try_get_dml_op(root, dml_op);
+    ObGranuleIteratorSpec *gi_op = reinterpret_cast<ObGranuleIteratorSpec *>(&root);
+    ObOperatorKit *kit = ctx.get_operator_kit(gi_op->id_);
+    ObGIOpInput *gi_input = static_cast<ObGIOpInput*>(kit->input_);
+    if (!is_single_tsc_leaf_dfo_ &&
+        OB_FAIL(setup_gi_op_input(ctx, root, sqc_ctx,
+        tsc_locations, tsc_location_keys))) {
+      LOG_WARN("fail to setup gi op input", K(ret));
+    } else {
+      gi_input->set_parallelism(sqc.get_task_count());
     }
-    // pre query range and init scan input (for compatible)
-    if (OB_SUCC(ret)) {
-      if (OB_FAIL(get_tsc_or_dml_op_tablets(root,
-          tsc_locations, tsc_location_keys, scan_ops,
-          tablets_array))) {
-        LOG_WARN("fail get scan ops", K(ret));
-      } else {
-        ObGranuleIteratorSpec *gi_op = reinterpret_cast<ObGranuleIteratorSpec *>(&root);
-        ObOperatorKit *kit = ctx.get_operator_kit(gi_op->id_);
-        if (OB_ISNULL(kit) || OB_ISNULL(kit->input_)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("operator is NULL", K(ret), KP(kit));
-        } else {
-          ObGIOpInput *gi_input = static_cast<ObGIOpInput*>(kit->input_);
-          if (OB_FAIL(sqc_ctx.gi_pump_.init_pump_args(&ctx, scan_ops, tablets_array,
-              sqc_ctx.partitions_info_, dml_op, sqc.get_task_count(),
-              gi_op->get_tablet_size(), gi_op->get_gi_flags()))) {
-            LOG_WARN("fail to init pump args", K(ret));
-          } else {
-            gi_input->set_granule_pump(&sqc_ctx.gi_pump_);
-            gi_input->set_parallelism(sqc.get_task_count());
-            gi_input->add_table_location_keys(scan_ops);
-            LOG_TRACE("setup gi op input", K(gi_input), K(&sqc_ctx.gi_pump_));
-          }
-        }
-      }
-    }
-  } else if (IS_PX_BLOOM_FILTER(root.get_type())) {
+  } else if (IS_PX_JOIN_FILTER(root.get_type())) {
     ObPxSqcMeta &sqc = sqc_arg_.sqc_;
     ObJoinFilterSpec *filter_spec = reinterpret_cast<ObJoinFilterSpec *>(&root);
     ObJoinFilterOpInput *filter_input = NULL;
     ObPxBloomFilter *filter_create = NULL;
-    ObPxBloomFilter *filter_use = NULL;
     int64_t tenant_id = ctx.get_my_session()->get_effective_tenant_id();
     ObOperatorKit *kit = ctx.get_operator_kit(root.id_);
     if (OB_ISNULL(kit) || OB_ISNULL(kit->input_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("operator is NULL", K(ret), KP(kit));
     } else if (FALSE_IT(filter_input = static_cast<ObJoinFilterOpInput*>(kit->input_))) {
-    } else if (OB_FAIL(filter_input->init_share_info(ctx.get_allocator(), sqc.get_task_count()))) {
+    } else if (FALSE_IT(filter_input->set_px_sequence_id(
+          sqc.get_interrupt_id().px_interrupt_id_.first_))) {
+    } else if (OB_FAIL(filter_input->load_runtime_config(*filter_spec, ctx))) {
+      LOG_WARN("fail to load runtime config", K(ret));
+    } else if (FALSE_IT(filter_input->init_register_dm_info(
+          sqc.get_px_detectable_ids().qc_detectable_id_, sqc.get_qc_addr()))) {
     } else if (filter_spec->is_create_mode()) {
       int64_t filter_len = filter_spec->get_filter_length();
-      filter_input->is_local_create_ = false;
+      filter_input->set_sqc_proxy(sqc_ctx.sqc_proxy_);
       if (!filter_spec->is_shared_join_filter()) {
         /*do nothing*/
-      } else if (OB_FAIL(ObPxBloomFilterManager::init_px_bloom_filter(filter_len,
-          ctx.get_allocator(), filter_create))) {
-        LOG_WARN("fail to init px bloom filter", K(ret));
+      } else if (OB_FAIL(filter_input->init_share_info(*filter_spec,
+          ctx, sqc.get_task_count(),
+          filter_spec->is_shuffle_? sqc.get_sqc_count() : 1))) {
+        LOG_WARN("fail to init share info", K(ret));
       } else {
-        filter_input->share_info_.filter_ptr_ = reinterpret_cast<uint64_t>(filter_create);
+        if (OB_FAIL(all_shared_rf_msgs_.push_back(filter_input->share_info_.shared_msgs_))) {
+          LOG_WARN("fail to push back rf msgs", K(ret));
+        }
+        if (OB_FAIL(ret) && filter_input->share_info_.shared_msgs_ != 0) {
+          ObArray<ObP2PDatahubMsgBase *> *array_ptr =
+          reinterpret_cast<ObArray<ObP2PDatahubMsgBase *> *>(filter_input->share_info_.shared_msgs_);
+          for (int j = 0; j < array_ptr->count(); ++j) {
+            if (OB_NOT_NULL(array_ptr->at(j))) {
+              array_ptr->at(j)->destroy();
+            }
+          }
+          if (!array_ptr->empty()) {
+            array_ptr->reset();
+          }
+        }
       }
-    }
-    if (OB_SUCC(ret)) {
-      filter_input->set_sqc_proxy(sqc_ctx.sqc_proxy_);
     }
   } else if (root.get_type() == PHY_TEMP_TABLE_ACCESS) {
     ObPxSqcMeta &sqc = sqc_arg_.sqc_;
@@ -385,16 +413,15 @@ int ObPxSubCoord::setup_op_input(ObExecContext &ctx,
       for (int64_t i = 0; OB_SUCC(ret) && !find && i < sqc.get_temp_table_ctx().count(); ++i) {
         ObSqlTempTableCtx &temp_table_ctx = sqc.get_temp_table_ctx().at(i);
         if (access_op.temp_table_id_ == temp_table_ctx.temp_table_id_) {
-          if (sqc.get_sqc_id() < 0 || sqc.get_sqc_id() >= temp_table_ctx.interm_result_infos_.count()) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("can not find temp table info in sqc meta info", K(ret));
-          } else {
-            ObTempTableResultInfo &info = temp_table_ctx.interm_result_infos_.at(sqc.get_sqc_id());
-            std::random_shuffle(info.interm_result_ids_.begin(), info.interm_result_ids_.end());
-            if (OB_FAIL(access_input->interm_result_ids_.assign(info.interm_result_ids_))) {
-              LOG_WARN("failed to assign result ids", K(ret));
-            } else {
-              find = true;
+          for (int64_t j = 0; OB_SUCC(ret) && !find && j < temp_table_ctx.interm_result_infos_.count(); ++j) {
+            if (sqc.get_exec_addr() == temp_table_ctx.interm_result_infos_.at(j).addr_) {
+              ObTempTableResultInfo &info = temp_table_ctx.interm_result_infos_.at(j);
+              std::random_shuffle(info.interm_result_ids_.begin(), info.interm_result_ids_.end());
+              if (OB_FAIL(access_input->interm_result_ids_.assign(info.interm_result_ids_))) {
+                LOG_WARN("failed to assign result ids", K(ret));
+              } else {
+                find = true;
+              }
             }
           }
         }
@@ -423,11 +450,32 @@ int ObPxSubCoord::setup_op_input(ObExecContext &ctx,
     } else {
       LOG_TRACE("debug hj input", K(hj_spec->is_shared_ht_));
     }
+  } else if (root.get_type() == PHY_WINDOW_FUNCTION) {
+    // set task_count to ObWindowFunctionOpInput for wf pushdown
+    ObPxSqcMeta &sqc = sqc_arg_.sqc_;
+    ObWindowFunctionOpInput *wf_input = NULL;
+    ObOperatorKit *kit = ctx.get_operator_kit(root.id_);
+    ObWindowFunctionSpec *wf_spec = reinterpret_cast<ObWindowFunctionSpec *>(&root);
+    if (OB_ISNULL(kit) || OB_ISNULL(kit->input_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("operator is NULL", K(ret), KP(kit));
+    } else if (FALSE_IT(wf_input = static_cast<ObWindowFunctionOpInput*>(kit->input_))) {
+    } else if (wf_spec->is_participator()) {
+      wf_input->set_local_task_count(sqc.get_task_count());
+      wf_input->set_total_task_count(sqc.get_total_task_count());
+      if (OB_FAIL(wf_input->init_wf_participator_shared_info(
+          ctx.get_allocator(), sqc.get_task_count()))) {
+        LOG_WARN("failed to init_wf_participator_shared_info", K(ret), K(sqc.get_task_count()));
+      }
+      LOG_DEBUG("debug wf input", K(wf_spec->role_type_), K(sqc.get_task_count()),
+                K(sqc.get_total_task_count()));
+    }
   }
-
   if (OB_SUCC(ret)) {
     if (OB_FAIL(root.register_to_datahub(ctx))) {
       LOG_WARN("fail register op to datahub", K(ret));
+    } else if (OB_FAIL(root.register_init_channel_msg(ctx))) {
+      LOG_WARN("failed to register init channel msg", K(ret));
     }
   }
   if (IS_PX_RECEIVE(root.get_type())) {
@@ -440,7 +488,7 @@ int ObPxSubCoord::setup_op_input(ObExecContext &ctx,
         LOG_WARN("NULL child op unexpected", K(ret));
       } else {
         ret = SMART_CALL(setup_op_input(ctx, *child, sqc_ctx, tsc_locations,
-            tsc_location_keys, all_scan_ops));
+            tsc_location_keys));
       }
     }
   }
@@ -503,11 +551,10 @@ int ObPxSubCoord::dispatch_tasks(ObPxRpcInitSqcArgs &sqc_arg, ObSqcCtx &sqc_ctx,
   if (OB_ISNULL(sqc_arg.exec_ctx_)
       || OB_ISNULL(sqc_arg.sqc_handler_)
       || OB_ISNULL(sqc_arg.op_spec_root_)
-      || OB_ISNULL(sqc_arg.des_phy_plan_)
-      || (sqc.is_rpc_worker() && 1 != sqc.get_task_count())) {
+      || OB_ISNULL(sqc_arg.des_phy_plan_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("Invalid sqc args", K(ret), K(sqc));
-  } else if (sqc.is_rpc_worker() || is_fast_sqc) {
+  } else if (is_fast_sqc) {
     dispatch_worker_count = 0;
     ret = dispatch_task_to_local_thread(sqc_arg, sqc_ctx, sqc);
   } else {
@@ -679,7 +726,16 @@ int ObPxSubCoord::end_process()
       LOG_WARN("fail check task finish status", K(ret));
     }
   }
-
+  for (int i = 0; i < all_shared_rf_msgs_.count(); ++i) {
+    ObArray<ObP2PDatahubMsgBase *> *array_ptr =
+          reinterpret_cast<ObArray<ObP2PDatahubMsgBase *> *>(all_shared_rf_msgs_.at(i));
+    for (int j = 0; OB_NOT_NULL(array_ptr) && j < array_ptr->count(); ++j) {
+      array_ptr->at(j)->destroy();
+    }
+    if (OB_NOT_NULL(array_ptr) && !array_ptr->empty()) {
+      array_ptr->reset();
+    }
+  }
 
   NG_TRACE(tag3);
   LOG_TRACE("exit ObPxSubCoord process", K(ret));
@@ -687,10 +743,10 @@ int ObPxSubCoord::end_process()
   return ret;
 }
 
-int ObPxSubCoord::init_first_buffer_cache(bool is_rpc_worker, int64_t px_dop)
+int ObPxSubCoord::init_first_buffer_cache(int64_t px_dop)
 {
   int ret = OB_SUCCESS;
-  int64_t dop = is_rpc_worker ? 1 * px_dop : px_dop * px_dop;
+  int64_t dop = px_dop * px_dop;
   if (OB_ISNULL(sqc_arg_.exec_ctx_) || OB_ISNULL(sqc_arg_.exec_ctx_->get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("null unexpected", K(ret));
@@ -730,29 +786,6 @@ void ObPxSubCoord::destroy_first_buffer_cache()
       K(first_buffer_cache_.get_first_buffer_key()));
   }
   LOG_TRACE("trace unregister first buffer cache", K(ret), K(dfo_key));
-}
-
-void ObPxSubCoord::destroy_bloom_filter()
-{
-  int ret = OB_SUCCESS;
-  ObPxBloomFilter *filter = NULL;
-  if (OB_FAIL(ObPxBloomFilterManager::instance()
-      .erase_px_bloom_filter(bf_key_, filter))) {
-    LOG_TRACE("fail to erase sqc px bloom filter", K(ret));
-  } else if (OB_NOT_NULL(filter)) {
-    int count = 0;
-    while (!filter->is_merge_filter_finish()) {
-      // A cumbersome but safe waiting behavior.
-      // When the worker thread exits,
-      // it is necessary to ensure that
-      // no one in the DTL holds the filter pointer or writing.
-      if (0 == (count++ % 1000)) { // one log per second
-        LOG_TRACE("wait dtl holds bloom filter end");
-      }
-      ob_usleep(1000);
-    }
-    filter->reset();
-  }
 }
 
 int ObPxSubCoord::check_need_start_ddl(bool &need_start_ddl)
@@ -816,7 +849,9 @@ int ObPxSubCoord::start_ddl()
       param.exec_ctx_ = exec_ctx;
       param.execution_id_ = phy_plan->get_ddl_execution_id();
       param.ddl_task_id_ = phy_plan->get_ddl_task_id();
-      if (OB_FAIL(ObSSTableInsertManager::get_instance().create_table_context(param, ddl_ctrl_.context_id_))) {
+      if (OB_FAIL(ObDDLUtil::get_data_format_version(tenant_id, param.ddl_task_id_, param.data_format_version_))) {
+        LOG_WARN("get ddl cluster version failed", K(ret));
+      } else if (OB_FAIL(ObSSTableInsertManager::get_instance().create_table_context(param, ddl_ctrl_.context_id_))) {
         LOG_WARN("create table context failed", K(ret));
       } else {
         FLOG_INFO("start ddl", "context_id", ddl_ctrl_.context_id_, K(param));
@@ -835,6 +870,10 @@ int ObPxSubCoord::end_ddl(const bool need_commit)
       LOG_WARN("ddl manager finish contex failed", K(ret), K(ddl_ctrl_));
     }
     LOG_INFO("end ddl sstable", K(ret), K(need_commit));
+  }
+  DEBUG_SYNC(END_DDL_IN_PX_SUBCOORD);
+  if (OB_EAGAIN == ret) {
+    ret = OB_STATE_NOT_MATCH; // avoid px hang
   }
   return ret;
 }
@@ -862,35 +901,47 @@ int ObPxSubCoord::rebuild_sqc_access_table_locations()
   ObDASCtx &das_ctx = DAS_CTX(*sqc_arg_.exec_ctx_);
   // FIXME @yishen Performance?
   ObDASTableLoc *table_loc = NULL;
-  for (int i = 0; i < location_keys.count() && OB_SUCC(ret); ++i) {
-    // dml location always at first
-    if (OB_ISNULL(table_loc) && location_keys.at(i).is_loc_uncertain_) {
-      OZ(ObTableLocation::get_full_leader_table_loc(sqc_arg_.exec_ctx_->get_allocator(),
-         sqc_arg_.exec_ctx_->get_my_session()->get_effective_tenant_id(),
-         location_keys.at(i).table_location_key_,
-         location_keys.at(i).ref_table_id_,
-         table_loc));
-    }
-    if (OB_SUCC(ret)) {
-      if (OB_ISNULL(table_loc) ||
-          location_keys.at(i).table_location_key_ != table_loc->get_table_location_key() ||
-          location_keys.at(i).ref_table_id_ != table_loc->get_ref_table_id()) {
-        table_loc = das_ctx.get_table_loc_by_id(
-            location_keys.at(i).table_location_key_,
-            location_keys.at(i).ref_table_id_);
-      }
-    }
-    if (OB_FAIL(ret)) {
-    } else if (OB_ISNULL(table_loc)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected table loc", K(ret));
+  if (!access_locations.empty()) {
+    // do nothing
+    // it means that it's rebuilded by pre_setup_op_input
+    if (is_single_tsc_leaf_dfo_) {
     } else {
-      for (DASTabletLocListIter tmp_node = table_loc->tablet_locs_begin();
-           tmp_node != table_loc->tablet_locs_end(); ++tmp_node) {
-        ObDASTabletLoc *tablet_loc = *tmp_node;
-        if (tablet_loc->tablet_id_ == location_keys.at(i).tablet_id_) {
-          if (OB_FAIL(access_locations.push_back(tablet_loc))) {
-            LOG_WARN("fail to push back access locations", K(ret));
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected access locations", K(access_locations));
+    }
+  } else {
+    for (int i = 0; i < location_keys.count() && OB_SUCC(ret); ++i) {
+      // dml location always at first
+      if (OB_ISNULL(table_loc) && location_keys.at(i).is_loc_uncertain_) {
+        ObDASLocationRouter &loc_router = DAS_CTX(*sqc_arg_.exec_ctx_).get_location_router();
+        OZ(ObTableLocation::get_full_leader_table_loc(loc_router,
+           sqc_arg_.exec_ctx_->get_allocator(),
+           sqc_arg_.exec_ctx_->get_my_session()->get_effective_tenant_id(),
+           location_keys.at(i).table_location_key_,
+           location_keys.at(i).ref_table_id_,
+           table_loc));
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_ISNULL(table_loc) ||
+            location_keys.at(i).table_location_key_ != table_loc->get_table_location_key() ||
+            location_keys.at(i).ref_table_id_ != table_loc->get_ref_table_id()) {
+          table_loc = das_ctx.get_table_loc_by_id(
+              location_keys.at(i).table_location_key_,
+              location_keys.at(i).ref_table_id_);
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_ISNULL(table_loc)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected table loc", K(ret));
+      } else {
+        for (DASTabletLocListIter tmp_node = table_loc->tablet_locs_begin();
+             tmp_node != table_loc->tablet_locs_end(); ++tmp_node) {
+          ObDASTabletLoc *tablet_loc = *tmp_node;
+          if (tablet_loc->tablet_id_ == location_keys.at(i).tablet_id_) {
+            if (OB_FAIL(access_locations.push_back(tablet_loc))) {
+              LOG_WARN("fail to push back access locations", K(ret));
+            }
           }
         }
       }

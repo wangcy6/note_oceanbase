@@ -25,6 +25,7 @@
 #include "sql/engine/px/ob_granule_util.h"
 #include "sql/resolver/dml/ob_dml_stmt.h"
 #include "lib/hash/ob_pointer_hashmap.h"
+#include "sql/das/ob_das_location_router.h"
 //#include "sql/resolver/ddl/ob_alter_table_stmt.h"
 
 namespace oceanbase
@@ -41,6 +42,7 @@ class ObColumnRefRawExpr;
 class ObExprEqualCheckContext;
 class ObDASTabletMapper;
 class ObDASCtx;
+class DASRelatedTabletMap;
 typedef common::ObSEArray<int64_t, 1> RowkeyArray;
 class ObPartIdRowMapManager
 {
@@ -274,7 +276,7 @@ public:
 struct ObListPartMapKey {
   common::ObNewRow row_;
 
-  int64_t hash() const;
+  int hash(uint64_t &hash_val) const;
   bool operator==(const ObListPartMapKey &other) const;
   TO_STRING_KV(K_(row));
 };
@@ -465,6 +467,7 @@ public:
     is_col_part_expr_(false),
     is_col_subpart_expr_(false),
     is_oracle_temp_table_(false),
+    table_type_(share::schema::MAX_TABLE_TYPE),
     inner_allocator_(common::ObModIds::OB_SQL_TABLE_LOCATION),
     allocator_(inner_allocator_),
     loc_meta_(inner_allocator_),
@@ -489,9 +492,12 @@ public:
     has_dynamic_exec_param_(false),
     is_valid_temporal_part_range_(false),
     is_valid_temporal_subpart_range_(false),
-    is_link_(false),
     is_part_range_get_(false),
-    is_subpart_range_get_(false)
+    is_subpart_range_get_(false),
+    is_non_partition_optimized_(false),
+    tablet_id_(ObTabletID::INVALID_TABLET_ID),
+    object_id_(OB_INVALID_ID),
+    related_list_(allocator_)
   {
   }
 
@@ -507,6 +513,7 @@ public:
     is_col_part_expr_(false),
     is_col_subpart_expr_(false),
     is_oracle_temp_table_(false),
+    table_type_(share::schema::MAX_TABLE_TYPE),
     allocator_(allocator),
     loc_meta_(allocator),
     calc_node_(NULL),
@@ -533,9 +540,12 @@ public:
     has_dynamic_exec_param_(false),
     is_valid_temporal_part_range_(false),
     is_valid_temporal_subpart_range_(false),
-    is_link_(false),
     is_part_range_get_(false),
-    is_subpart_range_get_(false)
+    is_subpart_range_get_(false),
+    is_non_partition_optimized_(false),
+    tablet_id_(ObTabletID::INVALID_TABLET_ID),
+    object_id_(OB_INVALID_ID),
+    related_list_(allocator_)
   {
   }
   virtual ~ObTableLocation() { reset(); }
@@ -558,8 +568,7 @@ public:
            const ObIArray<common::ObObjectID> *part_ids,
            const common::ObDataTypeCastParams &dtc_params,
            const bool is_dml_table,
-           common::ObIArray<ObRawExpr*> *sort_exprs = NULL,
-           bool is_link = false);
+           common::ObIArray<ObRawExpr*> *sort_exprs = NULL);
   int init(share::schema::ObSchemaGetterGuard &schema_guard,
       const ObDMLStmt &stmt,
       ObExecContext *exec_ctx,
@@ -593,6 +602,7 @@ public:
 
   static int get_is_weak_read(const ObDMLStmt &dml_stmt,
                               const ObSQLSessionInfo *session_info,
+                              const ObSqlCtx *sql_ctx,
                               bool &is_weak_read);
 
   int send_add_interval_partition_rpc(ObExecContext &exec_ctx,
@@ -614,8 +624,7 @@ public:
       ObExecContext &exec_ctx,
       const ParamStore &params,
       ObCandiTabletLocIArray &candi_tablet_locs,
-      const common::ObDataTypeCastParams &dtc_params,
-      bool nonblock = false) const;
+      const common::ObDataTypeCastParams &dtc_params) const;
   /**
    * Calculate tablet ids from input parameters.
    */
@@ -623,7 +632,20 @@ public:
                            const ParamStore &params,
                            ObIArray<ObTabletID> &tablet_ids,
                            ObIArray<ObObjectID> &partition_ids,
+                           ObIArray<ObObjectID> &first_level_part_ids,
                            const ObDataTypeCastParams &dtc_params) const;
+
+  int init_partition_ids_by_rowkey2(ObExecContext &exec_ctx,
+                                    ObSQLSessionInfo &session_info,
+                                    ObSchemaGetterGuard &schema_guard,
+                                    uint64_t table_id);
+
+  int calculate_partition_ids_by_rows2(ObSQLSessionInfo &session_info,
+                                        ObSchemaGetterGuard &schema_guard,
+                                        uint64_t table_id,
+                                        ObIArray<ObNewRow> &part_rows,
+                                        ObIArray<ObTabletID> &tablet_ids,
+                                        ObIArray<ObObjectID> &part_ids) const;//FIXME
 
    int calculate_partition_ids_by_rowkey(ObSQLSessionInfo &session_info,
                                          share::schema::ObSchemaGetterGuard &schema_guard,
@@ -640,13 +662,10 @@ public:
                                  common::ObIArray<common::ObObjectID> &partition_ids);
 
   int get_tablet_locations(ObDASCtx &das_ctx,
-                           ObSQLSessionInfo *session,
-                           const uint64_t ref_table_id,
                            const ObIArray<ObTabletID> &tablet_ids,
                            const ObIArray<ObObjectID> &partition_ids,
-                           ObCandiTabletLocIArray &candi_tablet_locs,
-                           bool nonblock = false,
-                           bool is_link = false) const;
+                           const ObIArray<ObObjectID> &first_level_part_ids,
+                           ObCandiTabletLocIArray &candi_tablet_locs) const;
 
   static int send_add_interval_partition_rpc_new_engine(ObIAllocator &allocator,
                                                         ObSQLSessionInfo *session,
@@ -665,6 +684,12 @@ public:
 
   bool is_partitioned() const { return is_partitioned_; }
 
+  void set_is_non_partition_optimized(bool is_non_partition_optimized) {
+    is_non_partition_optimized_ = is_non_partition_optimized;
+  }
+
+  bool is_non_partition_optimized() const { return is_non_partition_optimized_; }
+
   share::schema::ObPartitionLevel get_part_level() const { return part_level_; }
 
   const stmt::StmtType &get_stmt_type() const { return stmt_type_; }
@@ -674,7 +699,8 @@ public:
                                         common::ObIArray<ObRawExpr *> *sort_exprs) const;
   bool has_generated_column() const { return NULL != se_gen_col_expr_ || NULL != se_sub_gen_col_expr_ ||
                                              NULL != gen_col_node_ || NULL != sub_gen_col_node_; }
-  static int get_full_leader_table_loc(ObIAllocator &allocator,
+  static int get_full_leader_table_loc(ObDASLocationRouter &loc_router,
+                                       ObIAllocator &allocator,
                                        uint64_t tenant_id,
                                        uint64_t table_id,
                                        uint64_t ref_table_id,
@@ -721,7 +747,7 @@ public:
       (part_get_all_ && subpart_get_all_ && (part_level_ == share::schema::PARTITION_LEVEL_TWO));
   }
 
-  inline bool is_part_or_subpart_all_partition() const 
+  inline bool is_part_or_subpart_all_partition() const
   {
     return (part_level_ == share::schema::PARTITION_LEVEL_ZERO) ||
            (part_level_ == share::schema::PARTITION_LEVEL_ONE && (part_get_all_ || !is_part_range_get_)) ||
@@ -739,17 +765,16 @@ public:
                                           uint64_t table_id,
                                           const common::ObIArray<uint64_t> &column_ids,
                                           ObExecContext &exec_ctx,
-                                          const bool is_dml_table = true,
-                                          bool is_link = false);
+                                          const bool is_dml_table = true);
+
+  int calc_not_partitioned_table_ids(ObExecContext &exec_ctx);
 
   TO_STRING_KV(K_(loc_meta),
                K_(part_projector),
                K_(has_dynamic_exec_param),
-               K_(part_hint_ids));
+               K_(part_hint_ids),
+               K_(related_list));
 private:
-  static int get_link_table_location(const uint64_t tenant_id,
-                                     const uint64_t table_id,
-                                     share::ObLSLocation &location);
   int init_table_location(ObExecContext &exec_ctx,
                           ObSqlSchemaGuard &schema_guard,
                           uint64_t table_id,
@@ -762,8 +787,7 @@ private:
   int init_table_location_with_rowkey(ObSqlSchemaGuard &schema_guard,
                                       uint64_t table_id,
                                       ObExecContext &exec_ctx,
-                                      const bool is_dml_table = true,
-                                      bool is_link = false);
+                                      const bool is_dml_table = true);
 
   //gen_col_node: partition information of dependented column of generated partition column
   //gen_col_expr: expression of dependented column of generated partition column
@@ -1092,6 +1116,7 @@ private:
   bool is_col_subpart_expr_;
   bool is_oracle_temp_table_;//是否为oracle模式下的临时表, 根据此调用不同的hash计算函数, 因为内部sql时
                              //is_oracle_mode()不可靠
+  share::schema::ObTableType table_type_;
   common::ObArenaAllocator inner_allocator_;
   common::ObIAllocator &allocator_; //used for deep copy other table location
   ObDASTableLocMeta loc_meta_;
@@ -1127,10 +1152,13 @@ private:
   //mysql enable partition pruning by query range if part expr is temporal func like year(date)
   bool is_valid_temporal_part_range_;
   bool is_valid_temporal_subpart_range_;
-
-  bool is_link_;   //used to identify whether the table is a link_table
   bool is_part_range_get_;
   bool is_subpart_range_get_;
+
+  bool is_non_partition_optimized_;
+  ObTabletID tablet_id_;
+  ObObjectID object_id_;
+  common::ObList<DASRelatedTabletMap::MapEntry, common::ObIAllocator> related_list_;
 };
 
 }

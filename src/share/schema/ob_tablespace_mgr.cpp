@@ -222,19 +222,19 @@ struct Deep_Copy_EarlyStopCondition
 ///////////////////////////////////////////////////////////////////
 ObTablespaceMgr::ObTablespaceMgr()
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(local_allocator_),
-      tablespace_infos_(0, NULL, ObModIds::OB_SCHEMA_TABLESPACE),
-      tablespace_map_(ObModIds::OB_SCHEMA_TABLESPACE)
+      tablespace_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_TABLESPACE, ObCtxIds::SCHEMA_SERVICE)),
+      tablespace_map_(SET_USE_500(ObModIds::OB_SCHEMA_TABLESPACE, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
 ObTablespaceMgr::ObTablespaceMgr(ObIAllocator &allocator)
     : is_inited_(false),
-      local_allocator_(ObModIds::OB_SCHEMA_GETTER_GUARD),
+      local_allocator_(SET_USE_500(ObModIds::OB_SCHEMA_GETTER_GUARD, ObCtxIds::SCHEMA_SERVICE)),
       allocator_(allocator),
-      tablespace_infos_(0, NULL, ObModIds::OB_SCHEMA_TABLESPACE),
-      tablespace_map_(ObModIds::OB_SCHEMA_TABLESPACE)
+      tablespace_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_TABLESPACE, ObCtxIds::SCHEMA_SERVICE)),
+      tablespace_map_(SET_USE_500(ObModIds::OB_SCHEMA_TABLESPACE, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -259,7 +259,7 @@ int ObTablespaceMgr::init()
 void ObTablespaceMgr::reset()
 {
   if (!is_inited_) {
-    LOG_WARN("tablespace manger not init");
+    LOG_WARN_RET(OB_NOT_INIT, "tablespace manger not init");
   } else {
     tablespace_infos_.clear();
     tablespace_map_.clear();

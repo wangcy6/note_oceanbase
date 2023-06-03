@@ -18,9 +18,11 @@
 #include "easy_define.h"
 #include "io/easy_io_struct.h"
 #include "lib/allocator/ob_allocator.h"
+#include "lib/lock/ob_spin_lock.h"
 #include "lib/stat/ob_diagnose_info.h"
 #include "lib/utility/ob_print_utils.h"
 #include "lib/utility/ob_utility.h"
+#include "lib/utility/ob_backtrace.h"
 #include "lib/oblog/ob_trace_log.h"
 #include "lib/container/ob_iarray.h"
 
@@ -29,7 +31,7 @@
 
 #define CPUID_STD_SSE4_2 0x00100000
 
-#define htonll(i) \
+#define ob_htonll(i) \
   ( \
     (((uint64_t)i & 0x00000000000000ff) << 56) | \
     (((uint64_t)i & 0x000000000000ff00) << 40) | \
@@ -62,11 +64,6 @@ struct ObObj;
 class ObObjParam;
 class ObAddr;
 
-const int64_t LBT_BUFFER_LENGTH = 1024;
-char *parray(char *buf, int64_t len, int64_t *array, int size);
-char *lbt();
-char *lbt(char *buf, int32_t len);
-char *lbt(void **addrs, int32_t size);
 void hex_dump(const void *data, const int32_t size,
               const bool char_type = true, const int32_t log_level = OB_LOG_LEVEL_DEBUG);
 int32_t parse_string_to_int_array(const char *line,
@@ -175,15 +172,15 @@ inline double max(const double x, const double y)
   return x < y ? y : x;
 }
 
-template<oceanbase::common::ObWaitEventIds::ObWaitEventIdEnum event_id = oceanbase::common::ObWaitEventIds::DEFAULT_SLEEP>
-inline void ob_usleep(useconds_t v)
-{
-  oceanbase::common::ObWaitEventGuard wait_guard(event_id, 0, (int64_t)v);
-  ::usleep(v);
-}
-
 template <class T>
 void max(T, T) = delete;
+
+template<oceanbase::common::ObWaitEventIds::ObWaitEventIdEnum event_id = oceanbase::common::ObWaitEventIds::DEFAULT_SLEEP>
+inline void ob_usleep(const useconds_t v)
+{
+  oceanbase::common::ObSleepEventGuard wait_guard(event_id, 0, (int64_t)v);
+  ::usleep(v);
+}
 
 int get_double_expand_size(int64_t &new_size, const int64_t limit_size);
 /**
@@ -239,23 +236,6 @@ inline const char *get_peer_ip(char *buffer, size_t n, easy_request_t *req)
   } else {
     return mess;
   }
-}
-
-inline const char *get_peer_ip_str(char *buffer, size_t n, easy_request_t *req)
-{
-  static char mess[8] = "unknown";
-  if (OB_LIKELY(nullptr != req && nullptr != req->ms && nullptr != req->ms->c)) {
-    if (AF_INET == req->ms->c->addr.family) {
-      return inet_ntoa_s(buffer, n, req->ms->c->addr.u.addr);
-    } else if (AF_INET6 == req->ms->c->addr.family) { // ipv6
-      in6_addr in6;
-      MEMCPY(in6.s6_addr, req->ms->c->addr.u.addr6, sizeof(in6_addr));
-      if(!inet_ntop(AF_INET6, &in6, buffer, n)) {
-        return buffer;
-      }
-    }
-  }
-  return mess;
 }
 
 inline const char *get_peer_ip(char *buffer, size_t n, easy_connection_t *c)
@@ -484,7 +464,7 @@ struct CountReporter
     if (0 == (count % report_mod_)) {
       SeqLockGuard lock_guard(seq_lock_);
       int64_t cur_ts = ::oceanbase::common::ObTimeUtility::fast_current_time();
-      _OB_LOG(ERROR, "%s=%ld:%ld:%ld\n", id_, count,
+      _OB_LOG_RET(ERROR, OB_ERROR, "%s=%ld:%ld:%ld\n", id_, count,
                 1000000 * (count - last_report_count_) / (cur_ts - last_report_time_),
                 (total_cost_time - last_cost_time_)/report_mod_);
       last_report_count_ = count;
@@ -524,6 +504,14 @@ inline int64_t get_phy_mem_size()
   static int64_t phys_pages = sysconf(_SC_PHYS_PAGES);
   return page_size * phys_pages;
 }
+
+int64_t get_level1_dcache_size();
+
+int64_t get_level1_icache_size();
+
+int64_t get_level2_cache_size();
+
+int64_t get_level3_cache_size();
 
 inline bool is_cpu_support_sse42()
 {
@@ -618,25 +606,25 @@ inline void bind_core()
 template <typename Allocator>
 int load_file_to_string(const char *path, Allocator &allocator, ObString &str)
 {
-  int rc = OB_SUCCESS;
+  int ret = OB_SUCCESS;
   struct stat st;
   char *buf = NULL;
   int fd = -1;
   int64_t size = 0;
 
   if (NULL == path || strlen(path) == 0) {
-    rc = OB_INVALID_ARGUMENT;
+    ret = OB_INVALID_ARGUMENT;
   } else if ((fd = ::open(path, O_RDONLY)) < 0) {
     _OB_LOG(WARN, "open file %s failed, errno %d", path, errno);
-    rc = OB_ERROR;
+    ret = OB_ERROR;
   } else if (0 != ::fstat(fd, &st)) {
     _OB_LOG(WARN, "fstat %s failed, errno %d", path, errno);
-    rc = OB_ERROR;
+    ret = OB_ERROR;
   } else if (NULL == (buf = allocator.alloc(st.st_size + 1))) {
-    rc = OB_ALLOCATE_MEMORY_FAILED;
+    ret = OB_ALLOCATE_MEMORY_FAILED;
   } else if ((size = static_cast<int64_t>(::read(fd, buf, st.st_size))) < 0) {
     _OB_LOG(WARN, "read %s failed, errno %d", path, errno);
-    rc = OB_ERROR;
+    ret = OB_ERROR;
   } else {
     buf[size] = '\0';
     str.assign(buf, static_cast<int>(size));
@@ -645,10 +633,10 @@ int load_file_to_string(const char *path, Allocator &allocator, ObString &str)
     int tmp_ret = close(fd);
     if (tmp_ret < 0) {
       _OB_LOG(WARN, "close %s failed, errno %d", path, errno);
-      rc = (OB_SUCCESS == rc) ? tmp_ret : rc;
+      ret = (OB_SUCCESS == ret) ? tmp_ret : ret;
     }
   }
-  return rc;
+  return ret;
 }
 
 /**
@@ -850,7 +838,7 @@ public:
   {
     if (need_record_log_) {
       if (OB_UNLIKELY(get_diff() >= warn_threshold_)) {
-        LIB_LOG(WARN, "destruct", K(*this));
+        LIB_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "destruct", K(*this));
       }
     }
   }
@@ -888,7 +876,7 @@ public:
   {
     if (need_record_log_) {
       if (OB_UNLIKELY(get_diff() >= warn_threshold_)) {
-        LIB_LOG(WARN, "click", K(*this), KCSTRING(lbt()));
+        LIB_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "click", K(*this), KCSTRING(lbt()));
       }
     }
   }
@@ -896,7 +884,7 @@ public:
   {
     if (need_record_log_) {
       if (OB_UNLIKELY(get_diff() >= warn_threshold_)) {
-        LIB_LOG(WARN, "destruct", K(*this), KCSTRING(lbt()));
+        LIB_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "destruct", K(*this), KCSTRING(lbt()));
       }
     }
   }
@@ -1135,20 +1123,26 @@ public:
   {
   public:
     ObStatItem(const char *item, const int64_t stat_interval)
-      : item_(item), stat_interval_(stat_interval), last_ts_(0), stat_count_(0), lock_tag_(false) {}
+      : item_(item), stat_interval_(stat_interval), last_ts_(0), stat_count_(0), accum_count_(0), lock_tag_(false) {
+        MEMSET(extra_info_, '\0', MAX_ROOTSERVICE_EVENT_EXTRA_INFO_LENGTH);
+      }
     ~ObStatItem() {}
   public:
-    void stat(const int64_t time_cost = 0)
+    void set_extra_info(const char *extra_info)
+    {
+      MEMCPY(extra_info_, extra_info, MAX_ROOTSERVICE_EVENT_EXTRA_INFO_LENGTH);
+    }
+    void stat(const int64_t count = 0)
     {
       const int64_t cur_ts = ::oceanbase::common::ObTimeUtility::fast_current_time();
       const int64_t cur_stat_count = ATOMIC_AAF(&stat_count_, 1);
-      const int64_t cur_accum_time = ATOMIC_AAF(&accum_time_, time_cost);
+      const int64_t cur_accum_count = ATOMIC_AAF(&accum_count_, count);
       if (ATOMIC_LOAD(&last_ts_) + stat_interval_ < cur_ts) {
         if (ATOMIC_BCAS(&lock_tag_, false, true)) {
-          LIB_LOG(INFO, NULL == item_ ? "" : item_, K(cur_stat_count), K_(stat_interval), "avg cost", cur_accum_time / cur_stat_count, K(this));
+          LIB_LOG(INFO, NULL == item_ ? "" : item_, K(cur_stat_count), K_(stat_interval), "avg count/cost", cur_accum_count / cur_stat_count, K(this), K_(extra_info));
           (void)ATOMIC_SET(&last_ts_, cur_ts);
           (void)ATOMIC_SET(&stat_count_, 0);
-          (void)ATOMIC_SET(&accum_time_, 0);
+          (void)ATOMIC_SET(&accum_count_, 0);
           ATOMIC_BCAS(&lock_tag_, true, false);
         }
       }
@@ -1156,9 +1150,10 @@ public:
   private:
     const char *const item_;
     const int64_t stat_interval_;
+    char extra_info_[MAX_ROOTSERVICE_EVENT_EXTRA_INFO_LENGTH];
     int64_t last_ts_;
     int64_t stat_count_;
-    int64_t accum_time_;
+    int64_t accum_count_;
     bool lock_tag_;
   };
 public:
@@ -1176,6 +1171,7 @@ public:
   ~ObIntWarp() { reset(); }
   void reset() { v_ = 0; }
   uint64_t hash() const { return v_; }
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   uint64_t get_value() const { return v_; }
   int compare(const ObIntWarp &other) const
   {
@@ -1243,7 +1239,7 @@ int ob_atoll(const char *str, int64_t &res);
 int ob_strtoll(const char *str, char *&endptr, int64_t &res);
 int ob_strtoull(const char *str, char *&endptr, uint64_t &res);
 
-/* 功能：根据localtime计算公式实现快速计算的方法, 替代系统函数localtime_r. 参考https://www.cnblogs.com/westfly/p/5139645.html , 调整计算逻辑, 加上时区偏移的考虑.
+/* 功能：根据localtime计算公式实现快速计算的方法, 替代系统函数localtime_r.
    参数：
      in: const time_t *unix_sec, 当前的时间戳(单位秒), 输入值
      out: struct tm *result, 当前时间戳对应的可读时间localtime, 输出值

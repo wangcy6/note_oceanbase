@@ -30,7 +30,6 @@
 #include "share/ob_index_builder_util.h"
 #include "observer/ob_server_struct.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
-#include "ob_server_manager.h"
 #include "ob_zone_manager.h"
 #include "ob_ddl_service.h"
 #include "ob_root_service.h"
@@ -69,6 +68,7 @@ ObIndexBuilder::~ObIndexBuilder()
 
 int ObIndexBuilder::create_index(
     const ObCreateIndexArg &arg,
+<<<<<<< HEAD
     const SCN &frozen_scn,
     obrpc::ObAlterTableRes &res)
 {
@@ -82,6 +82,20 @@ int ObIndexBuilder::create_index(
     LOG_WARN("invalid arg", K(arg), K(frozen_scn), K(ret));
   } else if (OB_FAIL(do_create_index(arg, frozen_scn, res))) {
     LOG_WARN("generate_schema failed", K(arg), K(frozen_scn), K(ret));
+=======
+    obrpc::ObAlterTableRes &res)
+{
+  int ret = OB_SUCCESS;
+  LOG_INFO("start create index", K(arg));
+  if (!ddl_service_.is_inited()) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("ddl_service not init", "ddl_service inited", ddl_service_.is_inited(), K(ret));
+  } else if (!arg.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arg", K(arg), K(ret));
+  } else if (OB_FAIL(do_create_index(arg, res))) {
+    LOG_WARN("generate_schema failed", K(arg), K(ret));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
   if (OB_ERR_TABLE_EXIST == ret) {
     if (true == arg.if_not_exist_) {
@@ -92,7 +106,11 @@ int ObIndexBuilder::create_index(
       LOG_USER_ERROR(OB_ERR_KEY_NAME_DUPLICATE, arg.index_name_.length(), arg.index_name_.ptr());
     }
   }
+<<<<<<< HEAD
   LOG_INFO("finish create index", K(arg), K(frozen_scn), K(ret));
+=======
+  LOG_INFO("finish create index", K(arg), K(ret));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   return ret;
 }
 
@@ -139,9 +157,8 @@ int ObIndexBuilder::drop_index(const ObDropIndexArg &arg, obrpc::ObDropIndexRes 
   }
 
   if (OB_SUCC(ret)) {
-    const uint64_t table_id = table_schema->get_table_id();
+    const uint64_t data_table_id = table_schema->get_table_id();
     const ObTableSchema *index_table_schema = NULL;
-
     if (OB_INVALID_ID != arg.index_table_id_) {
       LOG_DEBUG("drop index with index_table_id", K(arg.index_table_id_));
       if (OB_FAIL(schema_guard.get_table_schema(tenant_id, arg.index_table_id_, index_table_schema))) {
@@ -150,8 +167,8 @@ int ObIndexBuilder::drop_index(const ObDropIndexArg &arg, obrpc::ObDropIndexRes 
     } else {
       ObString index_table_name;
       if (OB_FAIL(ObTableSchema::build_index_table_name(
-        allocator, table_id, arg.index_name_, index_table_name))) {
-      LOG_WARN("build_index_table_name failed", K(arg), K(table_id), K(ret));
+        allocator, data_table_id, arg.index_name_, index_table_name))) {
+      LOG_WARN("build_index_table_name failed", K(arg), K(data_table_id), K(ret));
       } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id,
               table_schema->get_database_id(),
               index_table_name,
@@ -199,7 +216,7 @@ int ObIndexBuilder::drop_index(const ObDropIndexArg &arg, obrpc::ObDropIndexRes 
       if (trans.is_started()) {
         int temp_ret = OB_SUCCESS;
         if (OB_SUCCESS != (temp_ret = trans.end(OB_SUCC(ret)))) {
-          LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret), K(temp_ret));
+          LOG_WARN_RET(temp_ret, "trans end failed", "is_commit", OB_SUCCESS == ret, K(temp_ret));
           ret = (OB_SUCC(ret)) ? temp_ret : ret;
         }
       }
@@ -243,7 +260,10 @@ int ObIndexBuilder::do_create_global_index(
     share::schema::ObSchemaGetterGuard &schema_guard,
     const obrpc::ObCreateIndexArg &arg,
     const share::schema::ObTableSchema &table_schema,
+<<<<<<< HEAD
     const SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     obrpc::ObAlterTableRes &res)
 {
   int ret = OB_SUCCESS;
@@ -275,17 +295,30 @@ int ObIndexBuilder::do_create_global_index(
             new_arg, new_table_schema, allocator, gen_columns))) {
       LOG_WARN("fail to adjust expr index args", K(ret));
     } else if (OB_FAIL(generate_schema(
+<<<<<<< HEAD
         new_arg, frozen_scn, new_table_schema, global_index_without_column_info, index_schema))) {
       LOG_WARN("fail to generate schema", K(ret), K(frozen_scn), K(new_arg));
     } else {
       if (gen_columns.empty()) {
         if (OB_FAIL(ddl_service_.create_global_index(
                 trans, new_arg, new_table_schema, index_schema, frozen_scn))) {
+=======
+        new_arg, new_table_schema, global_index_without_column_info, index_schema))) {
+      LOG_WARN("fail to generate schema", K(ret), K(new_arg));
+    } else {
+      if (gen_columns.empty()) {
+        if (OB_FAIL(ddl_service_.create_global_index(
+                trans, new_arg, new_table_schema, index_schema))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
           LOG_WARN("fail to create global index", K(ret));
         }
       } else {
         if (OB_FAIL(ddl_service_.create_global_inner_expr_index(
+<<<<<<< HEAD
               trans, new_arg, table_schema, new_table_schema, gen_columns, index_schema, frozen_scn))) {
+=======
+              trans, new_arg, table_schema, new_table_schema, gen_columns, index_schema))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
           LOG_WARN("fail to create global inner expr index", K(ret));
         }
       }
@@ -296,7 +329,8 @@ int ObIndexBuilder::do_create_global_index(
                                                  &index_schema,
                                                  arg.parallelism_,
                                                  allocator,
-                                                 task_record))) {
+                                                 task_record,
+                                                 arg.consumer_group_id_))) {
         LOG_WARN("fail to submit build global index task", K(ret));
       }
     }
@@ -308,7 +342,7 @@ int ObIndexBuilder::do_create_global_index(
     if (trans.is_started()) {
       int temp_ret = OB_SUCCESS;
       if (OB_SUCCESS != (temp_ret = trans.end(OB_SUCC(ret)))) {
-        LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret), K(temp_ret));
+        LOG_WARN("trans end failed", "is_commit", OB_SUCCESS == ret, K(temp_ret));
         ret = (OB_SUCC(ret)) ? temp_ret : ret;
       }
     }
@@ -331,7 +365,8 @@ int ObIndexBuilder::submit_build_index_task(
     const ObTableSchema *index_schema,
     const int64_t parallelism,
     common::ObIAllocator &allocator,
-    ObDDLTaskRecord &task_record)
+    ObDDLTaskRecord &task_record,
+    const int64_t group_id)
 {
   int ret = OB_SUCCESS;
   ObCreateDDLTaskParam param(index_schema->get_tenant_id(),
@@ -341,6 +376,7 @@ int ObIndexBuilder::submit_build_index_task(
                              0/*object_id*/,
                              index_schema->get_schema_version(),
                              parallelism,
+                             group_id,
                              &allocator,
                              &create_index_arg);
   if (OB_ISNULL(data_schema) || OB_ISNULL(index_schema)) {
@@ -372,6 +408,7 @@ int ObIndexBuilder::submit_drop_index_task(const ObTableSchema &index_schema,
                                0/*object_id*/,
                                index_schema.get_schema_version(),
                                0/*parallelism*/,
+                               arg.consumer_group_id_,
                                &allocator,
                                &arg);
     if (OB_FAIL(GCTX.root_service_->get_ddl_task_scheduler().create_ddl_task(param, ddl_service_.get_sql_proxy(), task_record))) {
@@ -389,7 +426,10 @@ int ObIndexBuilder::do_create_local_index(
     share::schema::ObSchemaGetterGuard &schema_guard,
     const obrpc::ObCreateIndexArg &create_index_arg,
     const share::schema::ObTableSchema &table_schema,
+<<<<<<< HEAD
     const SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     obrpc::ObAlterTableRes &res)
 {
   int ret = OB_SUCCESS;
@@ -402,8 +442,11 @@ int ObIndexBuilder::do_create_local_index(
     ObDDLSQLTransaction trans(&ddl_service_.get_schema_service());
     int64_t refreshed_schema_version = 0;
     const uint64_t tenant_id = table_schema.get_tenant_id();
+    uint64_t tenant_data_version = 0;
     if (OB_FAIL(schema_guard.get_schema_version(tenant_id, refreshed_schema_version))) {
       LOG_WARN("failed to get tenant schema version", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, tenant_data_version))) {
+    LOG_WARN("get tenant data version failed", K(ret));
     } else if (OB_FAIL(trans.start(&ddl_service_.get_sql_proxy(), tenant_id, refreshed_schema_version))) {
       LOG_WARN("start transaction failed", KR(ret), K(tenant_id), K(refreshed_schema_version));
     } else if (OB_FAIL(new_table_schema.assign(table_schema))) {
@@ -425,11 +468,21 @@ int ObIndexBuilder::do_create_local_index(
       } else if (INDEX_TYPE_UNIQUE_GLOBAL == my_arg.index_type_) {
         my_arg.index_type_ = INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE;
         my_arg.index_schema_.set_index_type(INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE);
+      } else if (INDEX_TYPE_SPATIAL_GLOBAL == my_arg.index_type_) {
+        if (tenant_data_version < DATA_VERSION_4_1_0_0) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("tenant data version is less than 4.1, spatial index is not supported", K(ret), K(tenant_data_version));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "tenant data version is less than 4.1, spatial index");
+        } else {
+          my_arg.index_type_ = INDEX_TYPE_SPATIAL_GLOBAL_LOCAL_STORAGE;
+          my_arg.index_schema_.set_index_type(INDEX_TYPE_SPATIAL_GLOBAL_LOCAL_STORAGE);
+        }
       }
       if (OB_FAIL(ObIndexBuilderUtil::adjust_expr_index_args(
               my_arg, new_table_schema, allocator, gen_columns))) {
         LOG_WARN("fail to adjust expr index args", K(ret));
       } else if (OB_FAIL(generate_schema(
+<<<<<<< HEAD
               my_arg, frozen_scn, new_table_schema, global_index_without_column_info, index_schema))) {
         LOG_WARN("fail to generate schema", K(ret), K(frozen_scn), K(my_arg));
       } else if (OB_FAIL(new_table_schema.check_create_index_on_hidden_primary_key(index_schema))) {
@@ -437,6 +490,15 @@ int ObIndexBuilder::do_create_local_index(
       } else if (gen_columns.empty()) {
         if (OB_FAIL(ddl_service_.create_index_table(my_arg, index_schema, frozen_scn, trans))) {
           LOG_WARN("fail to create index", K(ret), K(frozen_scn), K(index_schema));
+=======
+              my_arg, new_table_schema, global_index_without_column_info, index_schema))) {
+        LOG_WARN("fail to generate schema", K(ret), K(my_arg));
+      } else if (OB_FAIL(new_table_schema.check_create_index_on_hidden_primary_key(index_schema))) {
+        LOG_WARN("failed to check create index on table", K(ret), K(index_schema));
+      } else if (gen_columns.empty()) {
+        if (OB_FAIL(ddl_service_.create_index_table(my_arg, index_schema, trans))) {
+          LOG_WARN("fail to create index", K(ret), K(index_schema));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         }
       } else {
         if (OB_FAIL(ddl_service_.create_inner_expr_index(trans,
@@ -444,7 +506,10 @@ int ObIndexBuilder::do_create_local_index(
                                                          new_table_schema,
                                                          gen_columns,
                                                          index_schema,
+<<<<<<< HEAD
                                                          frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                                                          &my_arg.ddl_stmt_str_))) {
           LOG_WARN("fail to create inner expr index", K(ret));
         }
@@ -456,7 +521,8 @@ int ObIndexBuilder::do_create_local_index(
                                                  &index_schema,
                                                  create_index_arg.parallelism_,
                                                  allocator,
-                                                 task_record))) {
+                                                 task_record,
+                                                 create_index_arg.consumer_group_id_))) {
         LOG_WARN("failt to submit build local index task", K(ret));
       } else {
         res.index_table_id_ = index_schema.get_table_id();
@@ -467,7 +533,7 @@ int ObIndexBuilder::do_create_local_index(
     if (trans.is_started()) {
       int temp_ret = OB_SUCCESS;
       if (OB_SUCCESS != (temp_ret = trans.end(OB_SUCC(ret)))) {
-        LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret), K(temp_ret));
+        LOG_WARN("trans end failed", "is_commit", OB_SUCCESS == ret, K(temp_ret));
         ret = (OB_SUCC(ret)) ? temp_ret : ret;
       }
     }
@@ -487,7 +553,10 @@ int ObIndexBuilder::do_create_local_index(
 // and table_name, which will used for getting data table schema in generate_schema
 int ObIndexBuilder::do_create_index(
     const ObCreateIndexArg &arg,
+<<<<<<< HEAD
     const SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     obrpc::ObAlterTableRes &res)
 {
   int ret = OB_SUCCESS;
@@ -501,9 +570,15 @@ int ObIndexBuilder::do_create_index(
   if (!ddl_service_.is_inited()) {
     ret = OB_INNER_STAT_ERROR;
     LOG_WARN("ddl_service not init", "ddl_service inited", ddl_service_.is_inited(), K(ret));
+<<<<<<< HEAD
   } else if (!arg.is_valid() || !frozen_scn.is_valid_and_not_min()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(arg), K(frozen_scn), K(ret));
+=======
+  } else if (!arg.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(arg), K(ret));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else if (OB_FAIL(ddl_service_.get_tenant_schema_guard_with_version_in_inner_table(tenant_id, schema_guard))) {
     LOG_WARN("get_schema_guard failed", K(ret));
   } else if (OB_FAIL(schema_guard.get_table_schema(
@@ -537,19 +612,34 @@ int ObIndexBuilder::do_create_index(
     LOG_WARN("check whether the foreign key related table is executing ddl failed", K(ret));
   } else if (INDEX_TYPE_NORMAL_LOCAL == arg.index_type_
              || INDEX_TYPE_UNIQUE_LOCAL == arg.index_type_
+<<<<<<< HEAD
              || INDEX_TYPE_DOMAIN_CTXCAT == arg.index_type_) {
     if (OB_FAIL(do_create_local_index(schema_guard, arg, *table_schema, frozen_scn, res))) {
+=======
+             || INDEX_TYPE_DOMAIN_CTXCAT == arg.index_type_
+             || INDEX_TYPE_SPATIAL_LOCAL == arg.index_type_) {
+    if (OB_FAIL(do_create_local_index(schema_guard, arg, *table_schema, res))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("fail to do create local index", K(ret), K(arg));
     }
   } else if (INDEX_TYPE_NORMAL_GLOBAL == arg.index_type_
-             || INDEX_TYPE_UNIQUE_GLOBAL == arg.index_type_) {
+             || INDEX_TYPE_UNIQUE_GLOBAL == arg.index_type_
+             || INDEX_TYPE_SPATIAL_GLOBAL == arg.index_type_) {
     if (!table_schema->is_partitioned_table() && !arg.index_schema_.is_partitioned_table()) {
       // create a global index with local storage when both the data table and index table are non-partitioned
+<<<<<<< HEAD
       if (OB_FAIL(do_create_local_index(schema_guard, arg, *table_schema, frozen_scn, res))) {
         LOG_WARN("fail to do create local index", K(ret));
       }
     } else {
       if (OB_FAIL(do_create_global_index(schema_guard, arg, *table_schema, frozen_scn, res))) {
+=======
+      if (OB_FAIL(do_create_local_index(schema_guard, arg, *table_schema, res))) {
+        LOG_WARN("fail to do create local index", K(ret));
+      }
+    } else {
+      if (OB_FAIL(do_create_global_index(schema_guard, arg, *table_schema, res))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         LOG_WARN("fail to do create global index", K(ret));
       }
     }
@@ -579,20 +669,32 @@ int ObIndexBuilder::do_create_index(
  */
 int ObIndexBuilder::generate_schema(
     const ObCreateIndexArg &arg,
+<<<<<<< HEAD
     const SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     ObTableSchema &data_schema,
     const bool global_index_without_column_info,
     ObTableSchema &schema)
 {
   int ret = OB_SUCCESS;
+  bool is_oracle_mode = false;
   // some items in arg may be invalid, don't check arg here(when create table with index, alter
   // table add index)
-  if (!ddl_service_.is_inited()) {
+  if (OB_UNLIKELY(!ddl_service_.is_inited())) {
     ret = OB_INNER_STAT_ERROR;
     LOG_WARN("ddl_service not init", "ddl_service inited", ddl_service_.is_inited(), K(ret));
+<<<<<<< HEAD
   } else if (!frozen_scn.is_valid_and_not_min() || !data_schema.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(frozen_scn), K(data_schema), K(ret));
+=======
+  } else if (OB_UNLIKELY(!data_schema.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument",  K(ret), K(data_schema));
+  } else if (OB_FAIL(data_schema.check_if_oracle_compat_mode(is_oracle_mode))) {
+    LOG_WARN("check_if_oracle_compat_mode failed", K(ret));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
 
   if (OB_SUCC(ret)) {
@@ -644,6 +746,7 @@ int ObIndexBuilder::generate_schema(
       }
       int64_t index_data_length = 0;
       bool is_ctxcat_added = false;
+      bool is_mysql_func_index = false;
       for (int64_t i = 0; OB_SUCC(ret) && i < arg.index_columns_.count(); ++i) {
         const ObColumnSchemaV2 *data_column = NULL;
         const ObColumnSortItem &sort_item = arg.index_columns_.at(i);
@@ -669,6 +772,10 @@ int ObIndexBuilder::generate_schema(
             LOG_WARN("index table rowkey length over max_user_row_key_length",
                 K(index_data_length), LITERAL_K(OB_MAX_USER_ROW_KEY_LENGTH), K(ret));
           }
+        } else if (FALSE_IT(is_mysql_func_index |= !is_oracle_mode && data_column->is_func_idx_column())) {
+        } else if (!is_oracle_mode && data_column->is_func_idx_column() && ob_is_text_tc(data_column->get_data_type())) {
+          ret = OB_ERR_FUNCTIONAL_INDEX_ON_LOB;
+          LOG_WARN("Cannot create a functional index on an expression that returns a BLOB or TEXT.", K(ret));
         } else if (ob_is_text_tc(data_column->get_data_type()) && !data_column->is_fulltext_column()) {
           ret = OB_ERR_WRONG_KEY_COLUMN;
           LOG_USER_ERROR(OB_ERR_WRONG_KEY_COLUMN, sort_item.column_name_.length(), sort_item.column_name_.ptr());
@@ -682,16 +789,22 @@ int ObIndexBuilder::generate_schema(
           ret = OB_ERR_WRONG_KEY_COLUMN;
           LOG_USER_ERROR(OB_ERR_WRONG_KEY_COLUMN, sort_item.column_name_.length(), sort_item.column_name_.ptr());
           LOG_WARN("fulltext index created on blob column is not supported", K(arg.index_type_), K(ret));
+        } else if (data_column->get_meta_type().is_ext() || data_column->get_meta_type().is_user_defined_sql_type()) {
+          ret = OB_ERR_WRONG_KEY_COLUMN;
+          LOG_USER_ERROR(OB_ERR_WRONG_KEY_COLUMN, sort_item.column_name_.length(), sort_item.column_name_.ptr());
+          LOG_WARN("index created on udt column is not supported", K(arg.index_type_), K(ret));
         } else if (ob_is_json_tc(data_column->get_data_type())) {
-          ret = OB_ERR_JSON_USED_AS_KEY;
-          LOG_USER_ERROR(OB_ERR_JSON_USED_AS_KEY, sort_item.column_name_.length(), sort_item.column_name_.ptr());
-          LOG_WARN("JSON column cannot be used in key specification.", K(arg.index_type_), K(ret));
+          if (!is_oracle_mode && data_column->is_func_idx_column()) {
+            ret = OB_ERR_FUNCTIONAL_INDEX_ON_JSON_OR_GEOMETRY_FUNCTION;
+            LOG_WARN("Cannot create a functional index on an expression that returns a JSON or GEOMETRY.",K(ret));
+          } else {
+            ret = OB_ERR_JSON_USED_AS_KEY;
+            LOG_USER_ERROR(OB_ERR_JSON_USED_AS_KEY, sort_item.column_name_.length(), sort_item.column_name_.ptr());
+            LOG_WARN("JSON column cannot be used in key specification.", K(arg.index_type_), K(ret));
+          }
         } else if (data_column->is_string_type()) {
           int64_t length = 0;
-          bool is_oracle_mode = false;
-          if (OB_FAIL(data_schema.check_if_oracle_compat_mode(is_oracle_mode))) {
-            LOG_WARN("check_if_oracle_compat_mode failed", K(ret));
-          } else if (data_column->is_fulltext_column()) {
+          if (data_column->is_fulltext_column()) {
             if (!is_ctxcat_added) {
               length = OB_MAX_OBJECT_NAME_LENGTH;
               is_ctxcat_added = true;
@@ -715,6 +828,16 @@ int ObIndexBuilder::generate_schema(
           }
         }
       }
+      if (OB_SUCC(ret) && is_mysql_func_index) {
+        uint64_t tenant_data_version = 0;
+        if (OB_FAIL(GET_MIN_DATA_VERSION(data_schema.get_tenant_id(), tenant_data_version))) {
+          LOG_WARN("get tenant data version failed", K(ret));
+        } else if (tenant_data_version < DATA_VERSION_4_2_0_0){
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("tenant version is less than 4.2, functional index is not supported in mysql mode", K(ret), K(tenant_data_version));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "version is less than 4.2, functional index in mysql mode not supported");
+        }
+      }
     }
 
     if (OB_SUCC(ret)) {
@@ -723,12 +846,20 @@ int ObIndexBuilder::generate_schema(
                                            || INDEX_TYPE_UNIQUE_LOCAL == arg.index_type_
                                            || INDEX_TYPE_NORMAL_GLOBAL_LOCAL_STORAGE == arg.index_type_
                                            || INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE == arg.index_type_
-                                           || INDEX_TYPE_DOMAIN_CTXCAT == arg.index_type_);
+                                           || INDEX_TYPE_DOMAIN_CTXCAT == arg.index_type_
+                                           || INDEX_TYPE_SPATIAL_LOCAL == arg.index_type_
+                                           || INDEX_TYPE_SPATIAL_GLOBAL_LOCAL_STORAGE == arg.index_type_);
       const bool need_generate_index_schema_column = (is_index_local_storage || global_index_without_column_info);
       schema.set_table_mode(data_schema.get_table_mode_flag());
       schema.set_table_state_flag(data_schema.get_table_state_flag());
+<<<<<<< HEAD
       if (OB_FAIL(set_basic_infos(arg, frozen_scn, data_schema, schema))) {
         LOG_WARN("set_basic_infos failed", K(arg), K(frozen_scn), K(data_schema), K(ret));
+=======
+      schema.set_duplicate_scope(data_schema.get_duplicate_scope());
+      if (OB_FAIL(set_basic_infos(arg, data_schema, schema))) {
+        LOG_WARN("set_basic_infos failed", K(arg), K(data_schema), K(ret));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       } else if (need_generate_index_schema_column
                  && OB_FAIL(set_index_table_columns(arg, data_schema, schema))) {
         LOG_WARN("set_index_table_columns failed", K(arg), K(data_schema), K(ret));
@@ -755,7 +886,10 @@ int ObIndexBuilder::generate_schema(
 }
 
 int ObIndexBuilder::set_basic_infos(const ObCreateIndexArg &arg,
+<<<<<<< HEAD
                                     const SCN &frozen_scn,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                                     const ObTableSchema &data_schema,
                                     ObTableSchema &schema)
 {
@@ -773,10 +907,17 @@ int ObIndexBuilder::set_basic_infos(const ObCreateIndexArg &arg,
   } else if (OB_ISNULL(database)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("database_schema is null", K(ret), "database_id", data_schema.get_database_id());
+<<<<<<< HEAD
   } else if (!frozen_scn.is_valid_and_not_min() || !data_schema.is_valid()) {
     // some items in arg may be invalid, don't check arg
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(frozen_scn), K(data_schema), K(ret));
+=======
+  } else if (!data_schema.is_valid()) {
+    // some items in arg may be invalid, don't check arg
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(data_schema), K(ret));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else {
     ObString index_table_name = arg.index_name_;
     ObArenaAllocator allocator(ObModIds::OB_SCHEMA);
@@ -805,7 +946,8 @@ int ObIndexBuilder::set_basic_infos(const ObCreateIndexArg &arg,
       schema.set_load_type(data_schema.get_load_type());
       schema.set_def_type(data_schema.get_def_type());
       if (INDEX_TYPE_NORMAL_LOCAL == arg.index_type_
-          || INDEX_TYPE_UNIQUE_LOCAL == arg.index_type_) {
+          || INDEX_TYPE_UNIQUE_LOCAL == arg.index_type_
+          || INDEX_TYPE_SPATIAL_LOCAL == arg.index_type_) {
         schema.set_part_level(data_schema.get_part_level());
       } else {} // partition level is filled during resolve stage for global index
       schema.set_charset_type(data_schema.get_charset_type());

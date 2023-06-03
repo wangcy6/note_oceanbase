@@ -86,11 +86,14 @@ public:
       const ObLockID &lock_id,
       const ObTableLockOwnerID &owner_id,
       const ObTableLockMode mode,
+      const ObTableLockOpType op_type,
       bool &is_exist,
       ObTableLockMode &lock_mode_in_same_trans) const;
+  // wait all the trans that modify with a smaller schema_version finished.
   int check_modify_schema_elapsed(
       const ObLockID &lock_id,
       const int64_t schema_version);
+  // wait all the trans that modify with a smaller timestamp finished.
   int check_modify_time_elapsed(
       const ObLockID &lock_id,
       const int64_t timestamp);

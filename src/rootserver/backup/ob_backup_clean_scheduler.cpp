@@ -32,7 +32,6 @@ namespace rootserver
 ObBackupCleanScheduler::ObBackupCleanScheduler()
  : ObIBackupJobScheduler(BackupJobType::BACKUP_CLEAN_JOB),
    is_inited_(false),
-   server_mgr_(nullptr),
    sql_proxy_(nullptr),
    rpc_proxy_(nullptr),
    schema_service_(nullptr),
@@ -43,7 +42,6 @@ ObBackupCleanScheduler::ObBackupCleanScheduler()
 }
 
 int ObBackupCleanScheduler::init(
-    ObServerManager &server_mgr,
     common::ObMySQLProxy &sql_proxy,
     obrpc::ObSrvRpcProxy &rpc_proxy,
     share::schema::ObMultiVersionSchemaService &schema_service,
@@ -56,7 +54,6 @@ int ObBackupCleanScheduler::init(
     ret = OB_INIT_TWICE;
     LOG_WARN("init twice", K(ret));
   } else {
-    server_mgr_ = &server_mgr;
     sql_proxy_ = &sql_proxy;
     rpc_proxy_ = &rpc_proxy;
     schema_service_ = &schema_service;
@@ -860,7 +857,7 @@ int ObUserTenantBackupDeleteMgr::deal_non_reentrant_job(const int error)
            || ObBackupCleanStatus::Status::DOING == task_attr.status_.status_
            || ObBackupCleanStatus::Status::CANCELING == task_attr.status_.status_) {
 #ifdef ERRSIM
-  ret = E(EventTable::EN_BACKUP_DELETE_EXCEPTION_HANDLING) OB_SUCCESS;
+  ret = OB_E(EventTable::EN_BACKUP_DELETE_EXCEPTION_HANDLING) OB_SUCCESS;
 #endif
           if (OB_FAIL(ret)) {
           } else if (OB_FAIL(task_mgr.init(job_attr_->tenant_id_, task_attr.task_id_, *job_attr_, *sql_proxy_,
@@ -1914,7 +1911,6 @@ int ObSysTenantBackupDeleteMgr::advance_status_(
 ObBackupAutoObsoleteDeleteTrigger::ObBackupAutoObsoleteDeleteTrigger()
  : ObIBackupTrigger(BackupTriggerType::BACKUP_AUTO_DELETE_TRIGGER),
    is_inited_(false),
-   server_mgr_(nullptr),
    sql_proxy_(nullptr),
    rpc_proxy_(nullptr),
    schema_service_(nullptr),
@@ -1925,7 +1921,6 @@ ObBackupAutoObsoleteDeleteTrigger::ObBackupAutoObsoleteDeleteTrigger()
 }
 
 int ObBackupAutoObsoleteDeleteTrigger::init(
-    ObServerManager &server_mgr,
     common::ObMySQLProxy &sql_proxy,
     obrpc::ObSrvRpcProxy &rpc_proxy,
     share::schema::ObMultiVersionSchemaService &schema_service,
@@ -1938,7 +1933,6 @@ int ObBackupAutoObsoleteDeleteTrigger::init(
     ret = OB_INIT_TWICE;
     LOG_WARN("init twice", K(ret));
   } else {
-    server_mgr_ = &server_mgr;
     sql_proxy_ = &sql_proxy;
     rpc_proxy_ = &rpc_proxy;
     schema_service_ = &schema_service;

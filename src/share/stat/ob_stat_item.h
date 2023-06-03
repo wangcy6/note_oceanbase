@@ -14,7 +14,6 @@
 #define OB_STAT_ITEM_H
 #include "share/stat/ob_stat_define.h"
 #include "share/stat/ob_opt_column_stat.h"
-#include "share/stat/ob_column_stat.h"
 #include "share/stat/ob_topk_hist_estimator.h"
 namespace oceanbase {
 
@@ -44,6 +43,11 @@ public:
   {
     UNUSED(obj);
     return OB_NOT_IMPLEMENT;
+  }
+  virtual int decode(ObObj &obj, ObIAllocator &allocator)
+  {
+    UNUSED(allocator);
+    return decode(obj);
   }
 
   TO_STRING_KV(K(is_needed()));
@@ -110,7 +114,7 @@ public:
                 ObOptColumnStat *stat) :
     col_param_(param), col_stat_(stat)
   {}
-  virtual bool is_needed() const { return col_param_ != NULL && col_param_->need_basic_static_; }
+  virtual bool is_needed() const { return col_param_ != NULL && col_param_->need_basic_stat(); }
   virtual int gen_expr(char *buf, const int64_t buf_len, int64_t &pos) override;
   virtual const char *get_fmt() const { return NULL; }
 protected:
@@ -196,9 +200,7 @@ public:
                ObOptColumnStat *stat) :
     ObStatColItem(param, stat)
   {}
-
-  // always need to deduce table avg row length
-  virtual bool is_needed() const override { return true; }
+  virtual bool is_needed() const { return col_param_ != NULL && col_param_->need_avg_len(); }
   const char *get_fmt() const
   {
     return lib::is_oracle_mode() ? " AVG(SYS_OP_OPNSIZE(\"%.*s\"))"
@@ -235,14 +237,16 @@ public:
     tab_stat_(tab_stat)
   {}
 
-  static int build_histogram_from_topk_items(const ObIArray<ObTopkItem> &buckets,
+  static int build_histogram_from_topk_items(ObIAllocator &allocator,
+                                             const ObIArray<ObTopkItem> &buckets,
                                              int64_t max_bucket_num,
                                              int64_t total_row_count,
                                              int64_t not_null_count,
                                              int64_t num_distinct,
                                              ObHistogram &histogram);
 
-  static int try_build_topk_histogram(const ObIArray<ObHistBucket> &bkts,
+  static int try_build_topk_histogram(ObIAllocator &allocator,
+                                      const ObIArray<ObHistBucket> &bkts,
                                       const int64_t max_bucket_num,
                                       const int64_t total_row_count,
                                       const int64_t not_null_count,
@@ -257,7 +261,7 @@ public:
   // const bucket_size = 256;
   virtual bool is_needed() const override;
   virtual int gen_expr(char *buf, const int64_t buf_len, int64_t &pos) override;
-  virtual int decode(ObObj &obj) override;
+  virtual int decode(ObObj &obj, ObIAllocator &allocator) override;
 protected:
   ObOptTableStat *tab_stat_;
 };
@@ -292,7 +296,7 @@ public:
   {}
 
   virtual int gen_expr(char *buf, const int64_t buf_len, int64_t &pos) override;
-  virtual int decode(ObObj &obj) override;
+  virtual int decode(ObObj &obj, ObIAllocator &allocator) override;
 private:
   bool is_null_item_;
 };
@@ -302,7 +306,7 @@ class ObGlobalTableStat
 public:
   ObGlobalTableStat()
     : row_count_(0), row_size_(0), data_size_(0),
-      macro_block_count_(0), micro_block_count_(0), part_cnt_(0)
+      macro_block_count_(0), micro_block_count_(0), part_cnt_(0), last_analyzed_(0)
   {}
 
   void add(int64_t rc, int64_t rs, int64_t ds, int64_t mac, int64_t mic);
@@ -312,13 +316,17 @@ public:
   int64_t get_avg_data_size() const;
   int64_t get_macro_block_count() const;
   int64_t get_micro_block_count() const;
+  int64_t get_last_analyzed() const { return last_analyzed_; }
+  void set_last_analyzed(int64_t last_analyzed) { last_analyzed_ = last_analyzed; }
+
 
   TO_STRING_KV(K(row_count_),
                K(row_size_),
                K(data_size_),
                K(macro_block_count_),
                K(micro_block_count_),
-               K(part_cnt_));
+               K(part_cnt_),
+               K(last_analyzed_));
 
 private:
   int64_t row_count_;
@@ -327,6 +335,7 @@ private:
   int64_t macro_block_count_;
   int64_t micro_block_count_;
   int64_t part_cnt_;
+  int64_t last_analyzed_;
 };
 
 class ObGlobalNullEval
@@ -345,10 +354,10 @@ private:
 
 class ObGlobalNdvEval
 {
-  const int64_t NUM_LLC_BUCKET =  ObColumnStat::NUM_LLC_BUCKET;
+  const int64_t NUM_LLC_BUCKET =  ObOptColumnStat::NUM_LLC_BUCKET;
 public:
   ObGlobalNdvEval() : global_ndv_(-1), part_cnt_(0) {
-    MEMSET(global_llc_bitmap_, 0, ObColumnStat::NUM_LLC_BUCKET); }
+    MEMSET(global_llc_bitmap_, 0, ObOptColumnStat::NUM_LLC_BUCKET); }
 
   void add(int64_t ndv, const char *llc_bitmap);
 
@@ -357,11 +366,13 @@ public:
   void get_llc_bitmap(char *llc_bitmap, const int64_t llc_bitmap_size) const;
 
   static double select_alpha_value(const int64_t num_bucket);
+  static int64_t get_ndv_from_llc(const char *llc_bitmap);
+  static void update_llc(char *dst_llc_bitmap, const char *src_llc_bitmap, bool force_update = false);
 
 private:
   int64_t global_ndv_;
   int64_t part_cnt_;
-  char global_llc_bitmap_[ObColumnStat::NUM_LLC_BUCKET];
+  char global_llc_bitmap_[ObOptColumnStat::NUM_LLC_BUCKET];
 };
 
 class ObGlobalMaxEval
@@ -424,6 +435,25 @@ public:
   { return global_num_not_null_; }
 private:
   int64_t global_num_not_null_;
+};
+
+struct ObGlobalColumnStat
+{
+  ObGlobalColumnStat() : min_val_(), max_val_(), null_val_(0), avglen_val_(0), ndv_val_(0)
+  {
+    min_val_.set_min_value();
+    max_val_.set_max_value();
+  }
+  TO_STRING_KV(K(min_val_),
+               K(max_val_),
+               K(null_val_),
+               K(avglen_val_),
+               K(ndv_val_));
+  ObObj min_val_;
+  ObObj max_val_;
+  int64_t null_val_;
+  int64_t avglen_val_;
+  int64_t ndv_val_;
 };
 
 template <class T>

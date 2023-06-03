@@ -22,6 +22,7 @@
 #include "sql/engine/expr/ob_expr_arg_case.h"
 #include "sql/engine/expr/ob_expr_oracle_decode.h"
 #include "sql/engine/expr/ob_expr_to_type.h"
+#include "sql/engine/expr/ob_expr_rand.h"
 #include "sql/engine/expr/ob_expr_random.h"
 #include "sql/engine/expr/ob_expr_obj_access.h"
 #include "sql/engine/expr/ob_expr_type_to_str.h"
@@ -390,7 +391,7 @@ int ObExprGeneratorImpl::visit(ObQueryRefRawExpr &expr)
                "expr type", get_type_name(expr.get_expr_type()));
     } else {
       ObExprSubQueryRef *subquery_op = static_cast<ObExprSubQueryRef*>(op);
-      bool result_is_scalar = (expr.get_output_column() == 1 && !expr.is_set());
+      bool result_is_scalar = (expr.get_output_column() == 1 && !expr.is_set() && !expr.is_multiset());
       subquery_op->set_result_is_scalar(result_is_scalar);
       subquery_op->set_result_type(expr.get_result_type());
       if (result_is_scalar) {
@@ -449,7 +450,7 @@ int ObExprGeneratorImpl::visit(ObPlQueryRefRawExpr &expr)
                "expr type", get_type_name(expr.get_expr_type()));
     } else {
       ObExprOpSubQueryInPl *pl_subquery = static_cast<ObExprOpSubQueryInPl*>(op);
-      OX (pl_subquery->set_ps_id(expr.get_ps_id()));
+      OZ (pl_subquery->deep_copy_ps_sql(expr.get_ps_sql()));
       OX (pl_subquery->set_stmt_type(expr.get_stmt_type()));
       OZ (pl_subquery->deep_copy_route_sql(expr.get_route_sql()));
       OX (pl_subquery->set_result_type(expr.get_subquery_result_type()));
@@ -586,6 +587,11 @@ int ObExprGeneratorImpl::visit_simple_op(ObNonTerminalRawExpr &expr)
           break;
         }
         case T_FUN_SYS_RAND: {
+          ObExprRand *rand_op = static_cast<ObExprRand*> (op);
+          ret = visit_rand_expr(static_cast<ObOpRawExpr&> (expr), rand_op);
+          break;
+        }
+        case T_FUN_SYS_RANDOM: {
           ObExprRandom *rand_op = static_cast<ObExprRandom*> (op);
           ret = visit_random_expr(static_cast<ObOpRawExpr&> (expr), rand_op);
           break;
@@ -717,7 +723,7 @@ inline int ObExprGeneratorImpl::visit_like_expr(ObOpRawExpr &expr, ObExprLike *&
       //对于nl_param及subplan filter中上层参数作为like pattern时,
 			//每次rescan, pattern都会变化, 因此认为不是literal；
       //这样可以避免like的优化导致出现pattern不变, 结果不对
-      //bug:https://work.aone.alibaba-inc.com/issue/21428253
+      //bug:
       like_op->set_pattern_is_literal(pattern_expr->is_static_const_expr());
       like_op->set_escape_is_literal(escape_expr->is_static_const_expr());
       if (!is_oracle_mode() && !like_op->is_escape_literal()) {
@@ -873,7 +879,7 @@ inline int ObExprGeneratorImpl::visit_in_expr(ObOpRawExpr &expr, ObExprInOrNotIn
                                         : (param_all_same_cs_type &= param_all_same_cs_level));
       in_op->set_param_is_ext_type_oracle(param_all_is_ext);
       //now only support c1 in (1,2,3,4,5...) to vecotrized
-      if (param_all_const && !expr.get_param_expr(0)->is_const_or_param_expr()) {
+      if (param_all_const && expr.get_param_expr(0)->is_vectorize_result()) {
         in_op->set_param_can_vectorized();
       }
     }
@@ -1003,7 +1009,7 @@ int ObExprGeneratorImpl::visit_column_conv_expr(ObRawExpr &expr, ObBaseExprColum
   } else if (column_conv_old->get_str_values().count() > 0
              && OB_FAIL(column_conv_op->deep_copy_str_values(column_conv_old->get_str_values()))) {
     LOG_WARN("failed to deep_copy_str_values", K(raw_column_conv_expr), K(ret));
-  } else {/*do nothing*/}
+  }
   return ret;
 }
 
@@ -1299,6 +1305,26 @@ inline int ObExprGeneratorImpl::visit_subquery_cmp_expr(ObOpRawExpr &expr, ObSub
   return ret;
 }
 
+inline int ObExprGeneratorImpl::visit_rand_expr(ObOpRawExpr &expr, ObExprRand * rand_op)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(rand_op)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("decode expr op is null", K(ret));
+  } else {
+    int64_t num_param = expr.get_param_exprs().count();
+    if (num_param > 1) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("unexpected number of arguments", K(num_param));
+    } else if (num_param == 1) {
+      rand_op->set_seed_const(expr.get_param_expr(0)->is_const_expr());
+    } else {
+      rand_op->set_seed_const(true);
+    }
+  }
+  return ret;
+}
+
 inline int ObExprGeneratorImpl::visit_random_expr(ObOpRawExpr &expr, ObExprRandom * rand_op)
 {
   int ret = OB_SUCCESS;
@@ -1497,13 +1523,8 @@ int ObExprGeneratorImpl::visit(ObOpRawExpr &expr)
       } else if (T_OBJ_ACCESS_REF == expr.get_expr_type()) {
         ObExprObjAccess *obj_access_op = static_cast<ObExprObjAccess *>(op);
         const ObObjAccessRawExpr &obj_access_expr = static_cast<ObObjAccessRawExpr &>(expr);
-        if (OB_ISNULL(reinterpret_cast<void*>(obj_access_expr.get_get_attr_func_addr()))) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("func addr is NULL", K(obj_access_expr), K(obj_access_expr.get_var_indexs()), K(ret));
-        } else {
-          obj_access_op->set_real_param_num(static_cast<int32_t>(obj_access_expr.get_param_count()));
-          OZ(obj_access_op->get_info().from_raw_expr(obj_access_expr));
-        }
+        obj_access_op->set_real_param_num(static_cast<int32_t>(obj_access_expr.get_param_count()));
+        OZ(obj_access_op->get_info().from_raw_expr(obj_access_expr));
       } else if (T_OP_MULTISET == expr.get_expr_type()) {
         ObExprMultiSet *ms_op = static_cast<ObExprMultiSet *>(op);
         const ObMultiSetRawExpr &ms_expr = static_cast<ObMultiSetRawExpr &>(expr);
@@ -1651,7 +1672,9 @@ int ObExprGeneratorImpl::visit(ObAggFunRawExpr &expr)
     aggr_expr->set_accuracy(expr.get_accuracy());
     //除了group_concat,rank,dense_rank,percent_rank,cume_dist函数、keep相关aggr及带有distinct的count函数
     //其他聚集函数的参数只有一列
-    int64_t col_count = (T_FUN_JSON_OBJECTAGG == expr.get_expr_type()) ?  2 : 1;
+    int64_t col_count = (T_FUN_JSON_OBJECTAGG == expr.get_expr_type()
+                        || T_FUN_ORA_JSON_OBJECTAGG == expr.get_expr_type()
+                        || T_FUN_ORA_XMLAGG == expr.get_expr_type()) ?  2 : 1;
     aggr_expr->set_real_param_col_count(col_count);
     aggr_expr->set_all_param_col_count(col_count);
     const ObIArray<ObRawExpr*> &real_param_exprs = expr.get_real_param_exprs();
@@ -1715,7 +1738,9 @@ int ObExprGeneratorImpl::visit(ObAggFunRawExpr &expr)
         || T_FUN_KEEP_WM_CONCAT == expr.get_expr_type()
         || T_FUN_PL_AGG_UDF == expr.get_expr_type()
         || T_FUN_HYBRID_HIST == expr.get_expr_type()
-        || (T_FUN_JSON_OBJECTAGG == expr.get_expr_type() && expr.get_real_param_count() > 1)) {
+        || T_FUN_ORA_XMLAGG == expr.get_expr_type()
+        || (T_FUN_JSON_OBJECTAGG == expr.get_expr_type() && expr.get_real_param_count() > 1)
+        || (T_FUN_ORA_JSON_OBJECTAGG == expr.get_expr_type() && expr.get_real_param_count() > 1)) {
       ObExprOperator *op = NULL;
       if (OB_FAIL(factory_.alloc(T_OP_AGG_PARAM_LIST, op))) {
         LOG_WARN("fail to alloc expr_op", K(ret));
@@ -1749,7 +1774,8 @@ int ObExprGeneratorImpl::visit(ObAggFunRawExpr &expr)
                T_FUN_KEEP_SUM == expr.get_expr_type() ||
                T_FUN_KEEP_COUNT == expr.get_expr_type() ||
                T_FUN_KEEP_WM_CONCAT == expr.get_expr_type() ||
-               T_FUN_HYBRID_HIST == expr.get_expr_type())) {
+               T_FUN_HYBRID_HIST == expr.get_expr_type() ||
+               T_FUN_ORA_XMLAGG == expr.get_expr_type())) {
             ObConstRawExpr *sep_expr = static_cast<ObConstRawExpr *>(expr.get_separator_param_expr());
             // set separator
             if (NULL != sep_expr) {

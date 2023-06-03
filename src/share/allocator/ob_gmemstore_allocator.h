@@ -33,6 +33,17 @@ struct FrozenMemstoreInfoLogger
   int64_t limit_;
   int64_t pos_;
 };
+
+struct ActiveMemstoreInfoLogger
+{
+  ActiveMemstoreInfoLogger(char* buf, int64_t limit): buf_(buf), limit_(limit), pos_(0) {}
+  ~ActiveMemstoreInfoLogger() {}
+  int operator()(ObDLink* link);
+  char* buf_;
+  int64_t limit_;
+  int64_t pos_;
+};
+
 class ObGMemstoreAllocator
 {
 public:
@@ -103,7 +114,11 @@ public:
   };
 
 public:
-  ObGMemstoreAllocator(): hlist_(), arena_(), last_freeze_timestamp_(0) {}
+  ObGMemstoreAllocator():
+      lock_(common::ObLatchIds::MEMSTORE_ALLOCATOR_LOCK),
+      hlist_(),
+      arena_(),
+      last_freeze_timestamp_(0) {}
   ~ObGMemstoreAllocator() {}
 public:
   int init(uint64_t tenant_id)
@@ -116,11 +131,11 @@ public:
   void* alloc(AllocHandle& handle, int64_t size);
   void set_frozen(AllocHandle& handle);
   template<typename Func>
-  int for_each(Func& f) {
+  int for_each(Func& f, const bool reverse=false) {
     int ret = common::OB_SUCCESS;
     ObDLink* iter = NULL;
     LockGuard guard(lock_);
-    while(OB_SUCC(ret) && NULL != (iter = hlist_.next(iter))) {
+    while(OB_SUCC(ret) && NULL != (iter = (reverse ? hlist_.prev(iter) : hlist_.next(iter)))) {
       ret = f(iter);
     }
     return ret;
@@ -130,17 +145,36 @@ public:
     int64_t hazard = hlist_.hazard();
     return  hazard == INT64_MAX? 0: (arena_.allocated() - hazard);
   }
+  int64_t get_frozen_memstore_pos() const {
+    int64_t hazard = hlist_.hazard();
+    return  hazard == INT64_MAX? 0: hazard;
+  }
   int64_t get_mem_total_memstore_used() const { return arena_.hold(); }
   void log_frozen_memstore_info(char* buf, int64_t limit) {
     if (NULL != buf && limit > 0) {
       FrozenMemstoreInfoLogger logger(buf, limit);
       buf[0] = 0;
-      (void)for_each(logger);
+      (void)for_each(logger, true /* reverse  */);
+    }
+  }
+  void log_active_memstore_info(char *buf, int64_t limit) {
+    if (NULL != buf && limit > 0) {
+      ActiveMemstoreInfoLogger logger(buf, limit);
+      buf[0] = 0;
+      (void)for_each(logger, true /* reverse */);
     }
   }
 public:
   int set_memstore_threshold(uint64_t tenant_id);
   bool need_do_writing_throttle() const {return arena_.need_do_writing_throttle();}
+  bool check_clock_over_seq(int64_t seq)
+  {
+    return arena_.check_clock_over_seq(seq);
+  }
+  int64_t expected_wait_time(int64_t seq) const
+  {
+    return arena_.expected_wait_time(seq);
+  }
   int64_t get_retire_clock() const { return arena_.retired(); }
   bool exist_active_memtable_below_clock(const int64_t clock) const {
     return hlist_.hazard() < clock;

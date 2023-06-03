@@ -358,7 +358,7 @@ bool ObPieceInnerPlaceholderDesc::is_valid() const
  */
 OB_SERIALIZE_MEMBER(ObSingleLSInfoDesc::OneFile, file_id_, size_bytes_);
 
-OB_SERIALIZE_MEMBER(ObSingleLSInfoDesc, dest_id_, round_id_, piece_id_, ls_id_, start_scn_, checkpoint_scn_, min_lsn_, max_lsn_, filelist_);
+OB_SERIALIZE_MEMBER(ObSingleLSInfoDesc, dest_id_, round_id_, piece_id_, ls_id_, start_scn_, checkpoint_scn_, min_lsn_, max_lsn_, filelist_, deleted_);
 ObSingleLSInfoDesc::ObSingleLSInfoDesc()
     : ObExternArchiveDesc(ObBackupFileType::BACKUP_PIECE_SINGLE_LS_FILE_LIST_INFO, FILE_VERSION)
 {
@@ -369,6 +369,7 @@ ObSingleLSInfoDesc::ObSingleLSInfoDesc()
   checkpoint_scn_ = SCN::min_scn();
   min_lsn_ = 0;
   max_lsn_ = 0;
+  deleted_ = false;
 }
 
 bool ObSingleLSInfoDesc::is_valid() const
@@ -460,7 +461,7 @@ int ObArchiveStore::write_round_start(const int64_t dest_id, const int64_t round
   return ret;
 }
 
-// oss://archive/rounds/round_d[dest_id]r[round_id]_end
+// oss://archive/rounds/round_d[dest_id]r[round_id]_end.obarc
 int ObArchiveStore::is_round_end_file_exist(const int64_t dest_id, const int64_t round_id, bool &is_exist) const
 {
   int ret = OB_SUCCESS;
@@ -619,7 +620,7 @@ int ObArchiveStore::get_all_rounds(const int64_t dest_id, ObIArray<ObRoundEndDes
   return ret;
 }
 
-// oss://archive/pieces/piece_d[dest_id]r[round_id]p[piece_id]_start_20220601T120000
+// oss://archive/pieces/piece_d[dest_id]r[round_id]p[piece_id]_start_20220601T120000.obarc
 int ObArchiveStore::is_piece_start_file_exist(const int64_t dest_id, const int64_t round_id, const int64_t piece_id,
     const SCN &create_scn, bool &is_exist) const
 {
@@ -675,7 +676,7 @@ int ObArchiveStore::write_piece_start(const int64_t dest_id, const int64_t round
   return ret;
 }
 
-// oss://archive/pieces/piece_d[dest_id]r[round_id]p[piece_id]_end_20220601T120000
+// oss://archive/pieces/piece_d[dest_id]r[round_id]p[piece_id]_end_20220601T120000.obarc
 int ObArchiveStore::is_piece_end_file_exist(const int64_t dest_id, const int64_t round_id, const int64_t piece_id,
     const SCN &create_scn, bool &is_exist) const
 {
@@ -762,7 +763,7 @@ int ObArchiveStore::get_piece_range(const int64_t dest_id, const int64_t round_i
   return ret;
 }
 
-// oss://archive/d[dest_id]r[round_id]p[piece_id]/single_piece_info
+// oss://archive/d[dest_id]r[round_id]p[piece_id]/single_piece_info.obarc
 int ObArchiveStore::is_single_piece_file_exist(const int64_t dest_id, const int64_t round_id, const int64_t piece_id, bool &is_exist) const
 {
   int ret = OB_SUCCESS;
@@ -814,7 +815,7 @@ int ObArchiveStore::write_single_piece(const int64_t dest_id, const int64_t roun
   return ret;
 }
 
-// oss://archive/d[dest_id]r[round_id]p[piece_id]/checkpoint/checkpoint_info_[file_id]
+// oss://archive/d[dest_id]r[round_id]p[piece_id]/checkpoint/checkpoint_info.[file_id].obarc
 int ObArchiveStore::is_piece_checkpoint_file_exist(const int64_t dest_id, const int64_t round_id, const int64_t piece_id, const int64_t file_id, bool &is_exist) const
 {
   int ret = OB_SUCCESS;
@@ -866,7 +867,11 @@ int ObArchiveStore::write_piece_checkpoint(const int64_t dest_id, const int64_t 
   return ret;
 }
 
+<<<<<<< HEAD
 // oss://archive/d[dest_id]r[round_id]p[piece_id]/piece_d[dest_id]r[round_id]p[piece_id]_20220601T120000_20220602T120000
+=======
+// oss://archive/d[dest_id]r[round_id]p[piece_id]/piece_d[dest_id]r[round_id]p[piece_id]_20220601T120000_20220602T120000.obarc
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 int ObArchiveStore::is_piece_inner_placeholder_file_exist(const int64_t dest_id, const int64_t round_id, const int64_t piece_id, const SCN &start_scn,
     const SCN &end_scn, bool &is_exist) const
 {
@@ -919,7 +924,7 @@ int ObArchiveStore::write_piece_inner_placeholder(const int64_t dest_id, const i
   return ret;
 }
 
-// oss://archive/d[dest_id]r[round_id]p[piece_id]/[ls_id]/ls_file_info
+// oss://archive/d[dest_id]r[round_id]p[piece_id]/[ls_id]/file_info.obarc
 int ObArchiveStore::is_single_ls_info_file_exist(const int64_t dest_id, const int64_t round_id, const int64_t piece_id,
     const ObLSID &ls_id, bool &is_exist) const
 {
@@ -931,7 +936,7 @@ int ObArchiveStore::is_single_ls_info_file_exist(const int64_t dest_id, const in
   if (!is_init()) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObArchiveStore not init", K(ret));
-  } else if (OB_FAIL(ObArchivePathUtil::get_single_ls_info_file_path(dest, dest_id, round_id, piece_id, ls_id,full_path))) {
+  } else if (OB_FAIL(ObArchivePathUtil::get_ls_file_info_path(dest, dest_id, round_id, piece_id, ls_id,full_path))) {
     LOG_WARN("failed to get single ls info file path", K(ret), K(dest), K(dest_id), K(round_id), K(piece_id), K(ls_id));
   } else if (OB_FAIL(util.is_exist(full_path.get_ptr(), storage_info, is_exist))) {
     LOG_WARN("failed to check single ls info file exist.", K(ret), K(dest), K(dest_id), K(round_id), K(piece_id), K(ls_id), K(full_path), K(storage_info));
@@ -948,7 +953,7 @@ int ObArchiveStore::read_single_ls_info(const int64_t dest_id, const int64_t rou
   if (!is_init()) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObArchiveStore not init", K(ret));
-  } else if (OB_FAIL(ObArchivePathUtil::get_single_ls_info_file_path(dest, dest_id, round_id, piece_id, ls_id, full_path))) {
+  } else if (OB_FAIL(ObArchivePathUtil::get_ls_file_info_path(dest, dest_id, round_id, piece_id, ls_id, full_path))) {
     LOG_WARN("failed to get single ls info file path", K(ret), K(dest), K(dest_id), K(round_id), K(piece_id), K(ls_id));
   } else if (OB_FAIL(read_single_file(full_path.get_ptr(), desc))) {
     LOG_WARN("failed to read single file", K(ret), K(full_path));
@@ -964,7 +969,7 @@ int ObArchiveStore::write_single_ls_info(const int64_t dest_id, const int64_t ro
   if (!is_init()) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObArchiveStore not init", K(ret));
-  } else if (OB_FAIL(ObArchivePathUtil::get_single_ls_info_file_path(dest, dest_id, round_id, piece_id, ls_id, full_path))) {
+  } else if (OB_FAIL(ObArchivePathUtil::get_ls_file_info_path(dest, dest_id, round_id, piece_id, ls_id, full_path))) {
     LOG_WARN("failed to get single ls info file path", K(ret), K(dest), K(dest_id), K(round_id), K(piece_id), K(ls_id));
   } else if (OB_FAIL(write_single_file(full_path.get_ptr(), desc))) {
     LOG_WARN("failed to write single file", K(ret), K(full_path));
@@ -972,7 +977,7 @@ int ObArchiveStore::write_single_ls_info(const int64_t dest_id, const int64_t ro
   return ret;
 }
 
-// oss://archive/d[dest_id]r[round_id]p[piece_id]/piece_file_info
+// oss://archive/d[dest_id]r[round_id]p[piece_id]/file_info.obarc
 int ObArchiveStore::is_piece_info_file_exist(const int64_t dest_id, const int64_t round_id, const int64_t piece_id, bool &is_exist) const
 {
   int ret = OB_SUCCESS;
@@ -1072,6 +1077,26 @@ int ObArchiveStore::write_tenant_archive_piece_infos(const int64_t dest_id, cons
   } else if (OB_FAIL(write_single_file(full_path.get_ptr(), desc))) {
     LOG_WARN("failed to write piece extend info file", K(ret), K(full_path));
   }
+  return ret;
+}
+
+int ObArchiveStore::is_archive_log_file_exist(const int64_t dest_id, const int64_t round_id,
+  const int64_t piece_id, const ObLSID &ls_id, const int64_t file_id, bool &is_exist) const
+{
+  int ret = OB_SUCCESS;
+  ObBackupIoAdapter util;
+  ObBackupPath full_path;
+  const ObBackupStorageInfo *storage_info = get_storage_info();
+  const ObBackupDest &dest = get_backup_dest();
+  if (!is_init()) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObArchiveStore not init", K(ret));
+  } else if (OB_FAIL(ObArchivePathUtil::get_ls_archive_file_path(dest, dest_id, round_id, piece_id, ls_id, file_id, full_path))) {
+    LOG_WARN("failed to get archive log file path", K(ret), K(dest), K(dest_id), K(round_id), K(piece_id), K(ls_id), K(file_id));
+  } else if (OB_FAIL(util.is_exist(full_path.get_ptr(), storage_info, is_exist))) {
+    LOG_WARN("failed to check archive log file exist.", K(ret), K(full_path), K(storage_info));
+  }
+
   return ret;
 }
 
@@ -1214,50 +1239,97 @@ int ObArchiveStore::get_piece_paths_in_range(const SCN &start_scn, const SCN &en
   } else {
     const int64_t dest_id = piece_keys.at(0).dest_id_;
     int64_t last_piece_idx = -1;
-    for (int64_t i = 0; OB_SUCC(ret) && i < piece_whole_info.his_frozen_pieces_.count(); i++) {
+    int64_t i = 0;
+    int64_t pieces_cnt = piece_whole_info.his_frozen_pieces_.count();
+    while (OB_SUCC(ret) && i < pieces_cnt) {
       const ObTenantArchivePieceAttr &cur = piece_whole_info.his_frozen_pieces_.at(i);
       ObBackupPath piece_path;
       if (cur.key_.dest_id_ != dest_id) {
         // Filter pieces archived at other path.
+        ++i;
         continue;
       }
 
-      if (cur.start_scn_ >= cur.checkpoint_scn_) {
-        // Filter empty piece
+      if (cur.file_status_ != ObBackupFileStatus::STATUS::BACKUP_FILE_AVAILABLE) {
+        // Filter unavailable piece
+        ++i;
         continue;
       }
 
-      if (cur.checkpoint_scn_ <= start_scn) {
+      if (cur.end_scn_ <= start_scn) {
+        ++i;
         continue;
       }
 
       if (cur.start_scn_ >= end_scn) {
+        // this piece may be required for restore, consider the following case.
+        // Piece#1 : <2022-06-01 06:00:00, 2022-06-02 05:00:00, 2022-06-02 06:00:00>
+        // Piece#2 : <2022-06-02 06:00:00, 2022-06-03 05:00:00, 2022-06-03 06:00:00>
+        // Piece#3 : <2022-06-03 06:00:00, 2022-06-03 10:00:00, 2022-06-04 06:00:00>
+        // If 'end_scn' is indicated to ' 2022-06-03 05:30:00', Piece#3 is required.
+        if (!pieces.empty()) {
+          const ObTenantArchivePieceAttr &prev = piece_whole_info.his_frozen_pieces_.at(last_piece_idx);
+          // If pieces are not enough, and current piece is continous with previous one.
+          if (prev.end_scn_ == cur.start_scn_ && prev.checkpoint_scn_ < end_scn) {
+            if (OB_FAIL(ObArchivePathUtil::get_piece_dir_path(dest, cur.key_.dest_id_, cur.key_.round_id_, cur.key_.piece_id_, piece_path))) {
+              LOG_WARN("failed to get piece path", K(ret), K(dest), K(cur));
+            } else if (OB_FAIL(pieces.push_back(piece_path))) {
+              LOG_WARN("fail to push back path", K(ret), K(piece_path));
+            } else {
+              last_piece_idx = i;
+            }
+          }
+        }
         break;
       }
 
       if (pieces.empty()) {
-        // this piece can be used to restore.
-        if (OB_FAIL(ObArchivePathUtil::get_piece_dir_path(dest, cur.key_.dest_id_, cur.key_.round_id_, cur.key_.piece_id_, piece_path))) {
-          LOG_WARN("failed to get piece path", K(ret), K(dest), K(cur));
-        } else if (OB_FAIL(pieces.push_back(piece_path))) {
-          LOG_WARN("fail to push back path", K(ret), K(piece_path));
+        // this piece may be used to restore.
+        if (cur.start_scn_ <= start_scn) {
+          if (OB_FAIL(ObArchivePathUtil::get_piece_dir_path(dest, cur.key_.dest_id_, cur.key_.round_id_, cur.key_.piece_id_, piece_path))) {
+            LOG_WARN("failed to get piece path", K(ret), K(dest), K(cur));
+          } else if (OB_FAIL(pieces.push_back(piece_path))) {
+            LOG_WARN("fail to push back path", K(ret), K(piece_path));
+          } else {
+            last_piece_idx = i;
+            ++i;
+          }
         } else {
-          last_piece_idx = i;
+          ret = OB_ENTRY_NOT_EXIST;
+          LOG_WARN("first piece start_scn is bigger than start_scn", K(ret), K(cur), K(start_scn), K(end_scn));
+          LOG_USER_ERROR(OB_ENTRY_NOT_EXIST, "No enough log for restore");
         }
       } else {
         const ObTenantArchivePieceAttr &prev = piece_whole_info.his_frozen_pieces_.at(last_piece_idx);
-        if (prev.checkpoint_scn_ != cur.start_scn_) {
-          // piece not continous
+        if (prev.end_scn_ != cur.start_scn_) {
+          // The <start_scn, checkpoint_scn, end_scn> of pieces are as following:
+          // Piece#1 : <2022-06-01 00:00:00, 2022-06-01 06:00:00, 2022-06-02 00:00:00>
+          // Piece#2 : <2022-06-01 08:00:00, 2022-06-02 07:59:00, 2022-06-02 08:00:00>
+          // Piece#3 : <2022-06-02 08:00:00, 2022-06-03 06:00:00, 2022-06-03 08:00:00>
+
+          // And the input [start_scn, end_scn] pair is [2022-06-01 12:00:00, 2022-06-03 04:00:00].
+
+          //  Previously, Piece#1 is required, and pushed into 'pieces'. However, when i = 1,
+          //  we find that Piece#2 is not continous with Piece#1, and Piece#1 is not required actually.
+          //  Then Piece#1 is abandoned, and recompute the required pieces.
           pieces.reset();
+<<<<<<< HEAD
           LOG_WARN("pieces are not continous", K(ret), K(prev), K(cur), K(start_scn), K(end_scn));
         }
 
         if (OB_FAIL(ObArchivePathUtil::get_piece_dir_path(dest, cur.key_.dest_id_, cur.key_.round_id_, cur.key_.piece_id_, piece_path))) {
+=======
+          last_piece_idx = -1;
+          // Do not do ++i, recompute if current piece can be used to restore.
+          LOG_INFO("pieces are not continous", K(prev), K(cur), K(start_scn), K(end_scn));
+        } else if (OB_FAIL(ObArchivePathUtil::get_piece_dir_path(dest, cur.key_.dest_id_, cur.key_.round_id_, cur.key_.piece_id_, piece_path))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
           LOG_WARN("failed to get piece path", K(ret), K(dest), K(cur));
         } else if (OB_FAIL(pieces.push_back(piece_path))) {
           LOG_WARN("fail to push back path", K(ret), K(piece_path));
         } else {
           last_piece_idx = i;
+          ++i;
         }
       }
     }
@@ -1265,7 +1337,7 @@ int ObArchiveStore::get_piece_paths_in_range(const SCN &start_scn, const SCN &en
     if (OB_FAIL(ret)) {
     } else if (-1 == last_piece_idx) {
       ret = OB_ENTRY_NOT_EXIST;
-      LOG_WARN("no enough log for restore", K(ret), K(last_piece_idx), K(end_scn));
+      LOG_WARN("no enough log for restore", K(ret), K(last_piece_idx), K(end_scn), K(piece_keys));
       LOG_USER_ERROR(OB_ENTRY_NOT_EXIST, "No enough log for restore");
     } else {
       const ObTenantArchivePieceAttr &last_piece = piece_whole_info.his_frozen_pieces_.at(last_piece_idx);
@@ -1297,7 +1369,7 @@ int ObArchiveStore::get_file_range_in_piece(const int64_t dest_id, const int64_t
   if (!is_init()) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObArchiveStore not init", K(ret));
-  } else if (OB_FAIL(ObArchivePathUtil::get_piece_ls_dir_path(dest, dest_id, round_id, piece_id, ls_id, piece_path))) {
+  } else if (OB_FAIL(ObArchivePathUtil::get_piece_ls_log_dir_path(dest, dest_id, round_id, piece_id, ls_id, piece_path))) {
     LOG_WARN("get piece ls dir path failed", K(ret), K(dest), K(dest_id), K(round_id), K(piece_id), K(ls_id));
   } else if (OB_FAIL(op.init(this))) {
     LOG_WARN("ObPieceFileListFilter init failed", K(ret));
@@ -1329,7 +1401,7 @@ int ObArchiveStore:: get_file_list_in_piece(const int64_t dest_id, const int64_t
   if (!is_init()) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObArchiveStore not init", K(ret));
-  } else if (OB_FAIL(ObArchivePathUtil::get_piece_ls_dir_path(dest, dest_id, round_id, piece_id, ls_id, piece_path))) {
+  } else if (OB_FAIL(ObArchivePathUtil::get_piece_ls_log_dir_path(dest, dest_id, round_id, piece_id, ls_id, piece_path))) {
     LOG_WARN("get piece ls dir path failed", K(ret), K(dest), K(dest_id), K(round_id), K(piece_id), K(ls_id));
   } else if (OB_FAIL(op.init(this, &filelist))) {
     LOG_WARN("ObLSFileListOp init failed", K(ret));
@@ -1413,14 +1485,18 @@ static int parse_piece_file_(ObString &dir_name, int64_t &dest_id, int64_t &roun
 
 static int is_piece_start_file_name_(ObString &file_name, bool &is_piece_start)
 {
-  // parse file name like 'piece_d[dest_id]r[round_id]p[piece_id]_start_20220601T120000'
+  // parse file name like 'piece_d[dest_id]r[round_id]p[piece_id]_start_20220601T120000.obarc'
   int ret = OB_SUCCESS;
   char tmp_str[OB_MAX_BACKUP_DEST_LENGTH] = { 0 };
   is_piece_start = false;
+  const int32_t len = static_cast<int32_t>(file_name.length() - strlen(OB_ARCHIVE_SUFFIX));
   if (file_name.empty()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("empty file name", K(ret), K(file_name));
-  } else if (OB_FAIL(databuff_printf(tmp_str, sizeof(tmp_str), "%.*s", static_cast<int>(file_name.length()), file_name.ptr()))) {
+  } else if (len <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("file name without a unified suffix", K(ret), K(file_name.length()), K(len));
+  } else if (OB_FAIL(databuff_printf(tmp_str, sizeof(tmp_str), "%.*s", len, file_name.ptr()))) {
     LOG_WARN("fail to save tmp file name", K(ret), K(file_name));
   } else {
     const char *PREFIX = "piece";
@@ -1519,13 +1595,17 @@ static int is_round_start_file_name_(ObString &file_name, bool &is_round_start)
   int ret = OB_SUCCESS;
   const char *PREFIX = "round_";
   const char *SUFFIX = "_start";
-  int64_t p = file_name.length() - strlen(SUFFIX);
+  int64_t suffix_len = strlen(SUFFIX) + strlen(OB_ARCHIVE_SUFFIX);
+  int64_t p = file_name.length() - suffix_len;
   ObString tmp;
-  if (!file_name.prefix_match(PREFIX)) {
+  if (p <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("file name without a unified suffix", K(ret), K(p));
+  } else if (!file_name.prefix_match(PREFIX)) {
     is_round_start = false;
-  } else if (file_name.length() < strlen(SUFFIX)) {
+  } else if (file_name.length() < suffix_len) {
     is_round_start = false;
-  } else if (OB_FALSE_IT(tmp.assign(file_name.ptr() + p, strlen(SUFFIX)))) {
+  } else if (OB_FALSE_IT(tmp.assign(file_name.ptr() + p, static_cast<int32_t>(strlen(SUFFIX))))) {
   } else if (!tmp.prefix_match(SUFFIX)) {
     is_round_start = false;
   } else {
@@ -1787,12 +1867,22 @@ int ObArchiveStore::ObPieceFileListFilter::init(ObArchiveStore *store)
 int ObArchiveStore::ObPieceFileListFilter::func(const dirent *entry)
 {
   int ret = OB_SUCCESS;
-  ObString file_name(entry->d_name);
+  char file_name[OB_MAX_BACKUP_DEST_LENGTH] = { 0 };
   int64_t file_id = -1;
+  int32_t len = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObPieceFileListFilter not init", K(ret));
-  } else if (1 != sscanf(file_name.ptr(), "%ld", &file_id)) {
+  } else if (OB_ISNULL(entry)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid entry", K(ret));
+  } else if (FALSE_IT(len = static_cast<int32_t>(strlen(entry->d_name) - strlen(OB_ARCHIVE_SUFFIX)))) {
+  } else if (len <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("file name without a unified suffix", K(ret), K(entry->d_name), K(OB_ARCHIVE_SUFFIX));
+  } else if (OB_FAIL(databuff_printf(file_name, sizeof(file_name), "%.*s", len, entry->d_name))) {
+    LOG_WARN("fail to save tmp file name", K(ret), K(file_name));
+  } else if (OB_FAIL(ob_atoll(file_name, file_id))) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid archive file name", K(file_name));
   } else if (OB_FAIL(files_.push_back(file_id))) {
@@ -1832,13 +1922,18 @@ int ObArchiveStore::ObLSFileListOp::func(const dirent *entry)
   ObString file_name;
   ObSingleLSInfoDesc::OneFile one_file;
   char *endptr = NULL;
+  int32_t len = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObLSFileListOp not init", K(ret));
   } else if (OB_ISNULL(entry)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid entry", K(ret));
-  } else if (OB_FALSE_IT(file_name.assign_ptr(entry->d_name, strlen(entry->d_name)))) {
+  } else if (FALSE_IT(len = static_cast<int32_t>(strlen(entry->d_name) - strlen(OB_ARCHIVE_SUFFIX)))) {
+  } else if (len <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("file name without a unified suffix", K(ret), K(entry->d_name), K(OB_ARCHIVE_SUFFIX));
+  } else if (OB_FALSE_IT(file_name.assign_ptr(entry->d_name, len))) {
   } else if (OB_FAIL(ob_atoll(file_name.ptr(), one_file.file_id_))) {
     OB_LOG(WARN, "ignore invalid file name", K(ret), K(file_name));
     ret = OB_SUCCESS;

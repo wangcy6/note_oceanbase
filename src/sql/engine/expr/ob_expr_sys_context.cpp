@@ -36,7 +36,7 @@ ObExprSysContext::ObExprSysContext(common::ObIAllocator &alloc)
 : ObFuncExprOperator(alloc,
                     T_FUN_SYS_SYS_CONTEXT,
                     N_SYS_CONTEXT,
-                    2 /*TWO_OR_THREE*/, NOT_ROW_DIMENSION)
+                    2 /*TWO_OR_THREE*/, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -570,7 +570,7 @@ int ObExprSysContext::eval_lang(const ObExpr &expr, common::ObDatum &res,
       for (int64_t i = 0; !found && i < ARRAYSIZEOF(lang_map_); ++i) {
         if (0 == language.get_string().case_compare(lang_map_[i].language)) {
           found = true;
-          abbreviated.assign(lang_map_[i].abbreviated, strlen(lang_map_[i].abbreviated));
+          abbreviated.assign(lang_map_[i].abbreviated, static_cast<int32_t>(strlen(lang_map_[i].abbreviated)));
         }
       }
       if (!found) {

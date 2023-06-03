@@ -82,11 +82,38 @@ public:
   int local_xa_prepare(const ObXATransID &xid,
                        const ObTransID &trans_id,
                        const int64_t timeout_us);
+  // this is same as xa_prepare without query inner table
+  int xa_prepare_for_original(const ObXATransID &xid,
+                              const ObTransID &trans_id,
+                              const int64_t timeout_seconds);
 public:
+  // for 4.0 dblink
+  int xa_start_for_tm_promotion(const int64_t flags,
+                                const int64_t timeout_seconds,
+                                ObTxDesc *&tx_desc,
+                                ObXATransID &xid);
+  int xa_start_for_tm(const int64_t flags,
+                      const int64_t timeout_seconds,
+                      const uint32_t session_id,
+                      const ObTxParam &tx_param,
+                      ObTxDesc *&tx_desc,
+                      ObXATransID &xid);
+  int xa_start_for_dblink_client(const common::sqlclient::DblinkDriverProto dblink_type,
+                                 common::sqlclient::ObISQLConnection *dblink_conn,
+                                 ObTxDesc *&tx_desc);
+  int commit_for_dblink_trans(ObTxDesc *&tx_desc);
+  int rollback_for_dblink_trans(ObTxDesc *&tx_desc);
+  static int generate_xid(const ObTransID &tx_id, ObXATransID &new_xid);
+  static int generate_xid_with_new_bqual(const ObXATransID &base_xid,
+                                         const int64_t seed,
+                                         ObXATransID &new_xid);
+  int recover_tx_for_dblink_callback(const ObTransID &tx_id,
+                                     ObTxDesc *&tx_desc);
+  int revert_tx_for_dblink_callback(ObTxDesc *&tx_desc);
   //for rpc use
   int get_xa_ctx(const ObTransID &trans_id, bool &alloc, ObXACtx *&xa_ctx);
   int revert_xa_ctx(ObXACtx *xa_ctx);
-  int start_stmt(const ObXATransID &xid, ObTxDesc &tx_desc);
+  int start_stmt(const ObXATransID &xid, const uint32_t session_id, ObTxDesc &tx_desc);
   int end_stmt(const ObXATransID &xid, ObTxDesc &tx_desc);
   int handle_terminate_for_xa_branch(const ObXATransID &xid,
                                      ObTxDesc *tx_desc,
@@ -116,23 +143,11 @@ public:
                        const ObTransID &trans_id,
                        const common::ObAddr &sche_addr,
                        const int64_t flag);
-  int query_xa_state_and_flag(const uint64_t tenant_id,
-                              const ObXATransID &xid,
-                              int64_t &state,
-                              int64_t &end_flag);
   int delete_xa_record(const uint64_t tenant_id,
                        const ObXATransID &xid);
   int delete_xa_branch(const uint64_t tenant_id,
                        const ObXATransID &xid,
                        const bool is_tightly_coupled);
-  int insert_xa_pending_record(const uint64_t tenant_id,
-                               const ObXATransID &xid,
-                               const ObTransID &trans_id,
-                               const share::ObLSID &coordinator,
-                               const common::ObAddr &sche_addr);
-  int query_xa_coordinator_with_trans_id(const uint64_t tenant_id,
-                                         const ObTransID &trans_id,
-                                         share::ObLSID &coordinator);
   int delete_xa_pending_record(const uint64_t tenant_id,
                                const ObTransID &tx_id);
   // query coord from tenant table global transaction
@@ -140,12 +155,16 @@ public:
                                    const ObXATransID &xid,
                                    share::ObLSID &coordinator,
                                    ObTransID &trans_id,
-                                   int64_t &state,
                                    int64_t &end_flag);
   int query_xa_coordinator_with_xid(const uint64_t tenant_id,
                                     const ObXATransID &xid,
                                     ObTransID &trans_id,
                                     share::ObLSID &coordinator);
+  int insert_xa_pending_record(const uint64_t tenant_id,
+                               const ObXATransID &xid,
+                               const ObTransID &trans_id,
+                               const share::ObLSID &coordinator,
+                               const common::ObAddr &sche_addr);
   int query_sche_and_coord(const uint64_t tenant_id,
                            const ObXATransID &xid,
                            ObAddr &scheduler_addr,
@@ -157,6 +176,11 @@ public:
                    const share::ObLSID &coordinator,
                    const bool has_tx_level_temp_table,
                    int64_t &affected_rows);
+  void insert_record_for_standby(const uint64_t tenant_id,
+                                 const ObXATransID &xid,
+                                 const ObTransID &trans_id,
+                                 const share::ObLSID &coordinator,
+                                 const ObAddr &sche_addr);
 private:
   int local_one_phase_xa_commit_ (const ObXATransID &xid,
                                   const ObTransID &trans_id,
@@ -179,6 +203,7 @@ private:
   int xa_start_join_(const ObXATransID &xid,
                      const int64_t flags,
                      const int64_t timeout_seconds,
+                     const uint32_t session_id,
                      ObTxDesc *&tx_desc);
   int one_phase_xa_commit_(const ObXATransID &xid,
                            const int64_t timeout_us,
@@ -208,12 +233,12 @@ private:
                            const int64_t request_id,
                            bool &has_tx_level_temp_table);
   int xa_rollback_for_pending_trans_(const ObXATransID &xid,
-                                     const ObTransID &tx_id,
-                                     const int64_t timeout_us,
-                                     const uint64_t tenant_id,
-                                     const int64_t request_id,
-                                     const bool is_tightly_coupled,
-                                     const share::ObLSID &coord);
+                                    const ObTransID &tx_id,
+                                    const int64_t timeout_us,
+                                    const uint64_t tenant_id,
+                                    const int64_t request_id,
+                                    const bool is_tightly_coupled,
+                                    const share::ObLSID &coord);
   int two_phase_xa_rollback_(const ObXATransID &xid,
                              const ObTransID &tx_id,
                              const int64_t timeout_us,
@@ -228,6 +253,22 @@ private:
   int gc_invalid_xa_record_(const uint64_t tenant_id,
                             const bool check_self,
                             const int64_t gc_time_threshold);
+  int terminate_to_original_(const ObXATransID &xid,
+                             const ObTransID &tx_id,
+                             const ObAddr &original_sche_addr,
+                             const int64_t timeout_us);
+private:
+  // for 4.0 dblink
+  int xa_start_for_tm_promotion_(const int64_t flags,
+                                 const int64_t timeout_seconds,
+                                 ObTxDesc *&tx_desc,
+                                 ObXATransID &xid);
+  int xa_start_for_tm_(const int64_t flags,
+                       const int64_t timeout_seconds,
+                       const uint32_t session_id,
+                       const ObTxParam &tx_param,
+                       ObTxDesc *&tx_desc,
+                       ObXATransID &xid);
 public:
   int xa_scheduler_hb_req();
   int gc_invalid_xa_record(const uint64_t tenant_id);

@@ -90,12 +90,14 @@ int ObLogTempTableAccess::allocate_expr_post(ObAllocExprContext &ctx)
   return ret;
 }
 
-int ObLogTempTableAccess::re_est_cost(EstimateCostInfo &param, double &card, double &cost)
+int ObLogTempTableAccess::do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost)
 {
   int ret = OB_SUCCESS;
   card = get_card();
+  op_cost = get_op_cost();
   cost = get_cost();
   double selectivity = 1.0;
+  const int64_t parallel = param.need_parallel_;
   if (OB_ISNULL(get_plan())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(get_plan()),K(ret));
@@ -107,7 +109,7 @@ int ObLogTempTableAccess::re_est_cost(EstimateCostInfo &param, double &card, dou
     LOG_WARN("failed to calculate selectivity", K(ret));
   } else { 
     double read_card = card;
-    if (selectivity > 0 && selectivity < 1) {
+    if (selectivity > 0 && selectivity <= 1) {
       read_card /= selectivity;
     } else {
       read_card = 0;
@@ -128,34 +130,50 @@ int ObLogTempTableAccess::re_est_cost(EstimateCostInfo &param, double &card, dou
         card = param.need_row_count_;
       }
     }
-    double per_dop_card = read_card / parallel_;
+    double per_dop_card = read_card / parallel;
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     cost = ObOptEstCost::cost_read_materialized(per_dop_card, opt_ctx.get_cost_model_type()) +
                 ObOptEstCost::cost_quals(per_dop_card, get_filter_exprs(), opt_ctx.get_cost_model_type());
-    if (param.override_) {
-      set_op_cost(cost);
-      set_cost(cost);
-      set_card(card);
-    }
+    op_cost = cost;
   }
   return ret;
 }
 
-int ObLogTempTableAccess::print_my_plan_annotation(char *buf,
-                                                   int64_t &buf_len,
-                                                   int64_t &pos,
-                                                   ExplainType type)
+int ObLogTempTableAccess::get_plan_item_info(PlanText &plan_text,
+                                             ObSqlPlanItem &plan_item)
 {
   int ret = OB_SUCCESS;
-  // print access
-  if (OB_FAIL(BUF_PRINTF(", "))) {
-    LOG_WARN("BUF_PRINTF fails", K(ret));
-  } else if (OB_FAIL(BUF_PRINTF("\n      "))) {
-    LOG_WARN("BUF_PRINTF fails", K(ret));
-  }
-  if (OB_SUCC(ret)) {
+  if (OB_FAIL(ObLogicalOperator::get_plan_item_info(plan_text, plan_item))) {
+    LOG_WARN("failed to get plan item info", K(ret));
+  } else {
+    BEGIN_BUF_PRINT;
+    // print access
     const ObIArray<ObRawExpr*> &access = get_access_exprs();
     EXPLAIN_PRINT_EXPRS(access, type);
+    END_BUF_PRINT(plan_item.access_predicates_,
+                  plan_item.access_predicates_len_);
+  }
+  if (OB_SUCC(ret)) {
+    const ObString &temp_table_name = get_table_name();
+    const ObString &access_name = get_access_name();
+    BEGIN_BUF_PRINT;
+    if (access_name.empty()) {
+      if (OB_FAIL(BUF_PRINTF("%.*s",
+                             temp_table_name.length(),
+                             temp_table_name.ptr()))) {
+        LOG_WARN("failed to print str", K(ret));
+      }
+    } else {
+      if (OB_FAIL(BUF_PRINTF("%.*s(%.*s)",
+                             access_name.length(),
+                             access_name.ptr(),
+                             temp_table_name.length(),
+                             temp_table_name.ptr()))) {
+        LOG_WARN("failed to print str", K(ret));
+      }
+    }
+    END_BUF_PRINT(plan_item.object_alias_,
+                  plan_item.object_alias_len_);
   }
   return ret;
 }

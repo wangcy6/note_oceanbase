@@ -38,12 +38,14 @@ ObDDLRedoLogReplayer::~ObDDLRedoLogReplayer()
 int ObDDLRedoLogReplayer::init(ObLS *ls)
 {
   int ret = OB_SUCCESS;
+  ObMemAttr attr(OB_SERVER_TENANT_ID, "RedoLogBuckLock");
+  SET_USE_500(attr);
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("ObDDLRedoLogReplayer has been inited twice", K(ret));
   } else if (OB_FAIL(allocator_.init(TOTAL_LIMIT, HOLD_LIMIT, OB_MALLOC_NORMAL_BLOCK_SIZE))) {
     LOG_WARN("fail to init allocator", K(ret));
-  } else if (OB_FAIL(bucket_lock_.init(DEFAULT_HASH_BUCKET_COUNT))) {
+  } else if (OB_FAIL(bucket_lock_.init(DEFAULT_HASH_BUCKET_COUNT, ObLatchIds::DEFAULT_BUCKET_LOCK, attr))) {
     LOG_WARN("fail to init bucket lock", K(ret));
   } else {
     ls_ = ls;
@@ -76,12 +78,26 @@ int ObDDLRedoLogReplayer::replay_start(const ObDDLStartLog &log, const SCN &scn)
     LOG_WARN("need replay but tablet handle is invalid", K(ret), K(need_replay), K(tablet_handle));
   } else if (OB_FAIL(tablet_handle.get_obj()->get_ddl_kv_mgr(ddl_kv_mgr_handle, true/*try_create*/))) {
     LOG_WARN("create ddl kv mgr failed", K(ret), K(table_key), K(log), K(scn));
+<<<<<<< HEAD
   } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->ddl_start(table_key,
                                                             scn,
                                                             log.get_cluster_version(),
                                                             log.get_execution_id(),
                                                             SCN::min_scn()/*checkpoint_scn*/))) {
     LOG_WARN("start ddl log failed", K(ret), K(log), K(scn));
+=======
+  } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->ddl_start(*tablet_handle.get_obj(),
+                                                            table_key,
+                                                            scn,
+                                                            log.get_data_format_version(),
+                                                            log.get_execution_id(),
+                                                            SCN::min_scn()/*checkpoint_scn*/))) {
+    if (OB_TASK_EXPIRED != ret) {
+      LOG_WARN("start ddl log failed", K(ret), K(log), K(scn));
+    } else {
+      ret = OB_SUCCESS; // ignored expired ddl start log
+    }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else {
     LOG_INFO("succeed to replay ddl start log", K(ret), K(log), K(scn));
   }
@@ -126,7 +142,6 @@ int ObDDLRedoLogReplayer::replay_redo(const ObDDLRedoLog &log, const SCN &scn)
     ObMacroBlockHandle macro_handle;
     write_info.buffer_ = redo_info.data_buffer_.ptr();
     write_info.size_= redo_info.data_buffer_.length();
-    write_info.io_desc_.set_category(ObIOCategory::SYS_IO);
     write_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_COMPACT_WRITE);
     const int64_t io_timeout_ms = max(DDL_FLUSH_MACRO_BLOCK_TIMEOUT / 1000L, GCONF._data_storage_io_timeout / 1000L);
     ObDDLMacroBlock macro_block;
@@ -152,13 +167,16 @@ int ObDDLRedoLogReplayer::replay_redo(const ObDDLRedoLog &log, const SCN &scn)
   return ret;
 }
 
+<<<<<<< HEAD
 int ObDDLRedoLogReplayer::replay_prepare(const ObDDLPrepareLog &log, const SCN &scn)
+=======
+int ObDDLRedoLogReplayer::replay_commit(const ObDDLCommitLog &log, const SCN &scn)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   int ret = OB_SUCCESS;
   ObTabletHandle tablet_handle;
   ObITable::TableKey table_key = log.get_table_key();
   ObDDLKvMgrHandle ddl_kv_mgr_handle;
-  ObDDLKVHandle ddl_kv_handle;
   ObDDLKV *ddl_kv = nullptr;
   bool need_replay = true;
 
@@ -181,6 +199,7 @@ int ObDDLRedoLogReplayer::replay_prepare(const ObDDLPrepareLog &log, const SCN &
     LOG_WARN("need replay but tablet handle is invalid", K(ret), K(need_replay), K(tablet_handle), K(log), K(scn));
   } else if (OB_FAIL(tablet_handle.get_obj()->get_ddl_kv_mgr(ddl_kv_mgr_handle))) {
     LOG_WARN("get ddl kv mgr failed", K(ret), K(log), K(scn));
+<<<<<<< HEAD
   } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->ddl_prepare(log.get_start_scn(), scn))) {
     LOG_WARN("replay ddl prepare log failed", K(ret), K(log), K(scn));
   } else {
@@ -223,11 +242,23 @@ int ObDDLRedoLogReplayer::replay_commit(const ObDDLCommitLog &log, const SCN &sc
     if (OB_EAGAIN != ret) {
       LOG_WARN("replay ddl commit log failed", K(ret), K(log), K(scn));
     }
+=======
+  } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->set_commit_scn(scn))) {
+    LOG_WARN("failed to start prepare", K(ret), K(log), K(scn));
+  } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->ddl_commit(log.get_start_scn(), scn))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     if (OB_TABLET_NOT_EXIST == ret || OB_TASK_EXPIRED == ret) {
       ret = OB_SUCCESS; // exit when tablet not exist or task expired
+    } else {
+      LOG_WARN("replay ddl commit log failed", K(ret), K(log), K(scn));
     }
+<<<<<<< HEAD
   } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->unregister_from_tablet(log.get_start_scn(), ddl_kv_mgr_handle))) {
     LOG_WARN("unregister ddl kv mgr from tablet failed", K(ret), K(log), K(scn));
+=======
+  } else {
+    LOG_INFO("replay ddl commit log success", K(ret), K(log), K(scn));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
   LOG_INFO("finish replay ddl commit log", K(ret), K(need_replay), K(log), K(scn));
   return ret;

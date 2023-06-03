@@ -16,6 +16,7 @@
 #include "share/schema/ob_schema_macro_define.h"
 #include "share/schema/ob_schema_service_sql_impl.h"
 #include "share/schema/ob_table_schema.h"
+#include "share/scn.h"
 
 namespace oceanbase
 {
@@ -1543,6 +1544,21 @@ int ObInnerTableSchema::all_virtual_proxy_partition_info_schema(ObTableSchema &t
       false, //is_nullable
       false); //is_autoincrement
   }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("part_key_default_value", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObLongTextType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      0, //column_length
+      -1, //column_precision
+      -1, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
   table_schema.set_index_using_type(USING_HASH);
   table_schema.set_row_store_type(ENCODING_ROW_STORE);
   table_schema.set_store_format(OB_STORE_FORMAT_DYNAMIC_MYSQL);
@@ -3039,7 +3055,7 @@ int ObInnerTableSchema::all_virtual_long_ops_status_schema(ObTableSchema &table_
       ++column_id, //column_id
       0, //rowkey_id
       0, //index_id
-      1, //part_key_pos
+      0, //part_key_pos
       ObVarcharType, //column_type
       CS_TYPE_INVALID, //column_collation_type
       MAX_IP_ADDR_LENGTH, //column_length
@@ -3054,7 +3070,7 @@ int ObInnerTableSchema::all_virtual_long_ops_status_schema(ObTableSchema &table_
       ++column_id, //column_id
       0, //rowkey_id
       0, //index_id
-      2, //part_key_pos
+      0, //part_key_pos
       ObIntType, //column_type
       CS_TYPE_INVALID, //column_collation_type
       sizeof(int64_t), //column_length
@@ -3182,16 +3198,6 @@ int ObInnerTableSchema::all_virtual_long_ops_status_schema(ObTableSchema &table_
       -1, //column_scale
       false, //is_nullable
       false); //is_autoincrement
-  }
-  if (OB_SUCC(ret)) {
-    table_schema.get_part_option().set_part_num(1);
-    table_schema.set_part_level(PARTITION_LEVEL_ONE);
-    table_schema.get_part_option().set_part_func_type(PARTITION_FUNC_TYPE_LIST_COLUMNS);
-    if (OB_FAIL(table_schema.get_part_option().set_part_expr("svr_ip, svr_port"))) {
-      LOG_WARN("set_part_expr failed", K(ret));
-    } else if (OB_FAIL(table_schema.mock_list_partition_array())) {
-      LOG_WARN("mock list partition array failed", K(ret));
-    }
   }
   table_schema.set_index_using_type(USING_HASH);
   table_schema.set_row_store_type(ENCODING_ROW_STORE);
@@ -3538,9 +3544,9 @@ int ObInnerTableSchema::all_virtual_trans_lock_stat_schema(ObTableSchema &table_
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
-      ObVarcharType, //column_type
+      ObIntType, //column_type
       CS_TYPE_INVALID, //column_collation_type
-      512, //column_length
+      sizeof(int64_t), //column_length
       -1, //column_precision
       -1, //column_scale
       false, //is_nullable
@@ -3633,7 +3639,7 @@ int ObInnerTableSchema::all_virtual_trans_lock_stat_schema(ObTableSchema &table_
       512, //column_length
       -1, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -3697,6 +3703,21 @@ int ObInnerTableSchema::all_virtual_trans_lock_stat_schema(ObTableSchema &table_
       true, //is_nullable
       false, //is_autoincrement
       false); //is_on_update_for_timestamp
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("time_after_recv", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObIntType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      sizeof(int64_t), //column_length
+      -1, //column_precision
+      -1, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
   }
 
   if (OB_SUCC(ret)) {

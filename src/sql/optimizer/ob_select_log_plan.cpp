@@ -45,6 +45,7 @@
 #include "sql/optimizer/ob_optimizer_context.h"
 #include "sql/optimizer/ob_opt_est_cost.h"
 #include "sql/optimizer/ob_log_unpivot.h"
+#include "sql/optimizer/ob_log_link_scan.h"
 #include "common/ob_smart_call.h"
 #include "share/system_variable/ob_sys_var_class_type.h"
 
@@ -130,6 +131,7 @@ int ObSelectLogPlan::candi_allocate_group_by()
                                                       is_unique))) {
     LOG_WARN("failed to check group by exprs is unique", K(ret));
   } else if (is_unique && !having_has_rownum) {
+    OPT_TRACE("group by expr is unique, no need group by", group_by_exprs);
     LOG_TRACE("group by expr is unique, no need group by", K(group_by_exprs));
     if (!having_normal_exprs.empty() && OB_FAIL(candi_allocate_filter(having_normal_exprs))) {
       LOG_WARN("failed to allocate filter", K(ret));
@@ -179,12 +181,10 @@ int ObSelectLogPlan::get_groupby_rollup_exprs(const ObLogicalOperator *top,
       } else if (OB_FAIL(ObOptimizerUtil::is_const_expr(group_expr,
                                                         top->get_output_equal_sets(),
                                                         top->get_output_const_exprs(),
+                                                        get_onetime_query_refs(),
                                                         is_const))) {
         LOG_WARN("check is const expr failed", K(ret));
-      } else if (is_const
-          || (group_expr->has_flag(CNT_COLUMN)
-              && !group_expr->has_flag(CNT_SUB_QUERY)
-              && !group_expr->get_expr_levels().has_member(stmt->get_current_level()))) {
+      } else if (is_const) {
         //no need to group a const expr, skip it
       } else if (OB_FAIL(reduce_exprs.push_back(group_expr))) {
         LOG_WARN("failed to push array", K(ret));
@@ -323,7 +323,6 @@ int ObSelectLogPlan::candi_allocate_three_stage_group_by(const ObIArray<ObRawExp
   } else {
     CandidatePlan candidate_plan;
     for (int64_t i = 0; OB_SUCC(ret) && i < best_plans.count(); i++) {
-      bool is_plan_valid = true;
       candidate_plan = best_plans.at(i);
       if (OB_ISNULL(candidate_plan.plan_tree_)) {
         ret = OB_ERR_UNEXPECTED;
@@ -333,22 +332,26 @@ int ObSelectLogPlan::candi_allocate_three_stage_group_by(const ObIArray<ObRawExp
                                                                   is_partition_wise))) {
         LOG_WARN("failed to check if sharding compatible with distinct expr", K(ret));
       } else if (!candidate_plan.plan_tree_->is_distributed() || is_partition_wise) {
+        bool part_sort_valid = !groupby_helper.force_normal_sort_ && !group_by_exprs.empty();
+        bool normal_sort_valid = !groupby_helper.force_part_sort_;
         bool can_ignore_merge_plan = !(groupby_plans.empty() || groupby_helper.force_use_merge_);
-        if (OB_FAIL(create_merge_group_plan(reduce_exprs,
-                                            group_by_exprs,
-                                            group_directions,
-                                            rollup_exprs,
-                                            rollup_directions,
-                                            aggr_items,
-                                            having_exprs,
-                                            is_from_povit,
-                                            groupby_helper,
-                                            candidate_plan.plan_tree_,
-                                            is_plan_valid,
-                                            can_ignore_merge_plan))) {
+        if (OB_FAIL(update_part_sort_method(part_sort_valid, normal_sort_valid))) {
+          LOG_WARN("fail to update part sort method", K(ret));
+        } else if (OB_FAIL(create_merge_group_plan(reduce_exprs,
+                                                  group_by_exprs,
+                                                  group_directions,
+                                                  rollup_exprs,
+                                                  rollup_directions,
+                                                  aggr_items,
+                                                  having_exprs,
+                                                  is_from_povit,
+                                                  groupby_helper,
+                                                  candidate_plan,
+                                                  groupby_plans,
+                                                  part_sort_valid,
+                                                  normal_sort_valid,
+                                                  can_ignore_merge_plan))) {
           LOG_WARN("failed to create merge group by plan", K(ret));
-        } else if (is_plan_valid && OB_FAIL(groupby_plans.push_back(candidate_plan))) {
-          LOG_WARN("failed to push merge group by", K(ret));
         }
       } else {
         if (NULL == groupby_helper.aggr_code_expr_ &&
@@ -373,22 +376,66 @@ int ObSelectLogPlan::get_valid_aggr_algo(const ObIArray<ObRawExpr*> &group_by_ex
                                          const GroupingOpHelper &groupby_helper,
                                          const bool ignore_hint,
                                          bool &use_hash_valid,
-                                         bool &use_merge_valid)
+                                         bool &use_merge_valid,
+                                         bool &part_sort_valid,
+                                         bool &normal_sort_valid)
 {
   int ret = OB_SUCCESS;
-  use_hash_valid = ignore_hint ? true : !groupby_helper.force_use_merge_;
-  use_merge_valid = ignore_hint ? true : !groupby_helper.force_use_hash_;
-  ObSQLSessionInfo *session = get_optimizer_context().get_session_info();
-  ObObj val;
-  if (OB_ISNULL(get_stmt()) || OB_ISNULL(session)) {
+  if (ignore_hint) {
+    use_hash_valid = true;
+    use_merge_valid = true;
+    part_sort_valid = true;
+    normal_sort_valid = true;
+  } else {
+    use_hash_valid = !groupby_helper.force_use_merge_;
+    use_merge_valid = !groupby_helper.force_use_hash_;
+    part_sort_valid = !groupby_helper.force_normal_sort_;
+    normal_sort_valid = !groupby_helper.force_part_sort_;
+  }
+  if (OB_ISNULL(get_stmt()) || OB_ISNULL(optimizer_context_.get_query_ctx())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(get_stmt()), K(session), K(ret));
+    LOG_WARN("get unexpected null", K(get_stmt()), K(optimizer_context_.get_query_ctx()), K(ret));
   } else if (get_stmt()->has_rollup()
              || group_by_exprs.empty()
              || get_stmt()->has_distinct_or_concat_agg()) {
     //group_concat and distinct aggregation hold all input rows temporary,
     //too much memory consumption for hash aggregate.
     use_hash_valid = false;
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (!use_merge_valid) {
+    part_sort_valid = false;
+    normal_sort_valid = false;
+  } else if (group_by_exprs.empty()) {
+    part_sort_valid = false;
+    /* if normal_sort_valid set as false by hint, will retry by ignore hint */
+  } else if (OB_FAIL(update_part_sort_method(part_sort_valid, normal_sort_valid))) {
+    LOG_WARN("fail to update part sort method", K(ret));
+  }
+  return ret;
+}
+
+//  update partition sort method with opt_param hint
+int ObSelectLogPlan::update_part_sort_method(bool &part_sort_valid,
+                                             bool &normal_sort_valid)
+{
+  int ret = OB_SUCCESS;
+  if (!part_sort_valid || !normal_sort_valid) {
+    /* has sort method in no_use_hash_aggregation hint, ignore opt_param hint */
+  } else {
+    bool use_part_sort = false;
+    bool is_exists_opt = false;
+    if (OB_FAIL(optimizer_context_.get_query_ctx()->get_global_hint()
+                        .opt_params_.get_bool_opt_param(
+                        ObOptParamHint::USE_PART_SORT_MGB, use_part_sort, is_exists_opt))) {
+      LOG_WARN("fail to check partition sort merge group by enabled", K(ret));
+    } else if (!is_exists_opt) {
+      /* has no opt_param hint */
+    } else {
+      part_sort_valid = use_part_sort;
+      normal_sort_valid = !use_part_sort;
+    }
   }
   return ret;
 }
@@ -409,8 +456,11 @@ int ObSelectLogPlan::candi_allocate_normal_group_by(const ObIArray<ObRawExpr*> &
   CandidatePlan candidate_plan;
   bool use_hash_valid = false;
   bool use_merge_valid = false;
+  bool part_sort_valid = false;
+  bool normal_sort_valid = false;
   if (OB_FAIL(get_valid_aggr_algo(group_by_exprs, groupby_helper, ignore_hint,
-                                  use_hash_valid, use_merge_valid))) {
+                                  use_hash_valid, use_merge_valid,
+                                  part_sort_valid, normal_sort_valid))) {
     LOG_WARN("failed to get valid aggr algo", K(ret));
   }
   // create hash group by plans
@@ -439,11 +489,10 @@ int ObSelectLogPlan::candi_allocate_normal_group_by(const ObIArray<ObRawExpr*> &
   }
   // create merge group by plans
   if (OB_SUCC(ret) && use_merge_valid) {
-    bool can_ignore_merge_plan = !(groupby_plans.empty() || (!ignore_hint && groupby_helper.force_use_merge_));
+    bool can_ignore_merge_plan = !groupby_plans.empty();
     for (int64_t i = 0; OB_SUCC(ret) && i < candidates_.candidate_plans_.count(); i++) {
       candidate_plan = candidates_.candidate_plans_.at(i);
       bool is_needed = false;
-      bool is_plan_valid = true;
       if (OB_FAIL(should_create_rollup_pushdown_plan(candidate_plan.plan_tree_,
                                                       reduce_exprs,
                                                       rollup_exprs,
@@ -458,6 +507,9 @@ int ObSelectLogPlan::candi_allocate_normal_group_by(const ObIArray<ObRawExpr*> &
                                                 groupby_helper,
                                                 candidate_plan.plan_tree_))) {
           LOG_WARN("failed to create rollup pushdown plan", K(ret));
+        } else if (NULL != candidate_plan.plan_tree_ &&
+                   OB_FAIL(groupby_plans.push_back(candidate_plan))) {
+          LOG_WARN("failed to push merge group by", K(ret));
         }
       } else if (OB_FAIL(create_merge_group_plan(reduce_exprs,
                                                  group_by_exprs,
@@ -468,15 +520,12 @@ int ObSelectLogPlan::candi_allocate_normal_group_by(const ObIArray<ObRawExpr*> &
                                                  having_exprs,
                                                  is_from_povit,
                                                  groupby_helper,
-                                                 candidate_plan.plan_tree_,
-                                                 is_plan_valid,
+                                                 candidate_plan,
+                                                 groupby_plans,
+                                                 part_sort_valid,
+                                                 normal_sort_valid,
                                                  can_ignore_merge_plan))) {
         LOG_WARN("failed to create merge group by plan", K(ret));
-      }
-      if (OB_SUCC(ret) && NULL != candidate_plan.plan_tree_ &&
-          (is_needed || is_plan_valid) &&
-          OB_FAIL(groupby_plans.push_back(candidate_plan))) {
-        LOG_WARN("failed to push merge group by", K(ret));
       }
     }
   }
@@ -529,110 +578,119 @@ int ObSelectLogPlan::create_rollup_pushdown_plan(const ObIArray<ObRawExpr*> &gro
   ObSEArray<ObRawExpr *, 4> rc_group_exprs; // rollup collector
   ObSEArray<ObRawExpr *, 4> exch_keys;
   ObSEArray<OrderItem, 4> rd_sort_keys;
+  ObSEArray<OrderItem, 4> rd_ecd_sort_keys;
   OrderItem encode_sort_key;
   bool enable_encode_sort = false;
   ObSEArray<OrderItem, 4> sort_keys;
   ObArray<ObRawExpr *> dummy;
   ObExchangeInfo exch_info;
   ObLogGroupBy *rollup_distributor = NULL;
-ObLogGroupBy *rollup_collector = NULL;
-if (OB_FAIL(append(pre_group_exprs, group_by_exprs)) ||
-OB_FAIL(append(pre_group_exprs, rollup_exprs))) {
-LOG_WARN("failed to append pre group exprs", K(ret));
-} else if (OB_FAIL(allocate_group_by_as_top(top,
-				      AggregateAlgo::HASH_AGGREGATE,
-				      pre_group_exprs,
-				      dummy,
-				      aggr_items,
-				      dummy,
-				      false,
-				      groupby_helper.group_ndv_,
-				      top->get_card(),
-				      false,
-				      true,
-				      false))) {
-LOG_WARN("failed to allocate pre group by operator", K(ret));
-} else if (OB_FAIL(allocate_group_by_as_top(top,
-				      AggregateAlgo::MERGE_AGGREGATE,
-				      group_by_exprs,
-				      rollup_exprs,
-				      aggr_items,
-				      dummy,
-				      false,
-				      groupby_helper.group_ndv_,
-				      top->get_card(),
-				      false,
-				      true,
-				      false,
-				      ObRollupStatus::ROLLUP_DISTRIBUTOR))) {
-LOG_WARN("failed to allocate rollup distributor", K(ret));
-} else if (OB_ISNULL(rollup_distributor = dynamic_cast<ObLogGroupBy *>(top))) {
-ret = OB_ERR_UNEXPECTED;
-LOG_WARN("rollup distributor is null", K(ret));
-} else if (OB_FAIL(ObOptimizerUtil::make_sort_keys(pre_group_exprs,
-					    default_asc_direction(),
-					    rd_sort_keys))) {
-LOG_WARN("failed to make sort keys", K(ret));
-} else if (GCONF._enable_newsort
-&& ObSQLUtils::check_can_encode_sortkey(rd_sort_keys)
-&& (OB_FAIL(ObSQLUtils::create_encode_sortkey_expr(get_optimizer_context().get_expr_factory(),
-						      get_optimizer_context().get_exec_ctx(),
-						      rd_sort_keys,
-						      0,
-						      encode_sort_key)
-|| FALSE_IT(rd_sort_keys.reset())
-|| FALSE_IT(enable_encode_sort = true)
-|| OB_FAIL(rd_sort_keys.push_back(encode_sort_key))))) {
-LOG_WARN("failed to create encode sortkey expr", K(ret));
-} else if (OB_FAIL(rollup_distributor->set_rollup_info(ObRollupStatus::ROLLUP_DISTRIBUTOR,
-						 groupby_helper.rollup_id_expr_,
-						 rd_sort_keys,
-						 enable_encode_sort))) {
-LOG_WARN("failed to set rollup distributor info", K(ret));
-} else if (OB_FAIL(append(exch_keys, group_by_exprs)) ||
-     OB_FAIL(exch_keys.push_back(groupby_helper.rollup_id_expr_)) ||
-     OB_FAIL(append(exch_keys, rollup_exprs))) {
-LOG_WARN("failed to append exchange keys", K(ret));
-} else if (OB_FAIL(get_grouping_style_exchange_info(exch_keys,
-					      top->get_output_equal_sets(),
-					      exch_info))) {
-LOG_WARN("failed to get rollup exchange info", K(ret));
-} else if (FALSE_IT(exch_info.is_rollup_hybrid_ = true)) {
-// do nothing
-} else if (OB_FAIL(ObOptimizerUtil::make_sort_keys(exch_keys, default_asc_direction(), sort_keys))) {
-LOG_WARN("failed to generate sort keys", K(ret));
-} else if (OB_FAIL(allocate_sort_and_exchange_as_top(top,
-					       exch_info,
-					       sort_keys,
-					       true,
-					       0,
-					       false))) {
-LOG_WARN("failed to allocate sort and exchange as top", K(ret));
-} else if (OB_FAIL(append(rc_group_exprs, group_by_exprs)) ||
-     OB_FAIL(rc_group_exprs.push_back(groupby_helper.rollup_id_expr_))) {
-LOG_WARN("failed to create rollup collector group by keys", K(ret));
-} else if (OB_FAIL(allocate_group_by_as_top(top,
-				      AggregateAlgo::MERGE_AGGREGATE,
-				      rc_group_exprs,
-				      rollup_exprs,
-				      aggr_items,
-				      having_exprs,
-				      false,
-				      groupby_helper.group_ndv_,
-				      top->get_card(),
-				      false,
-				      false,
-				      false,
-				      ObRollupStatus::ROLLUP_COLLECTOR))) {
-LOG_WARN("failed to allocate rollup collector", K(ret));
-} else if (OB_ISNULL(rollup_collector = dynamic_cast<ObLogGroupBy *>(top))) {
-ret = OB_ERR_UNEXPECTED;
-LOG_WARN("rollup collector is null", K(ret));
-} else if (rollup_collector->set_rollup_info(ObRollupStatus::ROLLUP_COLLECTOR,
-						groupby_helper.rollup_id_expr_)) {
-LOG_WARN("failed to set rollup id expr", K(ret));
-}
-return ret;
+  ObLogGroupBy *rollup_collector = NULL;
+  bool can_sort_opt = true;
+  if (OB_ISNULL(top)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (OB_FAIL(append(pre_group_exprs, group_by_exprs)) ||
+      OB_FAIL(append(pre_group_exprs, rollup_exprs))) {
+    LOG_WARN("failed to append pre group exprs", K(ret));
+  } else if (OB_FAIL(allocate_group_by_as_top(top,
+                                              AggregateAlgo::HASH_AGGREGATE,
+                                              pre_group_exprs,
+                                              dummy,
+                                              aggr_items,
+                                              dummy,
+                                              false,
+                                              groupby_helper.group_ndv_,
+                                              top->get_card(),
+                                              false,
+                                              true,
+                                              false))) {
+    LOG_WARN("failed to allocate pre group by operator", K(ret));
+  } else if (OB_FAIL(allocate_group_by_as_top(top,
+                                              AggregateAlgo::MERGE_AGGREGATE,
+                                              group_by_exprs,
+                                              rollup_exprs,
+                                              aggr_items,
+                                              dummy,
+                                              false,
+                                              groupby_helper.group_ndv_,
+                                              top->get_card(),
+                                              false,
+                                              true,
+                                              false,
+                                              ObRollupStatus::ROLLUP_DISTRIBUTOR))) {
+    LOG_WARN("failed to allocate rollup distributor", K(ret));
+  } else if (OB_ISNULL(rollup_distributor = dynamic_cast<ObLogGroupBy *>(top))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("rollup distributor is null", K(ret));
+  } else if (OB_FAIL(ObOptimizerUtil::make_sort_keys(pre_group_exprs,
+                                                    default_asc_direction(),
+                                                    rd_sort_keys))) {
+    LOG_WARN("failed to make sort keys", K(ret));
+  } else if (OB_FAIL(ObOptimizerUtil::check_can_encode_sortkey(rd_sort_keys,
+                                                                can_sort_opt, *this, top->get_card()))) {
+    LOG_WARN("failed to check encode sortkey expr", K(ret));
+  } else if (can_sort_opt
+      && (OB_FAIL(ObSQLUtils::create_encode_sortkey_expr(get_optimizer_context().get_expr_factory(),
+                                                              get_optimizer_context().get_exec_ctx(),
+                                                              rd_sort_keys,
+                                                              0,
+                                                              encode_sort_key)
+      || FALSE_IT(enable_encode_sort = true)
+      || OB_FAIL(rd_ecd_sort_keys.push_back(encode_sort_key))))) {
+    LOG_WARN("failed to create encode sortkey expr", K(ret));
+  } else if (OB_FAIL(rollup_distributor->set_rollup_info(ObRollupStatus::ROLLUP_DISTRIBUTOR,
+                                                         groupby_helper.rollup_id_expr_,
+                                                         rd_sort_keys,
+                                                         rd_ecd_sort_keys,
+                                                         enable_encode_sort))) {
+    LOG_WARN("failed to set rollup distributor info", K(ret));
+  } else if (OB_FAIL(append(exch_keys, group_by_exprs)) ||
+             OB_FAIL(exch_keys.push_back(groupby_helper.rollup_id_expr_)) ||
+             OB_FAIL(append(exch_keys, rollup_exprs))) {
+    LOG_WARN("failed to append exchange keys", K(ret));
+  } else if (OB_FAIL(get_grouping_style_exchange_info(exch_keys,
+                                                      top->get_output_equal_sets(),
+                                                      exch_info))) {
+    LOG_WARN("failed to get rollup exchange info", K(ret));
+  } else if (FALSE_IT(exch_info.is_rollup_hybrid_ = true)) {
+    // do nothing
+  } else if (OB_FAIL(ObOptimizerUtil::make_sort_keys(exch_keys, default_asc_direction(), sort_keys))) {
+    LOG_WARN("failed to generate sort keys", K(ret));
+  } else if (OB_FAIL(allocate_sort_and_exchange_as_top(top,
+                                                       exch_info,
+                                                       sort_keys,
+                                                       true,
+                                                       0,
+                                                       false))) {
+    LOG_WARN("failed to allocate sort and exchange as top", K(ret));
+  } else if (OB_FAIL(append(rc_group_exprs, group_by_exprs)) ||
+             OB_FAIL(rc_group_exprs.push_back(groupby_helper.rollup_id_expr_))) {
+    LOG_WARN("failed to create rollup collector group by keys", K(ret));
+  } else if (OB_FAIL(allocate_group_by_as_top(top,
+                                              AggregateAlgo::MERGE_AGGREGATE,
+                                              rc_group_exprs,
+                                              rollup_exprs,
+                                              aggr_items,
+                                              having_exprs,
+                                              false,
+                                              groupby_helper.group_ndv_,
+                                              top->get_card(),
+                                              false,
+                                              false,
+                                              false,
+                                              ObRollupStatus::ROLLUP_COLLECTOR))) {
+    LOG_WARN("failed to allocate rollup collector", K(ret));
+  } else if (OB_ISNULL(rollup_collector = dynamic_cast<ObLogGroupBy *>(top))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("rollup collector is null", K(ret));
+  } else if (rollup_collector->set_rollup_info(ObRollupStatus::ROLLUP_COLLECTOR,
+                                                        groupby_helper.rollup_id_expr_)) {
+    LOG_WARN("failed to set rollup id expr", K(ret));
+  } else {
+    rollup_collector->set_group_by_outline_info(false, true);
+  }
+  return ret;
 }
 
 int ObSelectLogPlan::create_hash_group_plan(const ObIArray<ObRawExpr*> &reduce_exprs,
@@ -668,6 +726,7 @@ int ObSelectLogPlan::create_hash_group_plan(const ObIArray<ObRawExpr*> &reduce_e
                                          is_partition_wise))) {
       LOG_WARN("failed to allocate group by as top", K(ret));
     }
+    static_cast<ObLogGroupBy*>(top)->set_group_by_outline_info(true, false);
   } else {
     // allocate push down group by
     if (groupby_helper.can_basic_pushdown_) {
@@ -722,7 +781,9 @@ int ObSelectLogPlan::create_hash_group_plan(const ObIArray<ObRawExpr*> &reduce_e
                                           groupby_helper.group_ndv_,
                                           origin_child_card))) {
       LOG_WARN("failed to allocate scala group by as top", K(ret));
-      } else { /*do nothing*/ }
+      } else {
+        static_cast<ObLogGroupBy*>(top)->set_group_by_outline_info(true, groupby_helper.can_basic_pushdown_);
+      }
     }
   }
   return ret;
@@ -866,9 +927,64 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
                                              const ObIArray<ObRawExpr*> &having_exprs,
                                              const bool is_from_povit,
                                              GroupingOpHelper &groupby_helper,
-                                             ObLogicalOperator *&top,
-                                             bool &is_plan_valid,
+                                             CandidatePlan &candidate_plan,
+                                             ObIArray<CandidatePlan> &candidate_plans,
+                                             bool part_sort_valid,
+                                             bool normal_sort_valid,
                                              bool can_ignore_merge_plan)
+{
+  int ret = OB_SUCCESS;
+  CandidatePlan part_sort_mgb_plan = candidate_plan;
+  bool can_ignore_no_part_sort_plan = can_ignore_merge_plan;
+  if (part_sort_valid && OB_FAIL(inner_create_merge_group_plan(reduce_exprs,
+                                                              group_by_exprs,
+                                                              group_directions,
+                                                              rollup_exprs,
+                                                              rollup_directions,
+                                                              aggr_items,
+                                                              having_exprs,
+                                                              is_from_povit,
+                                                              groupby_helper,
+                                                              part_sort_mgb_plan.plan_tree_,
+                                                              true,
+                                                              can_ignore_merge_plan))) {
+        LOG_WARN("failed to create partition sort merge group by plan", K(ret));
+  } else if (part_sort_valid && NULL != part_sort_mgb_plan.plan_tree_
+             && OB_FAIL(candidate_plans.push_back(part_sort_mgb_plan))) {
+    LOG_WARN("failed to push merge group by", K(ret));
+  } else if (OB_FALSE_IT(can_ignore_no_part_sort_plan |= part_sort_valid && NULL != part_sort_mgb_plan.plan_tree_)) {
+  } else if (normal_sort_valid && OB_FAIL(inner_create_merge_group_plan(reduce_exprs,
+                                                                        group_by_exprs,
+                                                                        group_directions,
+                                                                        rollup_exprs,
+                                                                        rollup_directions,
+                                                                        aggr_items,
+                                                                        having_exprs,
+                                                                        is_from_povit,
+                                                                        groupby_helper,
+                                                                        candidate_plan.plan_tree_,
+                                                                        false,
+                                                                        can_ignore_no_part_sort_plan))) {
+    LOG_WARN("failed to create merge group by plan", K(ret));
+  } else if (normal_sort_valid && NULL != candidate_plan.plan_tree_ &&
+             OB_FAIL(candidate_plans.push_back(candidate_plan))) {
+    LOG_WARN("failed to push merge group by", K(ret));
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::inner_create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_exprs,
+                                                   const ObIArray<ObRawExpr*> &group_by_exprs,
+                                                   const ObIArray<ObOrderDirection> &group_directions,
+                                                   const ObIArray<ObRawExpr*> &rollup_exprs,
+                                                   const ObIArray<ObOrderDirection> &rollup_directions,
+                                                   const ObIArray<ObAggFunRawExpr*> &aggr_items,
+                                                   const ObIArray<ObRawExpr*> &having_exprs,
+                                                   const bool is_from_povit,
+                                                   GroupingOpHelper &groupby_helper,
+                                                   ObLogicalOperator *&top,
+                                                   bool use_part_sort,
+                                                   bool can_ignore_merge_plan)
 {
   int ret = OB_SUCCESS;
   int64_t prefix_pos = 0;
@@ -876,7 +992,9 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
   bool need_sort = false;
   bool push_need_sort = false;
   bool is_partition_wise = false;
-  is_plan_valid = true;
+  bool is_fetch_with_ties = false;
+  int64_t part_cnt = use_part_sort ? group_by_exprs.count() : 0;
+  OrderItem hash_sortkey;
   ObSEArray<ObRawExpr*, 1> dummy_exprs;
   ObSEArray<ObAggFunRawExpr*, 1> dummy_aggrs;
   ObSEArray<OrderItem, 4> sort_keys;
@@ -887,9 +1005,9 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
   ObSEArray<ObOrderDirection, 4> adjusted_group_directions;
   int64_t interesting_order_info = OrderingFlag::NOT_MATCH;
   double origin_child_card = 0.0;
-  if (OB_ISNULL(top)) {
+  if (OB_ISNULL(top) || OB_UNLIKELY(0 == part_cnt && use_part_sort)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(ret));
+    LOG_WARN("get unexpected params", K(top), K(part_cnt), K(use_part_sort), K(ret));
   } else if (OB_FALSE_IT(origin_child_card = top->get_card())) {
   } else if (OB_FAIL(adjusted_group_by_exprs.assign(group_by_exprs)) ||
              OB_FAIL(adjusted_group_directions.assign(group_directions))) {
@@ -916,6 +1034,7 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
                                                     false,
                                                     const_cast<EqualSets &>(top->get_output_equal_sets()),
                                                     top->get_output_const_exprs(),
+                                                    get_is_parent_set_distinct(),
                                                     OrderingCheckScope::CHECK_ALL & (~OrderingCheckScope::CHECK_GROUP),
                                                     interesting_order_info))) {
     LOG_WARN("failed to compute stmt interesting order", K(ret));
@@ -925,19 +1044,24 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
                                                       top->get_fd_item_set(),
                                                       top->get_output_equal_sets(),
                                                       top->get_output_const_exprs(),
+                                                      get_onetime_query_refs(),
                                                       top->get_is_at_most_one_row(),
                                                       need_sort,
-                                                      prefix_pos))) {
+                                                      prefix_pos,
+                                                      part_cnt))) {
     LOG_WARN("failed to check if need sort", K(ret));
-  } else if (need_sort && can_ignore_merge_plan && OrderingFlag::NOT_MATCH == interesting_order_info) {
-    // if need sort and no further op needs the output order, not generate merge groupby
-    is_plan_valid = false;
+  } else if ((!need_sort && use_part_sort) ||
+             (need_sort && can_ignore_merge_plan &&
+              OrderingFlag::NOT_MATCH == interesting_order_info)) {
+    // 1. need generate partition sort plan, but need not sort
+    // 2. if need sort and no further op needs the output order, not generate merge groupby
+    top = NULL;
   } else if (top->is_distributed() &&
              OB_FAIL(top->check_sharding_compatible_with_reduce_expr(reduce_exprs,
                                                                      is_partition_wise))) {
     LOG_WARN("failed to check if sharding compatiable with reduce expr", K(ret));
   } else if (!top->is_distributed() || is_partition_wise) {
-    if (OB_FAIL(try_allocate_sort_as_top(top, sort_keys, need_sort, prefix_pos))) {
+    if (OB_FAIL(try_allocate_sort_as_top(top, sort_keys, need_sort, prefix_pos, part_cnt))) {
       LOG_WARN("failed to allcoate sort as top", K(ret));
     } else if (OB_FAIL(allocate_group_by_as_top(top,
                                                 MERGE_AGGREGATE,
@@ -950,7 +1074,12 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
                                                 origin_child_card,
                                                 is_partition_wise))) {
       LOG_WARN("failed to allocate group by as top", K(ret));
+    } else {
+      static_cast<ObLogGroupBy*>(top)->set_group_by_outline_info(false, false, use_part_sort);
     }
+  } else if (use_part_sort &&
+            OB_FAIL(create_hash_sortkey(part_cnt, sort_keys, hash_sortkey))) {
+    LOG_WARN("failed to create hash sort key", K(ret), K(part_cnt), K(sort_keys));
   } else {
     // allocate push down group by
     if (groupby_helper.can_basic_pushdown_) {
@@ -977,7 +1106,10 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
                  OB_FAIL(allocate_sort_as_top(top,
                                               sort_keys,
                                               top_is_local_order ? 0 : prefix_pos,
-                                              !need_sort && top_is_local_order))) {
+                                              !need_sort && top_is_local_order,
+                                              nullptr,
+                                              is_fetch_with_ties,
+                                              use_part_sort ? &hash_sortkey : NULL))) {
         LOG_WARN("failed to allcoate sort as top", K(ret));
       } else if (OB_FAIL(allocate_group_by_as_top(top,
                                                   MERGE_AGGREGATE,
@@ -995,7 +1127,7 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
       } else if (OB_FAIL(allocate_topk_for_merge_group_plan(top))) {// allocate top-k
         LOG_WARN("failed to allocate topk for merge group plan", K(ret));
       } else {
-        need_sort = false;
+        need_sort = (need_sort && part_cnt > 0) ? true : false;
         prefix_pos = 0;
       }
     }
@@ -1012,7 +1144,10 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
                                                            sort_keys,
                                                            need_sort,
                                                            prefix_pos,
-                                                           top->get_is_local_order()))) {
+                                                           top->get_is_local_order(),
+                                                           nullptr,
+                                                           is_fetch_with_ties,
+                                                           use_part_sort ? &hash_sortkey : NULL))) {
         LOG_WARN("failed to allocate sort as top", K(ret));
       } else if (OB_FAIL(allocate_group_by_as_top(top,
                                                   MERGE_AGGREGATE,
@@ -1024,7 +1159,10 @@ int ObSelectLogPlan::create_merge_group_plan(const ObIArray<ObRawExpr*> &reduce_
                                                   groupby_helper.group_ndv_,
                                                   origin_child_card))) {
         LOG_WARN("failed to allocate group by as top", K(ret));
-      } else { /*do nothing*/ }
+      } else {
+        static_cast<ObLogGroupBy*>(top)->set_group_by_outline_info(false,
+                                         groupby_helper.can_basic_pushdown_, use_part_sort);
+      }
     }
   }
   return ret;
@@ -1060,7 +1198,9 @@ int ObSelectLogPlan::generate_merge_group_sort_keys(ObLogicalOperator *top,
       } else if (T_FUN_SYS_REMOVE_CONST == expr->get_expr_type()) {
         /*do nothing*/
       } else if (OB_FAIL(ObOptimizerUtil::is_const_expr(expr,
+                                                        top->get_output_equal_sets(),
                                                         top->get_output_const_exprs(),
+                                                        get_onetime_query_refs(),
                                                         is_const))) {
         LOG_WARN("failed to check whether expr is const", K(ret));
       } else if (is_const) {
@@ -1095,6 +1235,7 @@ int ObSelectLogPlan::allocate_topk_for_merge_group_plan(ObLogicalOperator *&top)
                                                       top->get_fd_item_set(),
                                                       top->get_output_equal_sets(),
                                                       top->get_output_const_exprs(),
+                                                      get_onetime_query_refs(),
                                                       top->get_is_at_most_one_row(),
                                                       need_sort,
                                                       prefix_pos))) {
@@ -1133,9 +1274,13 @@ int ObSelectLogPlan::allocate_topk_for_merge_group_plan(ObLogicalOperator *&top)
 int ObSelectLogPlan::allocate_window_function_as_top(const ObIArray<ObWinFunRawExpr *> &win_exprs,
                                                      const bool match_parallel,
                                                      const bool is_partition_wise,
-                                                     const ObIArray<OrderItem> &range_dist_keys,
+                                                     const int32_t role_type,
+                                                     const ObIArray<OrderItem> &sort_keys,
+                                                     const int64_t range_dist_keys_cnt,
                                                      const int64_t range_dist_pby_prefix,
-                                                     ObLogicalOperator *&top)
+                                                     ObLogicalOperator *&top,
+                                                     ObOpPseudoColumnRawExpr *wf_aggr_status_expr,
+                                                     const ObIArray<bool> &pushdown_info)
 {
   int ret = OB_SUCCESS;
   ObLogWindowFunction *window_function = NULL;
@@ -1148,18 +1293,25 @@ int ObSelectLogPlan::allocate_window_function_as_top(const ObIArray<ObWinFunRawE
     LOG_ERROR("allocate memory for ObLogWindowFunction failed", K(ret));
   } else if (OB_FAIL(append(window_function->get_window_exprs(), win_exprs))) {
     LOG_WARN("failed to add window expr", K(ret));
-  } else if (!range_dist_keys.empty()
-             && OB_FAIL(window_function->set_rd_sort_keys(range_dist_keys))) {
+  } else if (OB_FAIL(window_function->set_sort_keys(sort_keys))) {
     LOG_WARN("set range distribution sort keys failed", K(ret));
   } else {
-    if (!range_dist_keys.empty()) {
-      window_function->set_ragne_dist_parallel(true);
-      window_function->set_rd_pby_sort_cnt(range_dist_pby_prefix);
-    }
+    window_function->set_rd_sort_keys_cnt(range_dist_keys_cnt);
     window_function->set_single_part_parallel(match_parallel);
     window_function->set_is_partition_wise(is_partition_wise);
     window_function->set_child(ObLogicalOperator::first_child, top);
-    if (OB_FAIL(window_function->compute_property())) {
+    window_function->set_role_type(ObLogWindowFunction::WindowFunctionRoleType(role_type));
+    if (range_dist_keys_cnt > 0) {
+      window_function->set_ragne_dist_parallel(true);
+      window_function->set_rd_pby_sort_cnt(range_dist_pby_prefix);
+    }
+    if (ObLogWindowFunction::WindowFunctionRoleType::PARTICIPATOR == role_type) {
+      window_function->set_aggr_status_expr(wf_aggr_status_expr);
+    }
+    if (window_function->is_push_down()
+        && OB_FAIL(window_function->set_pushdown_info(pushdown_info))) {
+      LOG_WARN("set_pushdown_info failed", K(ret));
+    } else if (OB_FAIL(window_function->compute_property())) {
       LOG_WARN("failed to compute property", K(ret));
     } else {
       top = window_function;
@@ -1181,10 +1333,6 @@ int ObSelectLogPlan::candi_allocate_distinct()
   if (OB_ISNULL(stmt = get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
-  } else if (OB_FAIL(stmt->get_select_exprs(candi_subquery_exprs))) {
-    LOG_WARN("failed to get select exprs", K(ret));
-  } else if (OB_FAIL(candi_allocate_subplan_filter_for_exprs(candi_subquery_exprs))) {
-    LOG_WARN("failed to allocate subplan filter for exprs", K(ret));
   } else if (OB_FAIL(candidates_.get_best_plan(best_plan))) {
     LOG_WARN("failed to get current best plan", K(ret));
   } else if (OB_ISNULL(best_plan)) {
@@ -1192,6 +1340,8 @@ int ObSelectLogPlan::candi_allocate_distinct()
     LOG_WARN("get unexpected null", K(ret));
   } else if (OB_FAIL(get_distinct_exprs(best_plan, reduce_exprs, distinct_exprs))) {
     LOG_WARN("failed to get select columns", K(ret));
+  } else if (OB_FAIL(candi_allocate_subplan_filter_for_exprs(distinct_exprs))) {
+        LOG_WARN("failed to allocate subplan filter for exprs", K(ret));
   } else if (distinct_exprs.empty()) {
     // if all the distinct exprs are const, we add limit operator instead of distinct operator
     ObConstRawExpr *limit_expr = NULL;
@@ -1203,6 +1353,7 @@ int ObSelectLogPlan::candi_allocate_distinct()
     } else if (OB_FAIL(candi_allocate_limit(limit_expr))) {
       LOG_WARN("failed to allocate limit operator", K(ret));
     } else {
+      OPT_TRACE("distinct exprs is const, need limit op instead of distinct op");
       LOG_TRACE("distinct exprs is const, need limit op instead of distinct op", K(distinct_exprs));
     }
   } else if (OB_FAIL(ObOptimizerUtil::is_exprs_unique(distinct_exprs,
@@ -1213,6 +1364,7 @@ int ObSelectLogPlan::candi_allocate_distinct()
                                                       is_unique))) {
     LOG_WARN("failed to check whether distinct exprs is unique", K(ret));
   } else if (is_unique) {
+    OPT_TRACE("distinct exprs is unique, no need distinct");
     LOG_TRACE("distinct exprs is unique, no need distinct", K(distinct_exprs));
   } else {
     SMART_VAR(GroupingOpHelper, distinct_helper) {
@@ -1289,6 +1441,7 @@ int ObSelectLogPlan::get_distinct_exprs(const ObLogicalOperator *top,
     LOG_WARN("get unexpected null", K(select_stmt), K(top), K(ret));
   } else {
     ObRawExpr *select_expr = NULL;
+    ObSEArray<ObRawExpr *, 8> new_distinct_exprs;
     for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
       bool is_const = false;
       select_expr = select_stmt->get_select_item(i).expr_;
@@ -1298,6 +1451,7 @@ int ObSelectLogPlan::get_distinct_exprs(const ObLogicalOperator *top,
       } else if (OB_FAIL(ObOptimizerUtil::is_const_expr(select_expr,
                                                         top->get_output_equal_sets(),
                                                         top->get_output_const_exprs(),
+                                                        get_onetime_query_refs(),
                                                         is_const))) {
         LOG_WARN("failed to check whether is const expr", K(ret));
       } else if (is_const) {
@@ -1314,7 +1468,13 @@ int ObSelectLogPlan::get_distinct_exprs(const ObLogicalOperator *top,
                                                        reduce_exprs,
                                                        distinct_exprs))) {
       LOG_WARN("failed to simplify exprs", K(ret));
-    } else { /*do nothing*/ }
+    } else if (OB_FAIL(ObOptimizerUtil::get_minset_of_exprs(distinct_exprs,new_distinct_exprs))) {
+      LOG_WARN("fail to get minset of distinct exprs", K(ret));
+    } else if (new_distinct_exprs.count() >= distinct_exprs.count()) {
+      //do nothing
+    } else if (OB_FAIL(distinct_exprs.assign(new_distinct_exprs))) {
+      LOG_WARN("fail to assign new distinct expr", K(ret));
+    }
   }
   return ret;
 }
@@ -1327,6 +1487,7 @@ int ObSelectLogPlan::create_hash_distinct_plan(ObLogicalOperator *&top,
   int ret = OB_SUCCESS;
   bool is_partition_wise = false;
   ObExchangeInfo exch_info;
+  OPT_TRACE("start generate hash distinct plan");
   if (OB_ISNULL(top)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(top), K(ret));
@@ -1335,6 +1496,8 @@ int ObSelectLogPlan::create_hash_distinct_plan(ObLogicalOperator *&top,
                                                                      is_partition_wise))) {
     LOG_WARN("failed to check sharding compatible with reduce expr", K(ret));
   } else if (!top->is_distributed() || is_partition_wise) {
+    OPT_TRACE("is basic distinct:", !top->is_distributed());
+    OPT_TRACE("is partition wise distinct", is_partition_wise);
     if (OB_FAIL(allocate_distinct_as_top(top,
                                          AggregateAlgo::HASH_AGGREGATE,
                                          distinct_exprs,
@@ -1380,6 +1543,7 @@ int ObSelectLogPlan::create_merge_distinct_plan(ObLogicalOperator *&top,
   ObSEArray<OrderItem, 4> sort_keys;
   int64_t interesting_order_info = OrderingFlag::NOT_MATCH;
   is_plan_valid = true;
+  OPT_TRACE("start generate merge distinct plan");
   if (OB_ISNULL(top)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
@@ -1394,6 +1558,7 @@ int ObSelectLogPlan::create_merge_distinct_plan(ObLogicalOperator *&top,
                                                       top->get_fd_item_set(),
                                                       top->get_output_equal_sets(),
                                                       top->get_output_const_exprs(),
+                                                      get_onetime_query_refs(),
                                                       top->get_is_at_most_one_row(),
                                                       need_sort,
                                                       prefix_pos))) {
@@ -1405,6 +1570,7 @@ int ObSelectLogPlan::create_merge_distinct_plan(ObLogicalOperator *&top,
                                                       false,
                                                       const_cast<EqualSets &>(top->get_output_equal_sets()),
                                                       top->get_output_const_exprs(),
+                                                      get_is_parent_set_distinct(),
                                                       OrderingCheckScope::CHECK_SET | OrderingCheckScope::CHECK_ORDERBY,
                                                       interesting_order_info))) {
     LOG_WARN("failed to compute stmt interesting order", K(ret));
@@ -1416,6 +1582,8 @@ int ObSelectLogPlan::create_merge_distinct_plan(ObLogicalOperator *&top,
                                                                      is_partition_wise))) {
     LOG_WARN("failed to check sharding compatiable with reduce exprs", K(ret));
   } else if (!top->is_distributed() || is_partition_wise) {
+    OPT_TRACE("is basic distinct:", !top->is_distributed());
+    OPT_TRACE("is partition wise distinct", is_partition_wise);
     if (OB_FAIL(try_allocate_sort_as_top(top, sort_keys, need_sort, prefix_pos))) {
       LOG_WARN("failed to allocate sort operator", K(ret));
     } else if (OB_FAIL(allocate_distinct_as_top(top,
@@ -1432,6 +1600,7 @@ int ObSelectLogPlan::create_merge_distinct_plan(ObLogicalOperator *&top,
         then the down-pressed distinct operator must be full partition wise,
         and the gi operator can be allocated on the distinct operator.
         At this time, the child's order is globally ordered.*/
+      OPT_TRACE("generate pushdown distinct plan");
       bool should_pullup_gi = false;
       bool top_is_local_order = false;
       if (OB_FAIL(check_can_pullup_gi(*top, false, need_sort, should_pullup_gi))) {
@@ -1481,11 +1650,11 @@ int ObSelectLogPlan::create_merge_distinct_plan(ObLogicalOperator *&top,
 }
 
 int ObSelectLogPlan::allocate_distinct_as_top(ObLogicalOperator *&top,
-				      const AggregateAlgo algo,
-				      const ObIArray<ObRawExpr*> &distinct_exprs,
-				      const double total_ndv,
-				      const bool is_partition_wise,
-				      const bool is_pushed_down)
+              const AggregateAlgo algo,
+              const ObIArray<ObRawExpr*> &distinct_exprs,
+              const double total_ndv,
+              const bool is_partition_wise,
+              const bool is_pushed_down)
 {
 int ret = OB_SUCCESS;
 ObLogDistinct *distinct_op = NULL;
@@ -1493,7 +1662,7 @@ if (OB_ISNULL(top)) {
 ret = OB_ERR_UNEXPECTED;
 LOG_WARN("get unexpected null", K(top), K(ret));
 } else if (OB_ISNULL(distinct_op = static_cast<ObLogDistinct*>(get_log_op_factory().
-			     allocate(*this, LOG_DISTINCT)))) {
+           allocate(*this, LOG_DISTINCT)))) {
 ret = OB_ALLOCATE_MEMORY_FAILED;
 LOG_ERROR("failed to allocate distinct operator", K(ret));
 } else {
@@ -1516,32 +1685,32 @@ return ret;
 
 int ObSelectLogPlan::generate_raw_plan_for_set()
 {
-int ret = OB_SUCCESS;
-const ObSelectStmt *select_stmt = get_stmt();
-ObSEArray<ObSelectLogPlan*, 2> child_plans;
-ObSEArray<ObRawExpr *, 8> remain_filters;
-ObSQLSessionInfo *session_info = NULL;
-ObRawExprFactory *expr_factory = NULL;
-if (OB_ISNULL(select_stmt) ||
-OB_ISNULL(session_info = get_optimizer_context().get_session_info()) ||
-OB_ISNULL(expr_factory = &get_optimizer_context().get_expr_factory())) {
-ret = OB_ERR_UNEXPECTED;
-LOG_WARN("unexpect null stmt", K(select_stmt), K(ret));
-} else if (OB_UNLIKELY(!select_stmt->is_set_stmt()) ||
-     OB_UNLIKELY(2 > select_stmt->get_set_query().count())) {
-ret = OB_ERR_UNEXPECTED;
-LOG_WARN("unexpected set_op stmt", K(ret));
-} else {
-const ObIArray<ObSelectStmt*> &child_stmts = select_stmt->get_set_query();
-const int64_t child_size = child_stmts.count();
-const bool is_set_distinct = select_stmt->is_set_distinct();
-ObSEArray<ObRawExpr *, 8> child_input_filters;
-ObSEArray<ObRawExpr *, 8> child_candi_filters;
-ObSEArray<ObRawExpr *, 8> child_rename_filters;
-ObSEArray<ObRawExpr *, 8> child_remain_filters;
-bool can_pushdown = false;
-const ObSelectStmt *child_stmt = NULL;
-ObSelectLogPlan *child_plan = NULL;
+  int ret = OB_SUCCESS;
+  const ObSelectStmt *select_stmt = get_stmt();
+  ObSEArray<ObSelectLogPlan*, 2> child_plans;
+  ObSEArray<ObRawExpr *, 8> remain_filters;
+  ObSQLSessionInfo *session_info = NULL;
+  ObRawExprFactory *expr_factory = NULL;
+  if (OB_ISNULL(select_stmt) ||
+      OB_ISNULL(session_info = get_optimizer_context().get_session_info()) ||
+      OB_ISNULL(expr_factory = &get_optimizer_context().get_expr_factory())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null stmt", K(select_stmt), K(ret));
+  } else if (OB_UNLIKELY(!select_stmt->is_set_stmt()) ||
+            OB_UNLIKELY(2 > select_stmt->get_set_query().count())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected set_op stmt", K(ret));
+  } else {
+    const ObIArray<ObSelectStmt*> &child_stmts = select_stmt->get_set_query();
+    const int64_t child_size = child_stmts.count();
+    const bool is_set_distinct = select_stmt->is_set_distinct();
+    ObSEArray<ObRawExpr *, 8> child_input_filters;
+    ObSEArray<ObRawExpr *, 8> child_candi_filters;
+    ObSEArray<ObRawExpr *, 8> child_rename_filters;
+    ObSEArray<ObRawExpr *, 8> child_remain_filters;
+    bool can_pushdown = false;
+    const ObSelectStmt *child_stmt = NULL;
+    ObSelectLogPlan *child_plan = NULL;
     for (int64 i = 0; OB_SUCC(ret) && i < child_size; ++i) {
       child_input_filters.reuse();
       child_candi_filters.reuse();
@@ -1575,7 +1744,8 @@ ObSelectLogPlan *child_plan = NULL;
                                                                 child_rename_filters))) {
         LOG_WARN("failed to rename pushdown filter", K(ret));
       } else if (OB_FAIL(generate_child_plan_for_set(child_stmt, child_plan,
-                                                     child_rename_filters, i))) {
+                                                     child_rename_filters, i,
+                                                     select_stmt->is_set_distinct()))) {
         LOG_WARN("failed to generate left subquery plan", K(ret));
       } else if (OB_FAIL(child_plans.push_back(child_plan))) {
         LOG_WARN("failed to push back", K(ret));
@@ -1635,7 +1805,11 @@ int ObSelectLogPlan::update_set_sharding_info(const ObIArray<ObSelectLogPlan*> &
   ObSEArray<ObRawExpr*, 8> old_exprs;
   ObSEArray<ObRawExpr*, 8> new_exprs;
   ObSEArray<ObRawExpr*, 8> partition_keys;
-  if (OB_FAIL(get_pure_set_exprs(pure_set_exprs))) {
+  const ObSelectStmt *sel_stmt = NULL;
+  if (OB_ISNULL(sel_stmt = get_stmt()) || OB_UNLIKELY(!sel_stmt->is_select_stmt())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected error", K(ret));
+  } else if (OB_FAIL(sel_stmt->get_pure_set_exprs(pure_set_exprs))) {
     LOG_WARN("failed to get pure set exprs", K(ret));
   } else {
     ObSEArray<ObShardingInfo*, 8> dist_shardings;
@@ -1862,7 +2036,7 @@ int ObSelectLogPlan::generate_union_all_plans(const ObIArray<ObSelectLogPlan*> &
       // reset pos for next generation
       if (OB_SUCC(ret)) {
         has_next = false;
-        for (int64_t i = move_pos.count() - 1; OB_SUCC(ret) && i >= 0; i--) {
+        for (int64_t i = move_pos.count() - 1; !has_next && OB_SUCC(ret) && i >= 0; i--) {
           if (move_pos.at(i) < best_plan_list.at(i).count() - 1) {
             ++move_pos.at(i);
             has_next = true;
@@ -1884,54 +2058,118 @@ int ObSelectLogPlan::create_union_all_plan(const ObIArray<ObLogicalOperator*> &c
   int ret = OB_SUCCESS;
   ObSEArray<ObLogicalOperator*, 8> set_child_ops;
   top = NULL;
+  const ObSelectStmt* select_stmt = NULL;
   uint64_t set_dist_methods = DistAlgo::DIST_BASIC_METHOD
                               | DistAlgo::DIST_PARTITION_WISE
+                              | DistAlgo::DIST_SET_PARTITION_WISE
+                              | DistAlgo::DIST_EXT_PARTITION_WISE
                               | DistAlgo::DIST_PULL_TO_LOCAL
                               | DistAlgo::DIST_SET_RANDOM;
   int64_t random_none_idx = OB_INVALID_INDEX;
+  bool is_partition_wise = false;
+  bool is_ext_partition_wise = false;
+  bool is_set_partition_wise = false;
   DistAlgo hint_dist_methods = get_log_plan_hint().get_valid_set_dist_algo(&random_none_idx);
-  if (!ignore_hint && DistAlgo::DIST_INVALID_METHOD != hint_dist_methods) {
+  if (OB_ISNULL(select_stmt = get_stmt())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected error", K(select_stmt), K(ret));
+  } else if (!get_optimizer_context().is_var_assign_only_in_root_stmt() &&
+      get_optimizer_context().has_var_assign()) {
+    set_dist_methods &= DistAlgo::DIST_PULL_TO_LOCAL | DistAlgo::DIST_BASIC_METHOD;
+  } else if (!ignore_hint && DistAlgo::DIST_INVALID_METHOD != hint_dist_methods) {
     set_dist_methods &= hint_dist_methods;
   } else {
     random_none_idx = OB_INVALID_INDEX;
   }
+  if (OB_FAIL(ret)) {
+    //do nothing
+  } else if (!ignore_hint && DistAlgo::DIST_INVALID_METHOD != hint_dist_methods) {
+    //do nothing
+  } else if (select_stmt->is_set_stmt() && !select_stmt->is_set_distinct() && get_optimizer_context().force_serial_set_order()) {
+    //for union all to keep child branches execute serially from left to right
+    set_dist_methods &= (DistAlgo::DIST_PULL_TO_LOCAL | DistAlgo::DIST_BASIC_METHOD);
+  }
+  OPT_TRACE("start create unoin all plan");
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_BASIC_METHOD)) {
     bool is_basic = false;
+    OPT_TRACE("check match basic method");
     if (OB_FAIL(ObOptimizerUtil::check_basic_sharding_info(get_optimizer_context().get_local_server_addr(),
                                                            child_ops,
                                                            is_basic))) {
       LOG_WARN("failed to check basic sharding info", K(ret));
     } else if (!is_basic) {
       set_dist_methods &= ~DIST_BASIC_METHOD;
+      OPT_TRACE("will not use basic method");
     } else if (OB_FAIL(set_child_ops.assign(child_ops))) {
       LOG_WARN("failed to assign child ops", K(ret));
     } else {
       set_dist_methods = DistAlgo::DIST_BASIC_METHOD;
+      OPT_TRACE("will use basic method, ignore other method");
     }
   }
 
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_PARTITION_WISE)) {
-    bool is_partition_wise = false;
+    OPT_TRACE("check match partition wise");
     if (OB_FAIL(check_if_union_all_match_partition_wise(child_ops, is_partition_wise))) {
       LOG_WARN("failed to check if union all match partition wise", K(ret));
     } else if (!is_partition_wise) {
       set_dist_methods &= ~DIST_PARTITION_WISE;
+      OPT_TRACE("will not use partition wise");
     } else if (OB_FAIL(set_child_ops.assign(child_ops))) {
       LOG_WARN("failed to assign child ops", K(ret));
     } else {
       set_dist_methods = DistAlgo::DIST_PARTITION_WISE;
+      OPT_TRACE("will use partition wise, ignore other method");
+    }
+  }
+
+  if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_EXT_PARTITION_WISE)) {
+    OPT_TRACE("check match extend partition wise");
+    if (OB_FAIL(check_if_union_all_match_extended_partition_wise(child_ops, is_ext_partition_wise))) {
+      LOG_WARN("failed to check if union all match extended partition wise", K(ret));
+    } else if (!is_ext_partition_wise) {
+      set_dist_methods &= ~DIST_EXT_PARTITION_WISE;
+      OPT_TRACE("will not use extend partition wise");
+    } else if (OB_FAIL(set_child_ops.assign(child_ops))) {
+      LOG_WARN("failed to assign child ops", K(ret));
+    } else {
+      set_dist_methods = DistAlgo::DIST_EXT_PARTITION_WISE;
+      OPT_TRACE("will use extend partition wise, ignore other method");
+    }
+  }
+
+  if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_SET_PARTITION_WISE)) {
+    OPT_TRACE("check match set partition wise");
+    if (OB_FAIL(check_if_union_all_match_set_partition_wise(child_ops, is_set_partition_wise))) {
+      LOG_WARN("failed to check if union all match set partition wise", K(ret));
+    } else if (!is_set_partition_wise) {
+      set_dist_methods &= ~DIST_SET_PARTITION_WISE;
+      OPT_TRACE("will not use set partition wise");
+    } else if (OB_FAIL(set_child_ops.assign(child_ops))) {
+      LOG_WARN("failed to assign child ops", K(ret));
+    } else {
+      set_dist_methods = DistAlgo::DIST_SET_PARTITION_WISE;
+      OPT_TRACE("will use set partition wise, ignore other method");
     }
   }
 
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_SET_RANDOM)) {
+    OPT_TRACE("check match set random method");
     // has distributed child, use random distribution
-    int64_t largest_pos = -1;
-    if (OB_FAIL(get_largest_sharding_child(child_ops, random_none_idx, largest_pos))) {
+    ObLogicalOperator *largest_op = NULL;
+    ObExchangeInfo exch_info;
+    if (OB_FAIL(get_largest_sharding_child(child_ops, random_none_idx, largest_op))) {
       LOG_WARN("failed to get largest sharding children", K(ret));
-    } else if (-1 == largest_pos) {
+    } else if (NULL == largest_op) {
       set_dist_methods &= ~DistAlgo::DIST_SET_RANDOM;
+      OPT_TRACE("all children`s sharding is distribute, no need shuffle");
+      OPT_TRACE("will not use set random");
+    } else if (OB_FAIL(exch_info.server_list_.assign(largest_op->get_server_list()))) {
+      LOG_WARN("failed to assign server list", K(ret));
     } else {
-      ObExchangeInfo exch_info;
+      OPT_TRACE("will use set random, ignore other method");
+      exch_info.parallel_ = largest_op->get_parallel();
+      exch_info.server_cnt_ = largest_op->get_server_cnt();
       exch_info.dist_method_ = ObPQDistributeMethod::RANDOM;
       set_dist_methods = DistAlgo::DIST_SET_RANDOM;
       for (int64_t i = 0; OB_SUCC(ret) && i < child_ops.count(); i++) {
@@ -1940,8 +2178,8 @@ int ObSelectLogPlan::create_union_all_plan(const ObIArray<ObLogicalOperator*> &c
             OB_ISNULL(child_op->get_plan())) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("get unexpected null", K(ret));
-        } else if (i != largest_pos &&
-                  OB_FAIL(child_op->get_plan()->allocate_exchange_as_top(child_op, exch_info))) {
+        } else if (child_op != largest_op &&
+                   OB_FAIL(child_op->get_plan()->allocate_exchange_as_top(child_op, exch_info))) {
           LOG_WARN("failed to allocate exchange as top", K(ret));
         } else if (OB_FAIL(set_child_ops.push_back(child_op))) {
           LOG_WARN("failed to push back child ops", K(ret));
@@ -1951,6 +2189,7 @@ int ObSelectLogPlan::create_union_all_plan(const ObIArray<ObLogicalOperator*> &c
   }
 
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_PULL_TO_LOCAL)) {
+    OPT_TRACE("will use pull to local method");
     ObExchangeInfo exch_info;
     set_dist_methods = DistAlgo::DIST_PULL_TO_LOCAL;
     for (int64_t i = 0; OB_SUCC(ret) && i < child_ops.count(); i++) {
@@ -1977,7 +2216,9 @@ int ObSelectLogPlan::create_union_all_plan(const ObIArray<ObLogicalOperator*> &c
       /*do nothing*/
     } else if (OB_FAIL(allocate_union_all_as_top(set_child_ops, dist_set_method, top))) {
       LOG_WARN("failed to allocate union all as top", K(ret));
-    } else { /*do nothing*/ }
+    } else {
+      LOG_TRACE("succeed to allocate union all as top", K(dist_set_method));
+    }
   }
   return ret;
 }
@@ -1986,35 +2227,190 @@ int ObSelectLogPlan::check_if_union_all_match_partition_wise(const ObIArray<ObLo
                                                              bool &is_partition_wise)
 {
   int ret = OB_SUCCESS;
+  EqualSets equal_sets;
+  EqualSets first_equal_sets;
   ObShardingInfo *first_sharding = NULL;
   ObShardingInfo *child_sharding = NULL;
+  const ObSelectStmt *child_stmt = NULL;
+  ObSEArray<ObRawExpr*, 4> first_select_exprs;
+  ObSEArray<ObRawExpr*, 4> child_select_exprs;
   is_partition_wise = true;
   for (int64_t i = 0; OB_SUCC(ret) && is_partition_wise && i < child_ops.count(); i++) {
+    equal_sets.reset();
+    child_select_exprs.reset();
     if (OB_ISNULL(child_ops.at(i)) ||
-        OB_ISNULL(child_sharding = child_ops.at(i)->get_sharding())) {
+        OB_ISNULL(child_sharding = child_ops.at(i)->get_sharding()) ||
+        OB_ISNULL(child_ops.at(i)->get_plan()) ||
+        OB_ISNULL(child_ops.at(i)->get_plan()->get_stmt()) ||
+        !child_ops.at(i)->get_plan()->get_stmt()->is_select_stmt() ||
+        OB_ISNULL(child_stmt = static_cast<const ObSelectStmt*>(child_ops.at(i)->get_plan()->get_stmt()))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(child_ops.at(i)), K(child_sharding), K(ret));
     } else if (child_ops.at(i)->is_exchange_allocated()) {
       is_partition_wise = false;
     } else if (i == 0) {
       first_sharding = child_sharding;
-    } else if (OB_FAIL(ObShardingInfo::is_physically_equal_partitioned(*first_sharding,
-                                                                       *child_sharding,
-                                                                       is_partition_wise))) {
-      LOG_WARN("failed to check if union all match partition-wise join", K(ret));
-    } else { /*do nothing*/ }
+      first_equal_sets = child_ops.at(i)->get_output_equal_sets();
+      if (OB_FAIL(child_stmt->get_select_exprs(first_select_exprs))) {
+        LOG_WARN("failed to get select exprs", K(ret));
+      }
+    } else if (OB_FAIL(child_stmt->get_select_exprs(child_select_exprs))) {
+      LOG_WARN("failed to get select exprs", K(ret));
+    } else if (first_select_exprs.count() != child_select_exprs.count()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("select exprs count doesn't match", K(first_select_exprs), K(child_select_exprs));
+    } else if (OB_FAIL(append(equal_sets, first_equal_sets))) {
+      LOG_WARN("failed to append equal sets", K(ret));
+    } else if (OB_FAIL(append(equal_sets, child_ops.at(i)->get_output_equal_sets()))) {
+      LOG_WARN("failed to append equal sets", K(ret));
+    } else if (OB_FAIL(ObShardingInfo::check_if_match_partition_wise(equal_sets,
+                                                                     first_select_exprs,
+                                                                     child_select_exprs,
+                                                                     first_sharding,
+                                                                     child_sharding,
+                                                                     is_partition_wise))) {
+      LOG_WARN("failed to check if union all match strict partition-wise", K(ret));
+    } else {
+      LOG_TRACE("succ to check union all matching pw", K(is_partition_wise));
+    }
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::check_if_union_all_match_set_partition_wise(const ObIArray<ObLogicalOperator*> &child_ops,
+                                                                 bool &is_union_all_set_pw)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObAddr, 4> first_server_list;
+  bool is_inherit_from_access_all = false;
+  is_union_all_set_pw = true;
+  for (int64_t i = 0; OB_SUCC(ret) && is_union_all_set_pw && i < child_ops.count(); i++) {
+    ObLogicalOperator *child_op = NULL;
+    ObShardingInfo *child_sharding = NULL;
+    const ObSelectStmt *child_stmt = NULL;
+    bool has_external_table_scan = false;
+    if (OB_ISNULL(child_op = child_ops.at(i))
+        || OB_ISNULL(child_sharding = child_op->get_sharding())
+        || !child_ops.at(i)->get_plan()->get_stmt()->is_select_stmt()
+        || OB_ISNULL(child_stmt = static_cast<const ObSelectStmt*>(child_ops.at(i)->get_plan()->get_stmt()))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid input", K(ret), K(child_op), K(child_sharding));
+    } else if (!child_sharding->is_distributed()) {
+      is_union_all_set_pw = false;
+      OPT_TRACE("not distributed sharding, can not use set partition wise");
+    } else if (OB_FAIL(check_external_table_scan(const_cast<ObSelectStmt*>(child_stmt), has_external_table_scan))) {
+      LOG_WARN("fail to check has external table scan", K(ret));
+    } else if (has_external_table_scan) {
+      is_union_all_set_pw = false;
+      OPT_TRACE("has external table scan, can not use set partition wise");
+    } else if (i == 0) {
+      if (OB_FAIL(check_sharding_inherit_from_access_all(child_op,
+                                                         is_inherit_from_access_all))) {
+        LOG_WARN("failed to check sharding inherit from access all", K(ret));
+      } else if (is_inherit_from_access_all) {
+        //partition wise flag conflict with access all flag
+        is_union_all_set_pw = false;
+      } else if (OB_FAIL(first_server_list.assign(child_op->get_server_list()))) {
+        LOG_WARN("failed to get first server list", K(ret));
+      } else {
+        LOG_TRACE("succ to check union all matching set pw", K(first_server_list));
+      }
+    } else if (OB_FAIL(check_sharding_inherit_from_access_all(child_op,
+                                                             is_inherit_from_access_all))) {
+      LOG_WARN("failed to check sharding inherit from access all", K(ret));
+    } else if (is_inherit_from_access_all) {
+      //partition wise flag conflict with access all flag
+      is_union_all_set_pw = false;
+    } else if (OB_FAIL(ObShardingInfo::is_physically_equal_serverlist(first_server_list,
+                                                                      child_op->get_server_list(),
+                                                                      is_union_all_set_pw))) {
+      LOG_WARN("failed to check if equal server list", K(ret));
+    } else {
+      if (!is_union_all_set_pw) {
+        OPT_TRACE("server list not equal, can not use set partition wise");
+      }
+      LOG_TRACE("succ to check union all matching set pw",
+                K(first_server_list), K(child_op->get_server_list()), K(is_union_all_set_pw));
+    }
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::check_sharding_inherit_from_access_all(ObLogicalOperator* op,
+                                                            bool &is_inherit_from_access_all)
+{
+  int ret = OB_SUCCESS;
+  is_inherit_from_access_all = false;
+  if (OB_ISNULL(op)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null op", K(ret));
+  } else if (log_op_def::LOG_JOIN == op->get_type()) {
+    ObLogJoin *log_join = static_cast<ObLogJoin*>(op);
+    if (DIST_BC2HOST_NONE == log_join->get_dist_method() &&
+        log_join->is_nlj_with_param_down()) {
+      is_inherit_from_access_all = true;
+    }
+  }
+  if (OB_SUCC(ret) &&
+      !is_inherit_from_access_all &&
+      op->get_inherit_sharding_index() != -1) {
+    int64_t idx = op->get_inherit_sharding_index();
+    if (idx < 0 || idx >= op->get_num_of_child()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpect inherit sharding index", K(ret));
+    } else if (OB_FAIL(SMART_CALL(check_sharding_inherit_from_access_all(op->get_child(idx),
+                                                                         is_inherit_from_access_all)))) {
+      LOG_WARN("failed to check sharding inherit from bc2host", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::check_if_union_all_match_extended_partition_wise(const ObIArray<ObLogicalOperator*> &child_ops,
+                                                                      bool &is_union_all_ext_pw)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObAddr, 4> first_server_list;
+  is_union_all_ext_pw = true;
+  for (int64_t i = 0; OB_SUCC(ret) && is_union_all_ext_pw && i < child_ops.count(); i++) {
+    ObLogicalOperator *child_op = NULL;
+    ObShardingInfo *child_sharding = NULL;
+    if (OB_ISNULL(child_op = child_ops.at(i)) ||
+        OB_ISNULL(child_sharding = child_op->get_sharding())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid input", K(ret), K(child_op), K(child_sharding));
+    } else if (!child_sharding->is_distributed()) {
+      is_union_all_ext_pw = false;
+      OPT_TRACE("not distribute sharding, can not use extend partition wise");
+    } else if (i == 0) {
+      if (OB_FAIL(first_server_list.assign(child_op->get_server_list()))) {
+        LOG_WARN("failed to get first server list", K(ret));
+      } else {
+        LOG_TRACE("succ to check union all matching ext pw", K(first_server_list));
+      }
+    } else if (OB_FAIL(ObShardingInfo::is_physically_both_shuffled_serverlist(first_server_list,
+                                                                              child_op->get_server_list(),
+                                                                              is_union_all_ext_pw))) {
+      LOG_WARN("failed to check if both are shuffled server list", K(ret));
+    } else {
+      if (!is_union_all_ext_pw) {
+        OPT_TRACE("server list not match, can not use extend partition wise");
+      }
+      LOG_TRACE("succ to check union all matching ext pw",
+                K(first_server_list), K(child_op->get_server_list()), K(is_union_all_ext_pw));
+    }
   }
   return ret;
 }
 
 int ObSelectLogPlan::get_largest_sharding_child(const ObIArray<ObLogicalOperator*> &child_ops,
                                                 const int64_t candi_pos,
-                                                int64_t &largest_pos)
+                                                ObLogicalOperator *&largest_op)
 {
   int ret = OB_SUCCESS;
   ObLogicalOperator *child_op = NULL;
   ObShardingInfo *child_sharding = NULL;
-  largest_pos = -1;
+  largest_op = NULL;
   if (OB_INVALID_INDEX != candi_pos) {
     if (candi_pos < 0 || candi_pos >= child_ops.count()) {
       /*do nothing*/
@@ -2023,17 +2419,19 @@ int ObSelectLogPlan::get_largest_sharding_child(const ObIArray<ObLogicalOperator
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(child_op), K(child_sharding), K(ret));
     } else if (child_sharding->is_distributed()) {
-      largest_pos = candi_pos;
+      largest_op = child_op;
     }
-  } else if (optimizer_context_.get_parallel() > 1) {
+  } else {
     double largest_card = -1.0;
     for (int64_t i = 0; OB_SUCC(ret) && i < child_ops.count(); i++) {
       if (OB_ISNULL(child_op = child_ops.at(i)) ||
           OB_ISNULL(child_sharding = child_op->get_sharding())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(child_op), K(child_sharding), K(ret));
+      } else if (child_op->get_parallel() <= ObGlobalHint::DEFAULT_PARALLEL) {
+        /* choose a parallel child */
       } else if (child_sharding->is_distributed() && child_op->get_card() > largest_card) {
-        largest_pos = i;
+        largest_op = child_op;
         largest_card = child_op->get_card();
       } else { /*do nothing*/ }
     }
@@ -2234,6 +2632,7 @@ int ObSelectLogPlan::create_recursive_union_all_plan(ObLogicalOperator *left_chi
                                                  left_child->get_fd_item_set(),
                                                  left_child->get_output_equal_sets(),
                                                  left_child->get_output_const_exprs(),
+                                                 get_onetime_query_refs(),
                                                  left_child->get_is_at_most_one_row(),
                                                  need_sort,
                                                  prefix_pos))) {
@@ -2371,8 +2770,10 @@ int ObSelectLogPlan::candi_allocate_distinct_set(const ObIArray<ObSelectLogPlan*
       // generate merge set plans use hint
       LOG_WARN("failed to generate merge set plans", K(ret));
     } else if (!hash_set_plans.empty() || !merge_set_plans.empty()) {
-      LOG_TRACE("succeed to generate set plans using hint", K(set_algo), K(hash_set_plans.count()),
-                                                            K(merge_set_plans.count()));
+      OPT_TRACE("succeed to generate set plans using hint");
+      OPT_TRACE("   hash set plan count:", hash_set_plans.count());
+      OPT_TRACE("   merge set plan count:", merge_set_plans.count());
+      LOG_TRACE("succeed to generate set plans using hint", K(set_algo), K(hash_set_plans.count()), K(merge_set_plans.count()));
     } else if (OB_FAIL(get_log_plan_hint().check_status())) {
       LOG_WARN("failed to generate plans with hint", K(ret));
     } else if (OB_FAIL(generate_hash_set_plans(equal_sets,
@@ -2397,8 +2798,11 @@ int ObSelectLogPlan::candi_allocate_distinct_set(const ObIArray<ObSelectLogPlan*
       // generate merge set plans ignore hint
       LOG_WARN("failed to generate merge set plans", K(ret));
     } else {
-      LOG_TRACE("succeed to generate set plans ignore hint", K(hash_set_plans.count()),
-                                                              K(merge_set_plans.count()));
+      OPT_TRACE("succeed to generate set plans ignore hint");
+      OPT_TRACE("   hash set plan count:", hash_set_plans.count());
+      OPT_TRACE("   merge set plan count:", merge_set_plans.count());
+      LOG_TRACE("succeed to generate set plans ignore hint", K(set_algo), K(hash_set_plans.count()),
+                                                             K(merge_set_plans.count()));
     }
 
     if (OB_FAIL(ret)) {
@@ -2411,33 +2815,6 @@ int ObSelectLogPlan::candi_allocate_distinct_set(const ObIArray<ObSelectLogPlan*
     } else if (OB_FAIL(prune_and_keep_best_plans(all_plans))) {
       LOG_WARN("failed to add all plans", K(ret));
     } else { /*do nothing*/ }
-  }
-  return ret;
-}
-
-int ObSelectLogPlan::get_pure_set_exprs(ObIArray<ObRawExpr*> &pure_set_exprs)
-{
-  int ret = OB_SUCCESS;
-  const ObSelectStmt *sel_stmt = NULL;
-  ObSEArray<ObRawExpr*, 8> set_exprs;
-  if (OB_ISNULL(sel_stmt = get_stmt()) || OB_UNLIKELY(!sel_stmt->is_select_stmt())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected error", K(ret));
-  } else if (OB_FAIL(sel_stmt->get_select_exprs(set_exprs))) {
-    LOG_WARN("failed to get select exprs", K(ret));
-  } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < set_exprs.count(); i++) {
-      ObRawExpr *output_expr = NULL;
-      if (OB_ISNULL(set_exprs.at(i))) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("get unexpected null", K(ret));
-      } else if (OB_ISNULL(output_expr = ObTransformUtils::get_expr_in_cast(set_exprs.at(i)))) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("failed to get first set op expr", K(ret));
-      } else if (OB_FAIL(pure_set_exprs.push_back(output_expr))) {
-        LOG_WARN("failed to push back output expr", K(ret));
-      } else { /*do nothing*/ }
-    }
   }
   return ret;
 }
@@ -2457,13 +2834,14 @@ int ObSelectLogPlan::get_distributed_set_methods(const EqualSets &equal_sets,
   ObShardingInfo *left_sharding = NULL;
   ObShardingInfo *right_sharding = NULL;
   const ObSelectStmt *select_stmt = NULL;
+  bool need_pull_to_local = false;
   set_dist_methods = ignore_hint ? DistAlgo::DIST_INVALID_METHOD
                                  : get_log_plan_hint().get_valid_set_dist_algo();
   if (OB_ISNULL(left_sharding = left_child.get_sharding()) ||
       OB_ISNULL(right_sharding = right_child.get_sharding()) ||
       OB_ISNULL(select_stmt = get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("invalid sharding", K(left_sharding), K(right_sharding), K(ret));
+    LOG_WARN("invalid sharding", K(left_sharding), K(right_sharding), K(ret), K(left_child.get_type()), K(left_child.get_type()), K(get_op_name(left_child.get_type())));
   } else if (OB_FAIL(child_ops.push_back(&left_child)) ||
       OB_FAIL(child_ops.push_back(&right_child))) {
     LOG_WARN("failed to push back child info", K(ret));
@@ -2475,14 +2853,26 @@ int ObSelectLogPlan::get_distributed_set_methods(const EqualSets &equal_sets,
     if (MERGE_SET != set_method) {
       // disable dist algo for merge set except basic & pwj
       set_dist_methods |= DistAlgo::DIST_NONE_PARTITION;
+      set_dist_methods |= DistAlgo::DIST_NONE_HASH;
       set_dist_methods |= DistAlgo::DIST_PARTITION_NONE;
+      set_dist_methods |= DistAlgo::DIST_HASH_NONE;
       set_dist_methods |= DistAlgo::DIST_PULL_TO_LOCAL;
-      if (get_optimizer_context().get_parallel() > 1) {
+      if (left_child.get_parallel() > 1 || right_child.get_parallel() > 1) {
        set_dist_methods |= DistAlgo::DIST_HASH_HASH;
+       OPT_TRACE("candi hash set dist method:basic,partition wise, none all, all none, none partition,partition none,pull to local,hash hash");
+      } else {
+        OPT_TRACE("candi hash set dist method:basic,partition wise, none all, all none, none partition,partition none,pull to local");
       }
+    } else {
+      OPT_TRACE("candi merge set dist method:basic, partition wise,  none all, all none, ");
     }
+  } else {
+    OPT_TRACE("use dist method with hint");
   }
-
+  if (OB_SUCC(ret) && !get_optimizer_context().is_var_assign_only_in_root_stmt() &&
+      get_optimizer_context().has_var_assign()) {
+    set_dist_methods &= DIST_PULL_TO_LOCAL | DIST_BASIC_METHOD;
+  }
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_NONE_ALL)) {
     if (left_sharding->is_distributed() && right_sharding->is_match_all() &&
         !right_child.get_contains_das_op() && !right_child.get_contains_fake_cte() &&
@@ -2504,18 +2894,22 @@ int ObSelectLogPlan::get_distributed_set_methods(const EqualSets &equal_sets,
   }
 
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_BASIC_METHOD)) {
+    OPT_TRACE("check basic method");
     bool is_basic = false;
     ObAddr &local_addr = get_optimizer_context().get_local_server_addr();
     if (OB_FAIL(ObOptimizerUtil::check_basic_sharding_info(local_addr, child_ops, is_basic))) {
       LOG_WARN("failed to check basic sharding info", K(ret));
     } else if (is_basic) {
       set_dist_methods = DistAlgo::DIST_BASIC_METHOD;
+      OPT_TRACE("plan will use basic method");
     } else {
       set_dist_methods &= ~DistAlgo::DIST_BASIC_METHOD;
+      OPT_TRACE("plan will not use basic method");
     }
   }
 
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_PARTITION_WISE)) {
+    OPT_TRACE("check partition wise method");
     bool is_partition_wise = false;
     if (OB_FAIL(ObShardingInfo::check_if_match_partition_wise(equal_sets,
                                                               left_set_keys,
@@ -2527,26 +2921,79 @@ int ObSelectLogPlan::get_distributed_set_methods(const EqualSets &equal_sets,
     } else if (is_partition_wise) {
       if (left_child.is_exchange_allocated() == right_child.is_exchange_allocated()) {
         set_dist_methods = DistAlgo::DIST_PARTITION_WISE;
+        OPT_TRACE("plan will use partition wise method and prune other method");
       }
     } else {
       set_dist_methods &= ~DistAlgo::DIST_PARTITION_WISE;
+      OPT_TRACE("plan will not use partition wise method");
+    }
+  }
+
+  if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_EXT_PARTITION_WISE)) {
+    OPT_TRACE("check extended partition wise method");
+    bool is_ext_partition_wise = false;
+    if (!left_sharding->is_distributed_without_table_location_with_partitioning() ||
+        !ObShardingInfo::is_shuffled_server_list(left_child.get_server_list()) ||
+        !right_sharding->is_distributed_without_table_location_with_partitioning() ||
+        !ObShardingInfo::is_shuffled_server_list(right_child.get_server_list())) {
+      set_dist_methods &= ~DistAlgo::DIST_EXT_PARTITION_WISE;
+      OPT_TRACE("sharding or exchange is not expected, plan will not use extended partition wise method");
+    } else if (OB_FAIL(ObShardingInfo::check_if_match_extended_partition_wise(equal_sets,
+                                                                       left_child.get_server_list(),
+                                                                       right_child.get_server_list(),
+                                                                       left_set_keys,
+                                                                       right_set_keys,
+                                                                       left_child.get_strong_sharding(),
+                                                                       right_child.get_strong_sharding(),
+                                                                       is_ext_partition_wise))) {
+      LOG_WARN("failed to check if match partition wise join", K(ret));
+    } else if (is_ext_partition_wise) {
+      set_dist_methods = DistAlgo::DIST_EXT_PARTITION_WISE;
+      OPT_TRACE("plan will use extended partition wise method and prune other method");
+    } else {
+      set_dist_methods &= ~DistAlgo::DIST_EXT_PARTITION_WISE;
+      OPT_TRACE("plan will not use extended partition wise method");
     }
   }
 
   if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_PARTITION_NONE)) {
+    OPT_TRACE("check partition none method");
     bool left_match_repart = false;
     if (OB_FAIL(check_if_set_match_repart(equal_sets,
-                                                  left_set_keys,
-                                                  right_set_keys,
-                                                  right_child,
-                                                  left_match_repart))) {
+                                          left_set_keys,
+                                          right_set_keys,
+                                          right_child,
+                                          left_match_repart))) {
       LOG_WARN("failed to check if match repart", K(ret));
     } else if (!left_match_repart) {
       set_dist_methods &= ~DistAlgo::DIST_PARTITION_NONE;
-    } else { /*do nothing*/ }
+      OPT_TRACE("plan will not use partition none method");
+    } else {
+      need_pull_to_local = false;
+      set_dist_methods &= ~DistAlgo::DIST_HASH_NONE;
+      OPT_TRACE("plan will use partition none method");
+    }
   }
 
-  if (OB_SUCC(ret) && (set_dist_methods & DIST_NONE_PARTITION)) {
+  if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_HASH_NONE)) {
+    OPT_TRACE("check hash none method");
+    bool is_match_left_side_hash = false;
+    if (OB_FAIL(check_if_set_match_rehash(equal_sets,
+                                          left_set_keys,
+                                          right_set_keys,
+                                          right_child,
+                                          is_match_left_side_hash))) {
+      LOG_WARN("failed to check if match left side hash", K(ret));
+    } else if (!is_match_left_side_hash) {
+      set_dist_methods &= ~DistAlgo::DIST_HASH_NONE;
+      OPT_TRACE("plan will not use hash none method");
+    } else {
+      OPT_TRACE("plan will use hash none method");
+    }
+  }
+
+  if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_NONE_PARTITION)) {
+    OPT_TRACE("check none partition method");
     bool right_match_repart = false;
     if (OB_FAIL(check_if_set_match_repart(equal_sets,
                                                   right_set_keys,
@@ -2556,14 +3003,40 @@ int ObSelectLogPlan::get_distributed_set_methods(const EqualSets &equal_sets,
       LOG_WARN("failed to check_and_extract_repart_info", K(ret));
     } else if (!right_match_repart) {
       set_dist_methods &= ~DistAlgo::DIST_NONE_PARTITION;
-    } else { /*do nothing*/ }
+      OPT_TRACE("plan will not use none partition method");
+    } else {
+      need_pull_to_local = false;
+      set_dist_methods &= ~DistAlgo::DIST_NONE_HASH;
+      OPT_TRACE("plan will use none partition method");
+    }
   }
 
-  if (OB_SUCC(ret) && (set_dist_methods & DIST_PULL_TO_LOCAL)) {
+  if (OB_SUCC(ret) && (set_dist_methods & DistAlgo::DIST_NONE_HASH)) {
+    OPT_TRACE("check none hash method");
+    bool is_match_right_side_hash = false;
+    if (OB_FAIL(check_if_set_match_rehash(equal_sets,
+                                          left_set_keys,
+                                          right_set_keys,
+                                          left_child,
+                                          is_match_right_side_hash))) {
+      LOG_WARN("failed to check if match left side hash", K(ret));
+    } else if (!is_match_right_side_hash) {
+      set_dist_methods &= ~DistAlgo::DIST_NONE_HASH;
+      OPT_TRACE("plan will not use none hash method");
+    } else {
+      OPT_TRACE("plan will use none hash method");
+    }
+  }
+
+  if (OB_SUCC(ret) && (set_dist_methods & DIST_PULL_TO_LOCAL) && !need_pull_to_local) {
     if ((set_dist_methods & DIST_PARTITION_NONE) ||
         (set_dist_methods & DIST_NONE_PARTITION) ||
-        (set_dist_methods & DIST_HASH_HASH))
-    set_dist_methods &= ~DIST_PULL_TO_LOCAL;
+        (set_dist_methods & DIST_HASH_NONE) ||
+        (set_dist_methods & DIST_NONE_HASH) ||
+        (set_dist_methods & DIST_HASH_HASH)) {
+      set_dist_methods &= ~DIST_PULL_TO_LOCAL;
+      OPT_TRACE("plan will not use pull to local");
+    }
   }
   return ret;
 }
@@ -2579,6 +3052,22 @@ bool ObSelectLogPlan::is_set_partition_wise_valid(const ObLogicalOperator &left_
   return is_valid;
 }
 
+
+bool ObSelectLogPlan::is_set_repart_valid(const ObLogicalOperator &left_plan,
+                                      const ObLogicalOperator &right_plan,
+                                      const DistAlgo dist_algo)
+{
+  bool is_valid = true;
+  if (DistAlgo::DIST_PARTITION_NONE == dist_algo && right_plan.get_contains_pw_merge_op()) {
+    is_valid = true;
+  } else if (DistAlgo::DIST_NONE_PARTITION == dist_algo && left_plan.get_contains_pw_merge_op()) {
+    is_valid = true;
+  } else {
+    is_valid = true;
+  }
+  return is_valid;
+}
+
 int ObSelectLogPlan::check_if_set_match_repart(const EqualSets &equal_sets,
                                                const ObIArray<ObRawExpr *> &src_join_keys,
                                                const ObIArray<ObRawExpr *> &target_join_keys,
@@ -2590,27 +3079,59 @@ int ObSelectLogPlan::check_if_set_match_repart(const EqualSets &equal_sets,
   ObShardingInfo *target_sharding = NULL;
   bool is_base_table_scan = false;
   is_match_repart = false;
-  if (OB_ISNULL(target_sharding = target_child.get_sharding())) {
+  if (NULL == target_child.get_strong_sharding()) {
+    /* do nothing */
+  } else if (OB_ISNULL(target_sharding = target_child.get_sharding())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
   } else if (!target_child.is_distributed() || NULL == target_sharding->get_phy_table_location_info()) {
     /* do nothing */
-  } else if (OB_FAIL(ObLogicalOperator::check_is_table_scan(target_child, is_base_table_scan))) {
-    LOG_WARN("failed to check whether is base table scan", K(ret));
-  } else if (!is_base_table_scan) {
-    /*do nothing*/
   } else if (OB_FAIL(target_sharding->get_all_partition_keys(target_part_keys, true))) {
     LOG_WARN("failed to get partition keys", K(ret));
   } else if (target_part_keys.empty()) {
     /*do nothing*/
-  } else if (OB_FAIL(ObShardingInfo::check_if_match_repart(equal_sets,
-                                                           src_join_keys,
-                                                           target_join_keys,
-                                                           target_part_keys,
-                                                           is_match_repart))) {
+  } else if (OB_FAIL(ObShardingInfo::check_if_match_repart_or_rehash(equal_sets,
+                                                                    src_join_keys,
+                                                                    target_join_keys,
+                                                                    target_part_keys,
+                                                                    is_match_repart))) {
     LOG_WARN("failed to check if match repartition", K(ret));
   } else {
     LOG_TRACE("succeed to check whether matching repartition", K(is_match_repart));
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::check_if_set_match_rehash(const EqualSets &equal_sets,
+                                              const ObIArray<ObRawExpr *> &src_join_keys,
+                                              const ObIArray<ObRawExpr *> &target_join_keys,
+                                              const ObLogicalOperator &target_child,
+                                              bool &is_match_single_side_hash)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObRawExpr*, 8> target_part_keys;
+  ObShardingInfo *target_sharding = NULL;
+  is_match_single_side_hash = false;
+  if (NULL == target_child.get_strong_sharding()) {
+    /* do nothing */
+  } else if (OB_ISNULL(target_sharding = target_child.get_sharding())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (!target_sharding->is_distributed_without_table_location() ||
+             !ObShardingInfo::is_shuffled_server_list(target_child.get_server_list())) {
+    /* do nothing */
+  } else if (OB_FAIL(target_sharding->get_all_partition_keys(target_part_keys, true))) {
+    LOG_WARN("failed to get partition keys", K(ret));
+  } else if (target_part_keys.empty()) {
+    /* do nothing */
+  } else if (OB_FAIL(ObShardingInfo::check_if_match_repart_or_rehash(equal_sets,
+                                                                    src_join_keys,
+                                                                    target_join_keys,
+                                                                    target_part_keys,
+                                                                    is_match_single_side_hash))) {
+    LOG_WARN("failed to check if set match single side hash", K(ret));
+  } else {
+    LOG_TRACE("succeed to check whether set matching single side hash", K(is_match_single_side_hash));
   }
   return ret;
 }
@@ -2631,7 +3152,9 @@ int ObSelectLogPlan::generate_merge_set_plans(const EqualSets &equal_sets,
   ObSEArray<ObSEArray<MergeKeyInfo*, 8>, 8> left_merge_keys;
   ObSEArray<ObSEArray<MergeKeyInfo*, 8>, 8> right_merge_keys;
   bool force_merge = MERGE_SET == get_log_plan_hint().get_valid_set_algo();
-  bool can_ignore_merge_plan = !(no_hash_plans || (!ignore_hint && force_merge));
+  //if can_ignore_merge_plan = true, need to check sort_order for merge plan
+  bool can_ignore_merge_plan = ((ignore_hint && !no_hash_plans) || (!ignore_hint && !force_merge));
+  OPT_TRACE("start generate merge set plans");
   bool no_swap = false;
   bool swap = false;
   if (OB_FAIL(get_allowed_branch_order(ignore_hint, set_op, no_swap, swap))) {
@@ -2671,6 +3194,7 @@ int ObSelectLogPlan::generate_merge_set_plans(const EqualSets &equal_sets,
                                                             left_candidate_list.at(i),
                                                             right_candidate_list.at(j),
                                                             ignore_hint,
+                                                            can_ignore_merge_plan,
                                                             no_hash_plans,
                                                             merge_set_plans))) {
         LOG_WARN("failed to generate merge set plans", K(ret));
@@ -2682,6 +3206,7 @@ int ObSelectLogPlan::generate_merge_set_plans(const EqualSets &equal_sets,
                                                                 right_candidate_list.at(j),
                                                                 left_candidate_list.at(i),
                                                                 ignore_hint,
+                                                                can_ignore_merge_plan,
                                                                 no_hash_plans,
                                                                 merge_set_plans))) {
         LOG_WARN("failed to inner generate merge set plans", K(ret));
@@ -2699,6 +3224,7 @@ int ObSelectLogPlan::inner_generate_merge_set_plans(const EqualSets &equal_sets,
                                                     ObIArray<CandidatePlan> &left_candidates,
                                                     ObIArray<CandidatePlan> &right_candidates,
                                                     const bool ignore_hint,
+                                                    const bool can_ignore_merge_plan,
                                                     const bool no_hash_plans,
                                                     ObIArray<CandidatePlan> &merge_set_plans)
 {
@@ -2736,30 +3262,31 @@ int ObSelectLogPlan::inner_generate_merge_set_plans(const EqualSets &equal_sets,
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(left_child), K(merge_key), K(ret));
       } else if (merge_key->need_sort_ && !merge_key->order_needed_) {
+        // when merge_plan can not be ignore, need to check merge_key->need_sort_&merge_key->order_needed_s
         // if no further order needed, not generate merge style plan
+        OPT_TRACE("no further order needed, merge set plans is not generated");
+        OPT_TRACE("   can_ignore merge plan", can_ignore_merge_plan);
+        OPT_TRACE("   merge_key need sort", merge_key->need_sort_);
+        OPT_TRACE("   merge_key order is needed", merge_key->order_needed_);
       } else {
         for (int64_t j = DistAlgo::DIST_BASIC_METHOD;
              OB_SUCC(ret) && j <= DistAlgo::DIST_MAX_JOIN_METHOD; j = (j << 1)) {
           if (set_methods & j) {
-            int64_t in_parallel = 0;
             DistAlgo dist_algo = get_dist_algo(j);
-            if (OB_FAIL(ObOptimizerUtil::get_join_style_parallel(
-                                                       get_optimizer_context(),
-                                                       left_child->get_parallel(),
-                                                       right_candidates.at(0).plan_tree_->get_parallel(),
-                                                       dist_algo,
-                                                       in_parallel))) {
-              LOG_WARN("failed to get join style parallel", K(ret));
-            } else if (OB_FAIL(get_minimal_cost_set_plan(in_parallel,
-                                                         *left_child,
-                                                         *merge_key,
-                                                         right_set_keys,
-                                                         right_candidates,
-                                                         dist_algo,
-                                                         best_order_items,
-                                                         right_child,
-                                                         best_need_sort,
-                                                         best_prefix_pos))) {
+            const int64_t in_parallel = ObOptimizerUtil::get_join_style_parallel(left_child->get_parallel(),
+                                                  right_candidates.at(0).plan_tree_->get_parallel(),
+                                                  dist_algo, true);
+            if (OB_FAIL(get_minimal_cost_set_plan(in_parallel,
+                                                  *left_child,
+                                                  *merge_key,
+                                                  right_set_keys,
+                                                  right_candidates,
+                                                  dist_algo,
+                                                  best_order_items,
+                                                  right_child,
+                                                  best_need_sort,
+                                                  best_prefix_pos,
+                                                  can_ignore_merge_plan))) {
               LOG_WARN("failed to get minimal cost set path", K(ret));
             } else if (NULL == right_child) {
               /*do nothing*/
@@ -2800,20 +3327,24 @@ int ObSelectLogPlan::get_minimal_cost_set_plan(const int64_t in_parallel,
                                                ObIArray<OrderItem> &best_order_items,
                                                ObLogicalOperator *&best_plan,
                                                bool &best_need_sort,
-                                               int64_t &best_prefix_pos)
+                                               int64_t &best_prefix_pos,
+                                               const bool can_ignore_merge_plan)
 {
   int ret = OB_SUCCESS;
   double best_cost = 0.0;
   double right_path_cost = 0.0;
   int64_t right_prefix_pos = 0;
   bool right_need_sort = false;
-  int64_t out_parallel = 1.0;
+  int64_t out_parallel = ObGlobalHint::UNSET_PARALLEL;
   ObSEArray<ObRawExpr*, 8> right_order_exprs;
   ObSEArray<OrderItem, 8> temp_order_items;
   ObSEArray<OrderItem, 8> right_order_items;
   best_plan = NULL;
   best_need_sort = false;
   best_prefix_pos = 0;
+  EstimateCostInfo info;
+  double right_output_rows = 0.0;
+  double right_orig_cost = 0.0;
   for (int64_t i = 0; OB_SUCC(ret) && i < right_candidates.count(); i++) {
     ObLogicalOperator *right_child = NULL;
     ObLogPlan *right_plan = NULL;
@@ -2827,9 +3358,12 @@ int ObSelectLogPlan::get_minimal_cost_set_plan(const int64_t in_parallel,
     } else if (DistAlgo::DIST_PARTITION_WISE == set_dist_algo &&
                !is_set_partition_wise_valid(left_child, *right_child)) {
       /*do nothing*/
-    } else if (OB_UNLIKELY(out_parallel = right_child->get_parallel()) < 1) {
+    } else if (!is_set_repart_valid(left_child, *right_child, set_dist_algo)) {
+      /*do nothing*/
+    } else if (OB_UNLIKELY(ObGlobalHint::DEFAULT_PARALLEL > (out_parallel = right_child->get_parallel())
+                           || ObGlobalHint::DEFAULT_PARALLEL > in_parallel)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("get unexpected parallel degree", K(ret));
+      LOG_WARN("get unexpected parallel degree", K(ret), K(out_parallel), K(in_parallel));
     } else if (OB_FAIL(ObOptimizerUtil::adjust_exprs_by_mapping(right_set_exprs,
                                                                 left_merge_key.map_array_,
                                                                 right_order_exprs))) {
@@ -2841,6 +3375,7 @@ int ObSelectLogPlan::get_minimal_cost_set_plan(const int64_t in_parallel,
     } else if (OB_FAIL(ObOptimizerUtil::simplify_ordered_exprs(right_child->get_fd_item_set(),
                                                                right_child->get_output_equal_sets(),
                                                                right_child->get_output_const_exprs(),
+                                                               get_onetime_query_refs(),
                                                                temp_order_items,
                                                                right_order_items))) {
       LOG_WARN("failed to simplify ordered exprs", K(ret));
@@ -2849,14 +3384,16 @@ int ObSelectLogPlan::get_minimal_cost_set_plan(const int64_t in_parallel,
                                                         right_child->get_fd_item_set(),
                                                         right_child->get_output_equal_sets(),
                                                         right_child->get_output_const_exprs(),
+                                                        get_onetime_query_refs(),
                                                         right_child->get_is_at_most_one_row(),
                                                         right_need_sort,
                                                         right_prefix_pos))) {
       LOG_WARN("failed to check need sort", K(ret));
     } else if ((DistAlgo::DIST_PARTITION_WISE == set_dist_algo ||
                 DistAlgo::DIST_BASIC_METHOD == set_dist_algo) &&
-                left_merge_key.need_sort_ && right_need_sort) {
-      // do nothing
+                can_ignore_merge_plan && left_merge_key.need_sort_ && right_need_sort) {
+      // when bosh side need sort and merge key order is not needed, do not generer merge set
+      OPT_TRACE("bosh side need sort but merge key order is not needed, merge set plans is not generated");
     } else {
       bool is_fully_partition_wise = DistAlgo::DIST_PARTITION_WISE == set_dist_algo &&
                                      !left_child.is_exchange_allocated() && !right_child->is_exchange_allocated();
@@ -2865,14 +3402,19 @@ int ObSelectLogPlan::get_minimal_cost_set_plan(const int64_t in_parallel,
                                         (*right_child->get_sharding(), set_dist_algo);
       right_plan->get_selectivity_ctx().init_op_ctx(
           &right_child->get_output_equal_sets(), right_child->get_card());
-      if (OB_FAIL(ObOptEstCost::cost_sort_and_exchange(&right_plan->get_update_table_metas(),
+      info.reset();
+      // is single, may allocate exchange above, set need_parallel_ as 1 and compute exchange cost in cost_sort_and_exchange
+      info.need_parallel_ = right_child->is_single() ? ObGlobalHint::DEFAULT_PARALLEL : in_parallel;
+      if (OB_FAIL(right_child->re_est_cost(info, right_output_rows, right_orig_cost))) {
+        LOG_WARN("failed to re estimate cost", K(ret));
+      } else if (OB_FAIL(ObOptEstCost::cost_sort_and_exchange(&right_plan->get_update_table_metas(),
                                                        &right_plan->get_selectivity_ctx(),
                                                        dist_method,
                                                        right_child->is_distributed(),
                                                        is_local_order,
-                                                       right_child->get_card(),
+                                                       right_output_rows,
                                                        right_child->get_width(),
-                                                       right_child->get_cost(),
+                                                       right_orig_cost,
                                                        out_parallel,
                                                        left_child.get_server_cnt(),
                                                        in_parallel,
@@ -2897,6 +3439,156 @@ int ObSelectLogPlan::get_minimal_cost_set_plan(const int64_t in_parallel,
   return ret;
 }
 
+int ObSelectLogPlan::convert_set_order_item(const ObDMLStmt *stmt,
+                                             const ObIArray<ObRawExpr*> &select_exprs,
+                                             ObIArray<OrderItem> &order_items)
+{
+  /*
+  *the output order_items may have following case
+  *  1. select c1,c2,c3 from t1 union select c1,c2,c3 from t2 order by c2,c1,c3
+  *  --> full match, the merge sort key could be [c2,c1,c3]
+  *  2. select c1,c2,c3 from t1 union select c1,c2,c3 from t2 order by c2,c1+c3,c1,
+  *  --> pre match, the merge sort key could use pre match [c2] to adjust its merge sort key as [c2,c1,c3]
+  *  3. select c1,c2,c3 from t1 union select c1,c2,c3 from t2 order by c2,c1+c3,c1,
+  *  --> no match, set order item not match any, merge sort key directly use it child select expr as [c1,c2,c3]
+  */
+  int ret = OB_SUCCESS;
+  bool found = true;
+  ObSEArray<ObRawExpr*, 4> order_exprs;
+  ObSEArray<ObOrderDirection, 2> directions;
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null pointer", K(ret));
+  } else if (OB_UNLIKELY(!(stmt->is_select_stmt() && static_cast<const ObSelectStmt*>(stmt)->is_set_stmt()))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("only use for set stmt to convert its order items expr with child order expr", K(ret));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && found && i < stmt->get_order_items().count(); ++i) {
+      int64_t idx = -1;
+      ObRawExpr *order_expr = NULL;
+      if (OB_ISNULL(order_expr = stmt->get_order_items().at(i).expr_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected null", K(ret), K(stmt->get_order_items().at(i)));
+      } else if (!order_expr->is_set_op_expr()) {
+        found = false;
+      } else if (-1 == (idx = static_cast<ObSetOpRawExpr*>(order_expr)->get_idx())){
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected index", K(idx), K(ret));
+      } else if (OB_FAIL(order_exprs.push_back(select_exprs.at(idx)))){
+        LOG_WARN("fail to push back expr", K(ret));
+      } else if (OB_FAIL(directions.push_back(stmt->get_order_items().at(i).order_type_))) {
+        LOG_WARN("failed to push back", K(ret));
+      }
+    }
+    if (OB_FAIL(ret)) {
+      //do nothing
+    } else if (OB_FAIL(ObOptimizerUtil::make_sort_keys(order_exprs, directions, order_items))) {
+      LOG_WARN("failed to make sort keys", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::create_merge_set_key(const ObIArray<OrderItem> &set_order_items,
+                                          const ObIArray<ObRawExpr*> &merge_exprs,
+                                          const EqualSets &equal_sets,
+                                          MergeKeyInfo &merge_key)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObRawExpr*, 2> sort_exprs;
+  ObSEArray<ObOrderDirection, 2> directions;
+  ObSEArray<int64_t, 2> sort_map;
+  if (sort_exprs.empty() && !set_order_items.empty()) {
+    // find direction in order by exprs
+    if (OB_FAIL(ObOptimizerUtil::create_interesting_merge_key(merge_exprs, set_order_items, equal_sets, sort_exprs, directions, sort_map))) {
+      LOG_WARN("failed to create interesting key", K(ret));
+    } else {
+      LOG_TRACE("succeed to create merge key use order by items", K(sort_exprs), K(directions));
+    }
+  }
+  if (OB_SUCC(ret) && sort_exprs.empty()) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < merge_exprs.count(); ++i) {
+      if (OB_FAIL(sort_exprs.push_back(merge_exprs.at(i)))) {
+        LOG_WARN("failed to push back", K(ret));
+      } else if (OB_FAIL(directions.push_back(default_asc_direction()))) {
+        LOG_WARN("failed to push back", K(ret));
+      } else if (OB_FAIL(sort_map.push_back(i))) {
+        LOG_WARN("failed to push back", K(ret));
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(merge_key.order_exprs_.assign(sort_exprs))) {
+    LOG_WARN("failed to assign exprs", K(ret));
+  } else if (OB_FAIL(merge_key.order_directions_.assign(directions))) {
+    LOG_WARN("failed to assign exprs", K(ret));
+  } else if (OB_FAIL(merge_key.map_array_.assign(sort_map))) {
+    LOG_WARN("failed to assign exprs", K(ret));
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::decide_merge_set_sort_key(const ObIArray<OrderItem> &set_order_items,
+                                               const ObIArray<OrderItem> &input_ordering,
+                                               const ObFdItemSet &fd_item_set,
+                                               const EqualSets &equal_sets,
+                                               const ObIArray<ObRawExpr*> &const_exprs,
+                                               const ObIArray<ObRawExpr*> &exec_ref_exprs,
+                                               const bool is_at_most_one_row,
+                                               const ObIArray<ObRawExpr*> &merge_exprs,
+                                               const ObIArray<ObOrderDirection> &default_directions,
+                                               MergeKeyInfo &merge_key)
+{
+  int ret = OB_SUCCESS;
+  int64_t prefix_count = -1;
+  bool input_ordering_all_used = false;
+  ObSEArray<OrderItem, 8> order_items;
+  ObSEArray<OrderItem, 8> final_items;
+  if (OB_FAIL(merge_key.order_exprs_.assign(merge_exprs))) {
+    LOG_WARN("failed to assign exprs", K(ret));
+  } else if (OB_FAIL(merge_key.order_directions_.assign(default_directions))) {
+    LOG_WARN("failed to assign exprs", K(ret));
+  } else if (OB_FAIL(ObOptimizerUtil::adjust_exprs_by_ordering(merge_key.order_exprs_,
+                                                               input_ordering,
+                                                               equal_sets,
+                                                               const_exprs,
+                                                               exec_ref_exprs,
+                                                               prefix_count,
+                                                               input_ordering_all_used,
+                                                               merge_key.order_directions_,
+                                                               &merge_key.map_array_))) {
+    LOG_WARN("failed to adjust expr by ordering", K(ret));
+  } else if (!input_ordering_all_used && prefix_count <= 0 && OB_FAIL(create_merge_set_key(set_order_items, merge_exprs, equal_sets, merge_key))) {
+    LOG_WARN("failed to create merge set key", K(ret));
+  } else if (OB_FAIL(ObOptimizerUtil::make_sort_keys(merge_key.order_exprs_,
+                                              merge_key.order_directions_,
+                                              order_items))) {
+    LOG_WARN("failed to make sort keys", K(ret));
+  } else if (OB_FAIL(ObOptimizerUtil::simplify_ordered_exprs(fd_item_set,
+                                                             equal_sets,
+                                                             const_exprs,
+                                                             exec_ref_exprs,
+                                                             order_items,
+                                                             final_items))) {
+    LOG_WARN("failed to simply ordered exprs", K(ret));
+  } else if (OB_FAIL(merge_key.order_items_.assign(final_items))) {
+    LOG_WARN("failed to assign final items", K(ret));
+  } else if (input_ordering_all_used) {
+    merge_key.need_sort_ = false;
+  } else if (OB_FAIL(ObOptimizerUtil::check_need_sort(merge_key.order_items_,
+                                                    input_ordering,
+                                                    fd_item_set,
+                                                    equal_sets,
+                                                    const_exprs,
+                                                    exec_ref_exprs,
+                                                    is_at_most_one_row,
+                                                    merge_key.need_sort_,
+                                                    merge_key.prefix_pos_))) {
+    LOG_WARN("failed to check need sort", K(ret));
+  }
+  return ret;
+}
+
 int ObSelectLogPlan::init_merge_set_structure(ObIAllocator &allocator,
                                               const ObIArray<CandidatePlan> &plans,
                                               const ObIArray<ObRawExpr*> &select_exprs,
@@ -2908,8 +3600,10 @@ int ObSelectLogPlan::init_merge_set_structure(ObIAllocator &allocator,
   ObSEArray<ObOrderDirection, 8> default_directions;
   MergeKeyInfo *interesting_key = NULL;
   MergeKeyInfo *merge_key = NULL;
-  int64_t interesting_order_info = OrderingFlag::NOT_MATCH;
-  if (OB_FAIL(ObOptimizerUtil::get_default_directions(select_exprs.count(), default_directions))) {
+  ObSEArray<OrderItem, 8> order_items;
+  if (OB_FAIL(convert_set_order_item(get_stmt(), select_exprs, order_items))) {
+    LOG_WARN("failed to convert order item", K(ret));
+  } else if (OB_FAIL(ObOptimizerUtil::get_default_directions(select_exprs.count(), default_directions))) {
     LOG_WARN("failed to get default directions", K(ret));
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < plans.count(); ++i) {
@@ -2921,34 +3615,30 @@ int ObSelectLogPlan::init_merge_set_structure(ObIAllocator &allocator,
       LOG_WARN("get unexpected null", K(ret), K(child));
     } else if (OB_FALSE_IT(merge_key = new (merge_key) MergeKeyInfo(allocator,
                                                                     select_exprs.count()))) {
-    /* get_equal_sets() is empty before compute_property,
-       can not get a valid interesting key from set order items */
-    } else if (OB_FAIL(ObOptimizerUtil::decide_sort_keys_for_merge_style_op(
-                                                    get_stmt(),
-                                                    get_equal_sets(),
-                                                    child->get_op_ordering(),
-                                                    child->get_fd_item_set(),
-                                                    child->get_output_equal_sets(),
-                                                    child->get_output_const_exprs(),
-                                                    child->get_is_at_most_one_row(),
-                                                    select_exprs,
-                                                    default_directions,
-                                                    *merge_key,
-                                                    interesting_key))) {
+    } else if (OB_FAIL(decide_merge_set_sort_key(order_items,
+                                                 child->get_op_ordering(),
+                                                 child->get_fd_item_set(),
+                                                 child->get_output_equal_sets(),
+                                                 child->get_output_const_exprs(),
+                                                 get_onetime_query_refs(),
+                                                 child->get_is_at_most_one_row(),
+                                                 select_exprs,
+                                                 default_directions,
+                                                 *merge_key))) {
       LOG_WARN("failed to decide sort key for merge set", K(ret));
     } else if (OB_FAIL(merge_keys.push_back(merge_key))) {
       LOG_WARN("failed to push back merge key", K(ret));
     } else if (can_ignore_merge_plan) {
-      if (OB_FAIL(ObOptimizerUtil::compute_stmt_interesting_order(merge_key->order_items_,
-                                                    get_stmt(),
-                                                    false,
-                                                    const_cast<EqualSets &>(child->get_output_equal_sets()),
-                                                    child->get_output_const_exprs(),
-                                                    OrderingCheckScope::CHECK_ORDERBY,
-                                                    interesting_order_info))) {
-        LOG_WARN("failed to compute interesting order", K(ret));
-      } else if (OrderingFlag::NOT_MATCH == interesting_order_info) {
+      bool is_match = false;
+      if (OB_FAIL(ObOptimizerUtil::is_order_by_match(order_items,
+                                                     merge_key->order_items_,
+                                                     child->get_output_equal_sets(),
+                                                     child->get_output_const_exprs(),
+                                                     is_match))) {
+        LOG_WARN("failed to check is order by match", K(ret));
+      } else if (!is_match) {
         merge_key->order_needed_ = false;
+        LOG_TRACE("ordering is not math order by");
       }
     }
   }
@@ -3062,6 +3752,7 @@ int ObSelectLogPlan::generate_hash_set_plans(const EqualSets &equal_sets,
                                              ObIArray<CandidatePlan> &hash_set_plans)
 {
   int ret = OB_SUCCESS;
+  OPT_TRACE("start generate hash set plans");
   bool no_swap = false;
   bool swap = false;
   if (OB_FAIL(get_allowed_branch_order(ignore_hint, set_op, no_swap, swap))) {
@@ -3128,7 +3819,8 @@ int ObSelectLogPlan::inner_generate_hash_set_plans(const EqualSets &equal_sets,
                OB_SUCC(ret) && k < DistAlgo::DIST_MAX_JOIN_METHOD; k = (k << 1)) {
             DistAlgo dist_algo = get_dist_algo(k);
             if ((set_methods & k) && (DistAlgo::DIST_PARTITION_WISE != dist_algo ||
-                 is_set_partition_wise_valid(*left_best_plan, *right_best_plan))) {
+                 is_set_partition_wise_valid(*left_best_plan, *right_best_plan)) &&
+                 is_set_repart_valid(*left_best_plan, *right_best_plan, dist_algo)) {
               if (OB_FAIL(create_hash_set_plan(equal_sets,
                                                left_best_plan,
                                                right_best_plan,
@@ -3249,10 +3941,12 @@ int ObSelectLogPlan::compute_set_exchange_info(const EqualSets &equal_sets,
                                                ObExchangeInfo &right_exch_info)
 {
   int ret = OB_SUCCESS;
+  const ObLogicalOperator *parallel_source = NULL;
   left_exch_info.dist_method_ = ObPQDistributeMethod::NONE;
   right_exch_info.dist_method_ = ObPQDistributeMethod::NONE;
   if (DistAlgo::DIST_BASIC_METHOD == set_method ||
       DistAlgo::DIST_PARTITION_WISE == set_method ||
+      DistAlgo::DIST_SET_PARTITION_WISE == set_method ||
       DistAlgo::DIST_NONE_ALL == set_method ||
       DistAlgo::DIST_ALL_NONE == set_method) {
     /*do nothing*/
@@ -3264,6 +3958,8 @@ int ObSelectLogPlan::compute_set_exchange_info(const EqualSets &equal_sets,
       right_exch_info.dist_method_ = ObPQDistributeMethod::LOCAL;
     }
   } else if (DistAlgo::DIST_HASH_HASH == set_method) {
+    parallel_source = left_child.get_parallel() > right_child.get_parallel()
+                      ? &left_child : &right_child;
     ObShardingInfo *sharding_info = NULL;
     if (OB_FAIL(compute_set_hash_hash_sharding(equal_sets,
                                                left_set_keys,
@@ -3283,7 +3979,75 @@ int ObSelectLogPlan::compute_set_exchange_info(const EqualSets &equal_sets,
       right_exch_info.strong_sharding_ = sharding_info;
       right_exch_info.dist_method_ = ObPQDistributeMethod::HASH;
     }
+  } else if (DistAlgo::DIST_HASH_NONE == set_method) {
+    parallel_source = &right_child;
+    if (OB_FAIL(compute_single_side_hash_distribution_info(equal_sets,
+                                                          left_set_keys,
+                                                          right_set_keys,
+                                                          right_child,
+                                                          left_exch_info))) {
+      LOG_WARN("failed to compute repartition distribution info", K(ret));
+    } else if (ObSelectStmt::SetOperator::UNION == set_op ||
+               ObSelectStmt::SetOperator::EXCEPT == set_op) {
+      ObPQDistributeMethod::Type dist_method = ObPQDistributeMethod::RANDOM;
+      bool is_unique = false;
+      if (OB_FAIL(ObOptimizerUtil::is_exprs_unique(left_set_keys,
+                                              left_child.get_table_set(),
+                                              left_child.get_fd_item_set(),
+                                              left_child.get_output_equal_sets(),
+                                              left_child.get_output_const_exprs(),
+                                              is_unique))) {
+        LOG_WARN("failed to check is left unique", K(ret));
+      } else if (!is_unique) {
+        dist_method = ObPQDistributeMethod::HASH;
+      }
+      if (OB_SUCC(ret)) {
+        left_exch_info.unmatch_row_dist_method_ = dist_method;
+        left_exch_info.strong_sharding_ = get_optimizer_context().get_distributed_sharding();
+      }
+    } else {
+      if (OB_FAIL(left_exch_info.weak_sharding_.assign(right_child.get_weak_sharding()))) {
+        LOG_WARN("failed to assign weak sharding", K(ret));
+      } else {
+        left_exch_info.unmatch_row_dist_method_ = ObPQDistributeMethod::DROP;
+        left_exch_info.strong_sharding_ = right_child.get_strong_sharding();
+      }
+    }
+  } else if (DistAlgo::DIST_NONE_HASH == set_method) {
+    parallel_source = &left_child;
+    if (OB_FAIL(compute_single_side_hash_distribution_info(equal_sets,
+                                                           right_set_keys,
+                                                           left_set_keys,
+                                                           left_child,
+                                                           right_exch_info))) {
+      LOG_WARN("failed to compute repartition distribution info", K(ret));
+    } else if (ObSelectStmt::SetOperator::UNION == set_op) {
+      ObPQDistributeMethod::Type dist_method = ObPQDistributeMethod::RANDOM;
+      bool is_unique = false;
+      if (OB_FAIL(ObOptimizerUtil::is_exprs_unique(right_set_keys,
+                                              right_child.get_table_set(),
+                                              right_child.get_fd_item_set(),
+                                              right_child.get_output_equal_sets(),
+                                              right_child.get_output_const_exprs(),
+                                              is_unique))) {
+        LOG_WARN("failed to check is right unique", K(ret));
+      } else if (!is_unique) {
+        dist_method = ObPQDistributeMethod::HASH;
+      }
+      if (OB_SUCC(ret)) {
+        right_exch_info.unmatch_row_dist_method_ = dist_method;
+        right_exch_info.strong_sharding_ = get_optimizer_context().get_distributed_sharding();
+      }
+    } else {
+      if (OB_FAIL(right_exch_info.weak_sharding_.assign(left_child.get_weak_sharding()))) {
+        LOG_WARN("failed to assign weak sharding", K(ret));
+      } else {
+        right_exch_info.unmatch_row_dist_method_ = ObPQDistributeMethod::DROP;
+        right_exch_info.strong_sharding_ = left_child.get_strong_sharding();
+      }
+    }
   } else if (DistAlgo::DIST_PARTITION_NONE == set_method) {
+    parallel_source = &right_child;
     if (OB_FAIL(compute_repartition_distribution_info(equal_sets,
                                                       left_set_keys,
                                                       right_set_keys,
@@ -3320,6 +4084,7 @@ int ObSelectLogPlan::compute_set_exchange_info(const EqualSets &equal_sets,
       }
     }
   } else if (DistAlgo::DIST_NONE_PARTITION == set_method) {
+    parallel_source = &left_child;
     if (OB_FAIL(compute_repartition_distribution_info(equal_sets,
                                                       right_set_keys,
                                                       left_set_keys,
@@ -3358,6 +4123,17 @@ int ObSelectLogPlan::compute_set_exchange_info(const EqualSets &equal_sets,
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
   }
+
+  if (OB_FAIL(ret) || NULL == parallel_source) {
+  } else if (OB_FAIL(left_exch_info.server_list_.assign(parallel_source->get_server_list()))
+             || OB_FAIL(right_exch_info.server_list_.assign(parallel_source->get_server_list()))) {
+    LOG_WARN("failed to assign server list", K(ret));
+  } else {
+    left_exch_info.parallel_ = parallel_source->get_parallel();
+    left_exch_info.server_cnt_ = parallel_source->get_server_cnt();
+    right_exch_info.parallel_ = parallel_source->get_parallel();
+    right_exch_info.server_cnt_ = parallel_source->get_server_cnt();
+  }
   return ret;
 }
 
@@ -3391,10 +4167,11 @@ int ObSelectLogPlan::compute_set_hash_hash_sharding(const EqualSets &equal_sets,
   return ret;
 }
 
-int ObSelectLogPlan::generate_raw_plan()
+int ObSelectLogPlan::generate_normal_raw_plan()
 {
   int ret = OB_SUCCESS;
   const ObSelectStmt *select_stmt = get_stmt();
+  OPT_TRACE("generate plan for ", select_stmt);
   if (OB_ISNULL(select_stmt)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
@@ -3404,6 +4181,104 @@ int ObSelectLogPlan::generate_raw_plan()
     ret = generate_raw_plan_for_expr_values();
   } else {
     ret = SMART_CALL(generate_raw_plan_for_plain_select());
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::generate_dblink_raw_plan()
+{
+  int ret = OB_SUCCESS;
+  ObQueryCtx *query_ctx = NULL;
+  // dblink_info hint
+  int64_t tx_id = -1;
+  int64_t tm_sessid = -1;
+  uint64_t dblink_id = OB_INVALID_ID;
+  const ObSelectStmt *stmt = get_stmt();
+  ObLogicalOperator *top = NULL;
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null ptr", K(ret));
+  } else if (NULL == (query_ctx = stmt->get_query_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (FALSE_IT(dblink_id = stmt->get_dblink_id())) {
+  } else if (0 == dblink_id) { //dblink id = 0 means @!/@xxxx!
+    ObSQLSessionInfo *session = get_optimizer_context().get_session_info();
+    oceanbase::sql::ObReverseLink *reverse_dblink_info = NULL;
+    if (NULL == session) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected null", K(ret), KP(session));
+    } else if (OB_FAIL(session->get_dblink_context().get_reverse_link(reverse_dblink_info))) {
+      LOG_WARN("failed to get reverse link info from session", K(ret), K(session->get_sessid()));
+    } else if (NULL == reverse_dblink_info) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected null", K(ret));
+    } else {
+      // set dblink_info, to unparse a link sql with dblink_info hint
+      query_ctx->get_query_hint_for_update().get_global_hint().merge_dblink_info_hint(
+                                                    reverse_dblink_info->get_tx_id(),
+                                                    reverse_dblink_info->get_tm_sessid());
+      LOG_DEBUG("set tx_id_ and tm_sessid to stmt",
+                                                    K(reverse_dblink_info->get_tx_id()),
+                                                    K(reverse_dblink_info->get_tm_sessid()));
+    }
+  } else {
+    // save dblink_info hint
+    tx_id = query_ctx->get_query_hint_for_update().get_global_hint().get_dblink_tx_id_hint();
+    tm_sessid = query_ctx->get_query_hint_for_update().get_global_hint().get_dblink_tm_sessid_hint();
+    // reset dblink hint, to unparse a link sql without dblink_info hint
+    query_ctx->get_query_hint_for_update().get_global_hint().reset_dblink_info_hint();
+  }
+  if (OB_FAIL(ret)) {
+    //do nothing
+  } else if (OB_FAIL(allocate_link_scan_as_top(top))) {
+    LOG_WARN("failed to allocate link dml as top", K(ret));
+  } else {
+    top->set_dblink_id(dblink_id);
+    ObLogLinkScan *link_scan = static_cast<ObLogLinkScan *>(top);
+    if (OB_FAIL(link_scan->set_link_stmt(stmt))) {
+      LOG_WARN("failed to set link stmt", K(ret));
+    } else if (0 == dblink_id) {
+      link_scan->set_reverse_link(true);
+    }
+  }
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else if (optimizer_context_.has_multiple_link_stmt()
+             && OB_FAIL(allocate_material_as_top(top))) {
+    LOG_WARN("allocate material above link scan failed", K(ret));
+  } else if (OB_FAIL(make_candidate_plans(top))) {
+    LOG_WARN("failed to make candidate plans", K(ret));
+  } else {
+    top->mark_is_plan_root();
+    top->get_plan()->set_plan_root(top);
+    if (0 == dblink_id) {
+      // reset dblink info, to avoid affecting the next execution flow
+      query_ctx->get_query_hint_for_update().get_global_hint().reset_dblink_info_hint();
+    } else {
+      // restore dblink_info hint, ensure that the next execution process can get the correct dblink_info
+      query_ctx->get_query_hint_for_update().get_global_hint().merge_dblink_info_hint(tx_id, tm_sessid);
+    }
+    LOG_TRACE("succeed to allocate loglinkscan", K(dblink_id));
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::allocate_link_scan_as_top(ObLogicalOperator *&old_top)
+{
+  int ret = OB_SUCCESS;
+  ObLogLinkScan *link_scan = NULL;
+  if (NULL != old_top) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("old_top should be null", K(ret), K(get_stmt()));
+  } else if (OB_ISNULL(link_scan = static_cast<ObLogLinkScan *>(get_log_op_factory().
+                                  allocate(*this, LOG_LINK_SCAN)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("failed to allocate link dml operator", K(ret));
+  } else if (OB_FAIL(link_scan->compute_property())) {
+    LOG_WARN("failed to compute property", K(ret));
+  } else {
+    old_top = link_scan;
   }
   return ret;
 }
@@ -3607,21 +4482,15 @@ int ObSelectLogPlan::allocate_plan_top()
       }
     }
 
-    //allocate temp-table transformation if needed.
-    if (OB_SUCC(ret) && !get_optimizer_context().get_temp_table_infos().empty() && is_final_root_plan()) {
-      if (OB_FAIL(candi_allocate_temp_table_transformation())) {
-        LOG_WARN("failed to allocate transformation operator", K(ret));
-      } else {
-        LOG_TRACE("succeed to allocate temp-table transformation",
-            K(candidates_.candidate_plans_.count()));
-      }
-    }
-
     // allocate root exchange
     if (OB_SUCC(ret) && is_final_root_plan()) {
       // allocate material if there is for update.
-      if (optimizer_context_.has_for_update() && OB_FAIL(candi_allocate_material())) {
+      if (optimizer_context_.has_for_update() && OB_FAIL(candi_allocate_for_update_material())) {
         LOG_WARN("failed to allocate material", K(ret));
+        //allocate temp-table transformation if needed.
+      } else if (!get_optimizer_context().get_temp_table_infos().empty() &&
+                 OB_FAIL(candi_allocate_temp_table_transformation())) {
+        LOG_WARN("failed to allocate transformation operator", K(ret));
       } else if (OB_FAIL(candi_allocate_root_exchange())) {
         LOG_WARN("failed to allocate root exchange", K(ret));
       } else {
@@ -3709,8 +4578,7 @@ int ObSelectLogPlan::candi_allocate_subplan_filter_for_select_item()
   } else if (OB_FAIL(candi_allocate_subplan_filter(subquery_exprs))) {
     LOG_WARN("failed to allocate subplan filter for select item", K(ret));
   } else {
-    LOG_TRACE("succeed to allocate subplan filter for select item",
-        K(select_stmt->get_current_level()));
+    LOG_TRACE("succeed to allocate subplan filter for select item", K(select_stmt->get_stmt_id()));
   }
   return ret;
 }
@@ -3718,10 +4586,13 @@ int ObSelectLogPlan::candi_allocate_subplan_filter_for_select_item()
 int ObSelectLogPlan::generate_child_plan_for_set(const ObDMLStmt *sub_stmt,
                                                  ObSelectLogPlan *&sub_plan,
                                                  ObIArray<ObRawExpr*> &pushdown_filters,
-                                                 const uint64_t child_offset)
+                                                 const uint64_t child_offset,
+                                                 const bool is_set_distinct)
 {
   int ret = OB_SUCCESS;
   sub_plan = NULL;
+  OPT_TRACE_BEGIN_SECTION;
+  OPT_TRACE_TITLE("start generate child plan for set");
   if (OB_ISNULL(sub_stmt)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("sub_stmt is null", K(ret), K(sub_stmt));
@@ -3730,15 +4601,17 @@ int ObSelectLogPlan::generate_child_plan_for_set(const ObDMLStmt *sub_stmt,
                                                                          *sub_stmt)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("Failed to create logcial plan", K(sub_plan), K(ret));
+  } else if (FALSE_IT(sub_plan->set_is_parent_set_distinct(is_set_distinct))) {
+    // do nothing
   } else if (OB_FAIL(sub_plan->add_pushdown_filters(pushdown_filters))) {
     LOG_WARN("failed to add pushdown filters", K(ret));
-  } else if (OB_FAIL(sub_plan->init_plan_info())) {
-    LOG_WARN("failed to init equal sets", K(ret));
   } else if (OB_FAIL(sub_plan->generate_raw_plan())) {
     LOG_WARN("Failed to generate plan for sub_stmt", K(ret));
   } else if (OB_FAIL(init_selectivity_metas_for_set(sub_plan, child_offset))) {
     LOG_WARN("failed to init selectivity metas for set", K(ret));
   }
+  OPT_TRACE_TITLE("end generate child plan for set");
+  OPT_TRACE_END_SECTION;
   return ret;
 }
 
@@ -3793,6 +4666,7 @@ int ObSelectLogPlan::decide_sort_keys_for_runion(const common::ObIArray<OrderIte
       if (OB_FAIL(ObOptimizerUtil::simplify_ordered_exprs(best_plan->get_fd_item_set(),
                                                           best_plan->get_output_equal_sets(),
                                                           best_plan->get_output_const_exprs(),
+                                                          get_onetime_query_refs(),
                                                           candi_order_items,
                                                           new_order_items))) {
         LOG_WARN("failed to simplify exprs", K(ret));
@@ -3807,6 +4681,7 @@ int ObSelectLogPlan::candi_allocate_window_function()
   int ret = OB_SUCCESS;
   const ObSelectStmt *stmt = get_stmt();
   ObSEArray<ObRawExpr*, 8> candi_subquery_exprs;
+  ObRawExpr *wf_aggr_status_expr = NULL;
   if (OB_ISNULL(stmt)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("stmt is NULL", K(ret));
@@ -3816,10 +4691,17 @@ int ObSelectLogPlan::candi_allocate_window_function()
     LOG_WARN("failed to do allocate subplan filter", K(ret));
   } else if (stmt->get_window_func_count() > 0) {
     ObSEArray<CandidatePlan, 8> winfunc_plans;
+    if (OB_FAIL(ObRawExprUtils::build_inner_wf_aggr_status_expr(
+                                get_optimizer_context().get_expr_factory(),
+                                *get_optimizer_context().get_session_info(),
+                                wf_aggr_status_expr))) {
+      LOG_WARN("build_inner_wf_aggr_status_expr failed", K(ret));
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < candidates_.candidate_plans_.count(); ++i) {
       if (OB_FAIL(generate_window_functions_plan(stmt->get_window_func_exprs(),
-                                                 winfunc_plans,
-                                                 candidates_.candidate_plans_.at(i)))) {
+                  static_cast<ObOpPseudoColumnRawExpr *>(wf_aggr_status_expr),
+                  winfunc_plans,
+                  candidates_.candidate_plans_.at(i)))) {
         LOG_WARN("failed to allocate window functions", K(ret));
       } else { /*do nothing*/ }
     }
@@ -3839,6 +4721,7 @@ int ObSelectLogPlan::candi_allocate_window_function()
 }
 
 int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawExpr *> &winfunc_exprs,
+                                                    ObOpPseudoColumnRawExpr *wf_aggr_status_expr,
                                                     common::ObIArray<CandidatePlan> &total_plans,
                                                     CandidatePlan &orig_candidate_plan)
 {
@@ -3878,17 +4761,28 @@ int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawEx
         } else {
           ObSEArray<int64_t, 8> split;
           ObSEArray<WinDistAlgo, 8> methods;
-          if (distributed) {
-            if (OB_FAIL(split_winfuncs_by_dist_method(local_plans.at(0).plan_tree_,
+          ObSEArray<double, 8> sort_key_ndvs;
+          ObSEArray<std::pair<int64_t, int64_t>, 8> pby_oby_prefixes;
+          bool has_non_parallel_wf = false;
+          if (OB_FAIL(prepare_for_split_winfuncs(
+                local_plans.at(0).plan_tree_, adjusted_winfunc_exprs, current_sort_keys,
+                sort_key_ndvs, pby_oby_prefixes))) {
+            LOG_WARN("prepare_for_split_winfuncs failed", K(ret));
+          } else if (distributed &&
+                     OB_FAIL(split_winfuncs_by_dist_method(local_plans.at(0).plan_tree_,
                                                       adjusted_winfunc_exprs,
                                                       remaining_exprs,
-                                                      current_sort_keys,
                                                       stmt_func_idx,
+                                                      sort_key_ndvs,
+                                                      pby_oby_prefixes,
                                                       split,
-                                                      methods))) {
-              LOG_WARN("split window function by distribute method failed", K(ret));
-            }
-          } else {
+                                                      methods,
+                                                      has_non_parallel_wf))) {
+            // split the window function expressions of one group (group is detected by get_next_group_window_exprs()) into multi window function operator by distribute method (HASH or RANGE)
+            LOG_WARN("split window function by distribute method failed", K(ret));
+          } else if (!distributed || has_non_parallel_wf) {
+            split.reuse();
+            methods.reuse();
             if (OB_FAIL(split.push_back(adjusted_winfunc_exprs.count()))
                 || OB_FAIL(methods.push_back(WinDistAlgo::NONE))) {
               LOG_WARN("array push back failed", K(ret));
@@ -3900,13 +4794,32 @@ int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawEx
             ObArrayHelper<ObWinFunRawExpr *> winfuncs(end - start,
                                                       &adjusted_winfunc_exprs.at(start),
                                                       end - start);
-            start = end;
-            stmt_func_idx++;
             const WinDistAlgo method = methods.at(si);
-            if (OB_FAIL(dist_methods.push_back(methods.at(si)))) {
-              LOG_WARN("array push back failed", K(ret));
+            bool is_pushdown = false;
+            ObArray<bool> pushdown_info;
+            ObSEArray<ObRawExpr*, 8> partition_exprs;
+            if (distributed) {
+              ObArrayHelper<std::pair<int64_t, int64_t>> splitted_pby_oby_prefixes(
+                                                        end - start,
+                                                        &pby_oby_prefixes.at(start),
+                                                        end - start);
+              for (int64_t i = 0; OB_SUCC(ret) && i < winfuncs.count(); ++i) {
+                if (OB_FAIL(pushdown_info.push_back(false))) {
+                  LOG_WARN("push_back to push_down_array failed", K(ret));
+                }
+              }
+              if (OB_FAIL(ret)) {
+              } else if (OB_FAIL(check_winfunc_pushdown(local_plans.at(0).plan_tree_, winfuncs, method,
+                  sort_key_ndvs, splitted_pby_oby_prefixes, is_pushdown, pushdown_info))) {
+                LOG_WARN("check_winfunc_pushdown failed", K(ret));
+              }
             }
-
+            if (OB_FAIL(ret)) {
+            } else if (OB_FAIL(dist_methods.push_back(methods.at(si)))) {
+              LOG_WARN("array push back failed", K(ret));
+            } else if (OB_FAIL(get_window_function_partition_exprs(winfuncs, partition_exprs))) {
+              LOG_WARN("failed to get partition exprs", K(ret));
+            }
             FOREACH_X(plan, local_plans, OB_SUCC(ret)) {
               CandidatePlan merge_plan = *plan;
               CandidatePlan hash_plan = *plan;
@@ -3914,7 +4827,6 @@ int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawEx
               int64_t part_cnt = 0;
               int64_t prefix_pos = 0;
               bool need_sort = false;
-              ObSEArray<ObRawExpr*, 8> partition_exprs;
               if (NULL == top) {
                 ret = OB_ERR_UNEXPECTED;
                 LOG_WARN("got NULL plan tree", K(ret));
@@ -3923,20 +4835,41 @@ int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawEx
                                                                   top->get_fd_item_set(),
                                                                   top->get_output_equal_sets(),
                                                                   top->get_output_const_exprs(),
+                                                                  get_onetime_query_refs(),
                                                                   top->get_is_at_most_one_row(),
                                                                   need_sort,
                                                                   prefix_pos))) {
                 LOG_WARN("failed to check need sort", K(ret));
-              } else if (OB_FAIL(get_window_function_partition_exprs(
-                          winfuncs, partition_exprs))) {
-                LOG_WARN("failed to get partition exprs", K(ret));
-              } else if (OB_FAIL(ObOptimizerUtil::get_partition_count(
-                          top, partition_exprs, prefix_pos, part_cnt))) {
+              } else if (OB_FAIL(get_partition_count(pby_oby_prefixes,
+                                                     start,
+                                                     end,
+                                                     partition_exprs,
+                                                     prefix_pos,
+                                                     part_cnt))) {
                 LOG_WARN("failed to get partition count", K(ret));
+              } else if (need_sort && part_cnt > 0 &&
+                         OB_FAIL(ObOptimizerUtil::check_need_sort(current_sort_keys,
+                                                                  top->get_op_ordering(),
+                                                                  top->get_fd_item_set(),
+                                                                  top->get_output_equal_sets(),
+                                                                  top->get_output_const_exprs(),
+                                                                  get_onetime_query_refs(),
+                                                                  top->get_is_at_most_one_row(),
+                                                                  need_sort,
+                                                                  prefix_pos,
+                                                                  part_cnt))) {
+                LOG_WARN("failed to check need sort", K(ret));
               } else if (OB_FAIL(create_merge_window_function_plan(merge_plan.plan_tree_,
                                                                   winfuncs,
                                                                   current_sort_keys,
-                                                                  method))) {
+                                                                  partition_exprs,
+                                                                  method,
+                                                                  is_pushdown,
+                                                                  wf_aggr_status_expr,
+                                                                  pushdown_info,
+                                                                  need_sort,
+                                                                  prefix_pos,
+                                                                  part_cnt))) {
                 LOG_WARN("create merge window functions plan failed", K(ret));
               } else if (OB_FAIL(tmp_plans.push_back(merge_plan))) {
                 LOG_WARN("array push back failed", K(ret));
@@ -3946,7 +4879,10 @@ int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawEx
                                                              winfuncs,
                                                              current_sort_keys,
                                                              partition_exprs,
-                                                             part_cnt))) {
+                                                             part_cnt,
+                                                             is_pushdown,
+                                                             wf_aggr_status_expr,
+                                                             pushdown_info))) {
                   LOG_WARN("failed to create hash window function plan", K(ret));
                 } else if (OB_FAIL(tmp_plans.push_back(hash_plan))) {
                   LOG_WARN("array push back failed", K(ret));
@@ -3958,6 +4894,8 @@ int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawEx
                 LOG_WARN("array assign failed", K(ret));
               } else {
                 tmp_plans.reuse();
+                start = end;
+                stmt_func_idx++;
               }
             }
           }
@@ -3986,6 +4924,34 @@ int ObSelectLogPlan::generate_window_functions_plan(const ObIArray<ObWinFunRawEx
             }
           }
         }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::get_partition_count(const ObSEArray<std::pair<int64_t, int64_t>, 8> pby_oby_prefixes,
+                                         const int64_t start,
+                                         const int64_t end,
+                                         const ObIArray<ObRawExpr*> &partition_exprs,
+                                         const int64_t prefix_pos,
+                                         int64_t &part_cnt)
+{
+  int ret = OB_SUCCESS;
+  part_cnt = 0;
+  if (OB_UNLIKELY(pby_oby_prefixes.empty())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get empty pby_oby_prefixes", K(ret), K(pby_oby_prefixes.count()));
+  } else if (prefix_pos > 0 || partition_exprs.empty()) {
+    part_cnt = 0;
+  } else if (OB_UNLIKELY(start < 0 || end > pby_oby_prefixes.count() || start >= end)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected pby_oby_prefixes count ", K(ret), K(start), K(end), K(pby_oby_prefixes.count()));
+  } else {
+    part_cnt = pby_oby_prefixes.at(start).first;
+    for (int64_t i = start + 1; OB_SUCC(ret) && i < end; ++i) {
+      if (pby_oby_prefixes.at(i).first < part_cnt) {
+        part_cnt = pby_oby_prefixes.at(i).first;
       }
     }
   }
@@ -4039,6 +5005,7 @@ int ObSelectLogPlan::get_next_group_window_exprs(const ObLogicalOperator *top,
                                                           top->get_fd_item_set(),
                                                           top->get_output_equal_sets(),
                                                           top->get_output_const_exprs(),
+                                                          get_onetime_query_refs(),
                                                           top->get_is_at_most_one_row(),
                                                           need_sort,
                                                           prefix_pos))) {
@@ -4112,6 +5079,7 @@ int ObSelectLogPlan::get_sort_keys_for_window_function(const ObLogicalOperator *
                                                                ordering,
                                                                top->get_output_equal_sets(),
                                                                top->get_output_const_exprs(),
+                                                               get_onetime_query_refs(),
                                                                prefix_count,
                                                                input_ordering_all_used,
                                                                part_directions))) {
@@ -4123,10 +5091,11 @@ int ObSelectLogPlan::get_sort_keys_for_window_function(const ObLogicalOperator *
   } else {
     if (NULL != pby_prefix) {
       if (OB_FAIL(ObOptimizerUtil::simplify_ordered_exprs(top->get_fd_item_set(),
-                                                             top->get_output_equal_sets(),
-                                                             top->get_output_const_exprs(),
-                                                             output_sort_keys,
-                                                             sort_keys))) {
+                                                          top->get_output_equal_sets(),
+                                                          top->get_output_const_exprs(),
+                                                          get_onetime_query_refs(),
+                                                          output_sort_keys,
+                                                          sort_keys))) {
         LOG_WARN("failed to simplify ordered exprs", K(ret));
       } else {
         *pby_prefix = sort_keys.count();
@@ -4141,6 +5110,7 @@ int ObSelectLogPlan::get_sort_keys_for_window_function(const ObLogicalOperator *
   } else if (OB_FAIL(ObOptimizerUtil::simplify_ordered_exprs(top->get_fd_item_set(),
                                                              top->get_output_equal_sets(),
                                                              top->get_output_const_exprs(),
+                                                             get_onetime_query_refs(),
                                                              output_sort_keys,
                                                              sort_keys))) {
     LOG_WARN("failed to simplify ordered exprs", K(ret));
@@ -4221,44 +5191,109 @@ int ObSelectLogPlan::set_default_sort_directions(const ObIArray<ObWinFunRawExpr*
   return ret;
 }
 
-int ObSelectLogPlan::split_winfuncs_by_dist_method(
-    const ObLogicalOperator *top,
-    const common::ObIArray<ObWinFunRawExpr *> &winfunc_exprs,
-    const common::ObIArray<ObWinFunRawExpr *> &remaining_exprs,
-    const ObIArray<OrderItem> &sort_keys,
-    const int64_t stmt_func_idx,
-    common::ObIArray<int64_t> &split,
-    common::ObIArray<WinDistAlgo> &methods)
+int ObSelectLogPlan::check_winfunc_pushdown(
+    const ObLogicalOperator *top, const common::ObIArray<ObWinFunRawExpr *> &winfunc_exprs,
+    const WinDistAlgo method, const ObIArray<double> &sort_key_ndvs,
+    const ObIArray<std::pair<int64_t, int64_t>> &pby_oby_prefixes,
+    bool &is_pushdown, ObIArray<bool> &pushdown_info)
 {
   int ret = OB_SUCCESS;
-  CK(NULL != top);
-  split.reuse();
-  methods.reuse();
+  is_pushdown = false;
 
-  // Get NDV for each sort_keys prefix first.
-  ObSEArray<double, 8> sort_key_ndvs;
-  ObSEArray<ObRawExpr *, 8> sort_key_exprs;
-  ObSEArray<std::pair<int64_t, int64_t>, 8> pby_oby_prefixes;
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(sort_key_ndvs.prepare_allocate(sort_keys.count()))) {
-      LOG_WARN("array prepare allocate failed", K(ret));
-    } else {
-      for (int64_t i = 0; i < sort_keys.count() && OB_SUCC(ret); i++) {
-        if (OB_FAIL(sort_key_exprs.push_back(sort_keys.at(i).expr_))) {
-          LOG_WARN("array push back failed", K(ret));
-        } else if (OB_FAIL(ObOptSelectivity::calculate_distinct(get_update_table_metas(),
-                                                                get_selectivity_ctx(),
-                                                                sort_key_exprs,
-                                                                top->get_card(),
-                                                                sort_key_ndvs.at(i)))) {
-          LOG_WARN("calculate NDV failed", K(ret));
+  if (OB_ISNULL(top)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("top is null", K(ret));
+  } else if (WinDistAlgo::HASH != method) {
+    is_pushdown = false;
+  } else {
+    const int64_t WF_PBY_DOP_RADIO = 16;
+    const int64_t WF_CARD_DOP_RADIO = 256;
+    const int64_t dop = top->get_parallel();
+    int64_t prev_method = -1;
+    bool prev_pushdown_supported = true;
+    bool all_wf_exprs_reporting = true;
+    // whether has wf exprs which need pushdown in one split group
+    bool has_pushdown_wf_exprs = false;
+    // use _windowfunc_optimization_settings to change win_opt.disable_reporting_wf_pushdown_
+    // set "_windowfunc_optimization_settings" = 0; means enable reporting_wf_pushdown
+    // set "_windowfunc_optimization_settings" = 2; means disable reporting_wf_pushdown
+    ObWinfuncOptimizationOpt win_opt;
+    if (OB_FAIL(optimizer_context_.get_session_info()->get_sys_variable(
+                share::SYS_VAR__WINDOWFUNC_OPTIMIZATION_SETTINGS, win_opt.v_))) {
+      LOG_WARN("get sys variable failed", K(ret));
+    }
+    for (int64_t idx = 0;
+         OB_SUCC(ret) && all_wf_exprs_reporting && idx < winfunc_exprs.count();
+         ++idx) {
+      const int64_t pby_cnt = pby_oby_prefixes.at(idx).first;
+      const int64_t pby_oby_cnt = pby_oby_prefixes.at(idx).second;
+
+      bool pushdown_supported =
+          pby_cnt > 0 && pby_cnt == pby_oby_cnt && !win_opt.disable_reporting_wf_pushdown_;
+      if (OB_FAIL(check_wf_pushdown_supported(winfunc_exprs.at(idx), pushdown_supported))) {
+        LOG_WARN("check window function range distribute parallel supported failed", K(ret));
+      } else {
+        all_wf_exprs_reporting = all_wf_exprs_reporting && pushdown_supported;
+      }
+      if (OB_SUCC(ret) && all_wf_exprs_reporting) {
+        ret = OB_E(EventTable::EN_ENFORCE_PUSH_DOWN_WF) OB_SUCCESS; // 247
+        if (OB_SUCC(ret)) {
+          // caculate whether need to pushdown by NDV and CARD
+          const double pby_ndv = pby_cnt == 0 ? 0 : sort_key_ndvs.at(pby_cnt - 1);
+          if (pby_ndv < WF_PBY_DOP_RADIO * dop
+              && top->get_card() > WF_CARD_DOP_RADIO * dop) {
+            pushdown_info.at(idx) = true;
+            has_pushdown_wf_exprs = true;
+          }
+        } else { // use trace point to enforce pushdown window function regardless of ndv and dop
+          // use trace point : alter system set_tp tp_no = 247, error_code = 4000, frequency = 1;
+          int64_t max_push_down_wf_idx = -ret;
+          if (idx < max_push_down_wf_idx) {
+            pushdown_info.at(idx) = true;
+            has_pushdown_wf_exprs = true;
+          }
+          ret = OB_SUCCESS;
         }
       }
     }
+    if (OB_SUCC(ret)) {
+      is_pushdown = all_wf_exprs_reporting && has_pushdown_wf_exprs;
+    }
   }
-  // Get each window function's partition by (PBY) and order by (OBY)'s prefix of %sort_keys.
-  // Note %sort_keys must covert PBY + OBY, which is guaranteed by `get_next_group_window_exprs()`
+
+  return ret;
+}
+
+int ObSelectLogPlan::prepare_for_split_winfuncs(
+    const ObLogicalOperator *top,
+    const common::ObIArray<ObWinFunRawExpr *> &winfunc_exprs,
+    const ObIArray<OrderItem> &sort_keys,
+    ObIArray<double> &sort_key_ndvs,
+    ObIArray<std::pair<int64_t, int64_t>> &pby_oby_prefixes)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObRawExpr *, 8> sort_key_exprs;
+  if (OB_ISNULL(top)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("top is null", K(ret));
+  } else if (OB_FAIL(sort_key_ndvs.prepare_allocate(sort_keys.count()))) {
+    LOG_WARN("array prepare allocate failed", K(ret));
+  } else { // Get NDV for each sort_keys prefix first.
+    for (int64_t i = 0; i < sort_keys.count() && OB_SUCC(ret); i++) {
+      if (OB_FAIL(sort_key_exprs.push_back(sort_keys.at(i).expr_))) {
+        LOG_WARN("array push back failed", K(ret));
+      } else if (OB_FAIL(ObOptSelectivity::calculate_distinct(get_update_table_metas(),
+                                                              get_selectivity_ctx(),
+                                                              sort_key_exprs,
+                                                              top->get_card(),
+                                                              sort_key_ndvs.at(i)))) {
+        LOG_WARN("calculate NDV failed", K(ret));
+      }
+    }
+  }
   if (OB_SUCC(ret)) {
+    // Get each window function's partition by (PBY) and order by (OBY)'s prefix of %sort_keys.
+    // Note %sort_keys must covert PBY + OBY, which is guaranteed by `get_next_group_window_exprs()`
     for (int64_t i = 0; OB_SUCC(ret) && i < winfunc_exprs.count(); i++) {
       int64_t pby_prefix = 0;
       int64_t pby_oby_prefix = 0;
@@ -4274,17 +5309,36 @@ int ObSelectLogPlan::split_winfuncs_by_dist_method(
       }
     }
   }
+  return ret;
+}
 
+int ObSelectLogPlan::split_winfuncs_by_dist_method(
+    const ObLogicalOperator *top,
+    const common::ObIArray<ObWinFunRawExpr *> &winfunc_exprs,
+    const common::ObIArray<ObWinFunRawExpr *> &remaining_exprs,
+    const int64_t stmt_func_idx,
+    const ObIArray<double> &sort_key_ndvs,
+    const ObIArray<std::pair<int64_t, int64_t>> &pby_oby_prefixes,
+    common::ObIArray<int64_t> &split,
+    common::ObIArray<WinDistAlgo> &methods,
+    bool &has_non_parallel_wf)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(top)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("top is null", K(ret));
+  }
+  split.reuse();
+  methods.reuse();
   // Main split logic, get current window function's distribute method (%cur_method) by
   // auto detected method and hint method. Then compare it with the previous window function's
   // distribute method to check need split or not.
   if (OB_SUCC(ret)) {
     const int64_t WF_PBY_DOP_RADIO = 16;
     const int64_t WF_CARD_DOP_RADIO = 256;
-    const int64_t dop = get_optimizer_context().get_parallel();
+    const int64_t dop = top->get_parallel();
     int64_t prev_method = -1;
-    bool has_non_parallel_wf = false;
-    for (int64_t idx = 0; OB_SUCC(ret) && idx < winfunc_exprs.count(); ) {
+    for (int64_t idx = 0; OB_SUCC(ret) && !has_non_parallel_wf && idx < winfunc_exprs.count(); ) {
       const int64_t pby_cnt = pby_oby_prefixes.at(idx).first;
       const int64_t pby_oby_cnt = pby_oby_prefixes.at(idx).second;
       const double pby_ndv = pby_cnt == 0 ? 0 : sort_key_ndvs.at(pby_cnt - 1);
@@ -4361,7 +5415,7 @@ int ObSelectLogPlan::split_winfuncs_by_dist_method(
         if (cur_method == WinDistAlgo::NONE || cur_method == WinDistAlgo::HASH) {
           prev_method = (int)cur_method;
         } else if (cur_method >= WinDistAlgo::RANGE && prev_method == (int)WinDistAlgo::HASH
-                   && pby_oby_prefixes[idx -1].first == pby_oby_prefixes[idx].first) {
+                   && pby_oby_prefixes.at(idx - 1).first == pby_oby_prefixes.at(idx).first) {
           cur_method = WinDistAlgo::HASH;
         }
       }
@@ -4374,7 +5428,7 @@ int ObSelectLogPlan::split_winfuncs_by_dist_method(
       } else if (WinDistAlgo::RANGE == cur_method
                  || WinDistAlgo::LIST == cur_method) {
         // pby_cnt or oby_cnt miss match
-        if (pby_oby_prefixes[idx - 1] != pby_oby_prefixes[idx]) {
+        if (pby_oby_prefixes.at(idx - 1) != pby_oby_prefixes.at(idx)) {
           need_split = true;
         }
       }
@@ -4394,12 +5448,6 @@ int ObSelectLogPlan::split_winfuncs_by_dist_method(
         }
       }
     }
-    if (OB_SUCC(ret) && has_non_parallel_wf) {
-      split.reuse();
-      methods.reuse();
-      OZ(split.push_back(winfunc_exprs.count()));
-      OZ(methods.push_back(WinDistAlgo::NONE));
-    }
   }
   return ret;
 }
@@ -4409,48 +5457,41 @@ int ObSelectLogPlan::split_winfuncs_by_dist_method(
  * 同一个分组中的 win_expr 应该按照一定的顺序排序 (`adjust_window_functions()`)
  * 同一个ObWindowFunction中的多个 win_expr 要按照一定的顺序组织，譬如：
  * w1(c) over (partition by e1, e2, e3)
- * w2(c) over (partition by e2)
- * w3(c) over (partition by e2 e3)
+ * w2(c) over (partition by e1)
+ * w3(c) over (partition by e1 e2)
  * 一定要按照 w1, w3, w2 的顺序来组织。即排在后面的win_expr的partition表达式是前面对象的子集。
  * 这里窗口函数会按照分组表达式数量进行排序（只统计非常量的分组表达式数量，数量多的排在前）。
  */
 int ObSelectLogPlan::create_merge_window_function_plan(ObLogicalOperator *&top,
                                                        const ObIArray<ObWinFunRawExpr *> &winfunc_exprs,
                                                        const ObIArray<OrderItem> &sort_keys,
-                                                       WinDistAlgo dist_method)
+                                                       const ObIArray<ObRawExpr*> &partition_exprs,
+                                                       WinDistAlgo dist_method,
+                                                       const bool is_pushdown,
+                                                       ObOpPseudoColumnRawExpr *wf_aggr_status_expr,
+                                                       const ObIArray<bool> &pushdown_info,
+                                                       bool need_sort,
+                                                       int64_t prefix_pos,
+                                                       int64_t part_cnt)
 {
   int ret = OB_SUCCESS;
-  bool need_sort = false;
-  int64_t prefix_pos = 0;
   ObExchangeInfo exch_info;
   bool single_part_parallel = false;
   bool is_partition_wise = false;
-  ObSEArray<ObRawExpr*, 8> partition_exprs;
   double pby_ndv = 1.0;
-  ObSEArray<OrderItem, 8> range_dist_keys;
+  int64_t range_dist_keys_cnt = 0;
   int64_t range_dist_pby_prefix = 0;
   bool range_distribution = false;
   LOG_DEBUG("try create merge distribute function plan", K(dist_method), K(sort_keys), K(winfunc_exprs));
   if (OB_ISNULL(top) || OB_UNLIKELY(winfunc_exprs.empty())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpecated error", K(top), K(winfunc_exprs.count()), K(ret));
-  } else if (OB_FAIL(ObOptimizerUtil::check_need_sort(sort_keys,
-                                                      top->get_op_ordering(),
-                                                      top->get_fd_item_set(),
-                                                      top->get_output_equal_sets(),
-                                                      top->get_output_const_exprs(),
-                                                      top->get_is_at_most_one_row(),
-                                                      need_sort,
-                                                      prefix_pos))) {
-    LOG_WARN("failed to check need sort", K(ret));
-  } else if (OB_FAIL(get_window_function_partition_exprs(winfunc_exprs,
-                                                         partition_exprs))) {
-    LOG_WARN("failed to get partition exprs", K(ret));
   } else {
     // range distribution
     if (WinDistAlgo::RANGE == dist_method
         || WinDistAlgo::LIST == dist_method) {
       int64_t pby_oby_prefix = 0;
+      ObSEArray<OrderItem, 8> range_dist_keys;
       // al range distribute window function has the same pby, pby+oby sort prefix
       OZ(get_winfunc_pby_oby_sort_prefix(top,
                                          winfunc_exprs.at(0),
@@ -4460,6 +5501,7 @@ int ObSelectLogPlan::create_merge_window_function_plan(ObLogicalOperator *&top,
       for (int64_t i = 0; OB_SUCC(ret) && i < pby_oby_prefix; i++) {
         OZ(range_dist_keys.push_back(sort_keys.at(i)));
       }
+      range_dist_keys_cnt = pby_oby_prefix;
       need_sort = false;
       prefix_pos = 0;
       OZ(ObOptimizerUtil::check_need_sort(range_dist_keys,
@@ -4467,9 +5509,11 @@ int ObSelectLogPlan::create_merge_window_function_plan(ObLogicalOperator *&top,
                                           top->get_fd_item_set(),
                                           top->get_output_equal_sets(),
                                           top->get_output_const_exprs(),
+                                          get_onetime_query_refs(),
                                           top->get_is_at_most_one_row(),
                                           need_sort,
-                                          prefix_pos));
+                                          prefix_pos,
+                                          part_cnt));
 
       exch_info.dist_method_ = ObPQDistributeMethod::RANGE;
       ObRawExpr *random_expr = NULL;
@@ -4506,15 +5550,29 @@ int ObSelectLogPlan::create_merge_window_function_plan(ObLogicalOperator *&top,
       OZ(allocate_window_function_as_top(winfunc_exprs,
                                          single_part_parallel,
                                          is_partition_wise,
-                                         range_dist_keys,
+                                         ObLogWindowFunction::WindowFunctionRoleType::NORMAL,
+                                         sort_keys,
+                                         range_dist_keys_cnt,
                                          range_dist_pby_prefix,
-                                         top));
+                                         top,
+                                         wf_aggr_status_expr,
+                                         pushdown_info));
     // hash distribution
     } else if (WinDistAlgo::HASH == dist_method) {
       OZ(top->check_sharding_compatible_with_reduce_expr(partition_exprs, is_partition_wise));
       if (is_partition_wise) {
-        try_allocate_sort_as_top(top, sort_keys, need_sort, prefix_pos);
-      } else {
+        OZ(try_allocate_sort_as_top(top, sort_keys, need_sort, prefix_pos));
+        OZ(allocate_window_function_as_top(winfunc_exprs,
+                                           single_part_parallel,
+                                           is_partition_wise,
+                                           ObLogWindowFunction::WindowFunctionRoleType::NORMAL,
+                                           sort_keys,
+                                           range_dist_keys_cnt,
+                                           range_dist_pby_prefix,
+                                           top,
+                                           wf_aggr_status_expr,
+                                           pushdown_info));
+      } else if (!is_pushdown) {
         OZ(get_grouping_style_exchange_info(partition_exprs,
                                             top->get_output_equal_sets(),
                                             exch_info));
@@ -4524,15 +5582,84 @@ int ObSelectLogPlan::create_merge_window_function_plan(ObLogicalOperator *&top,
                                              need_sort,
                                              prefix_pos,
                                              top->get_is_local_order()));
-      }
-      OZ(allocate_window_function_as_top(winfunc_exprs,
+        OZ(allocate_window_function_as_top(winfunc_exprs,
+                                           single_part_parallel,
+                                           is_partition_wise,
+                                           ObLogWindowFunction::WindowFunctionRoleType::NORMAL,
+                                           sort_keys,
+                                           range_dist_keys_cnt,
+                                           range_dist_pby_prefix,
+                                           top,
+                                           wf_aggr_status_expr,
+                                           pushdown_info));
+      } else { // is_pushdown_supported
+        bool top_is_local_order = top->get_is_local_order();
+        // sort key + aggr_status desc, for EXCHANGE IN MERGE SORT DISTR
+        ObSEArray<OrderItem, 8> tmp_sort_keys;
+        for (int64_t i = 0; OB_SUCC(ret) && i < winfunc_exprs.count(); ++i) {
+          // wf_hybrid_pby_exprs_cnt_array_ is used for hybrid dist
+          // take the value of aggr_status to decide to use which member of wf_hybrid_pby_exprs_cnt_array_ as nkey of hash dist
+          if (OB_FAIL(exch_info.wf_hybrid_pby_exprs_cnt_array_.push_back(
+              winfunc_exprs.at(i)->get_partition_exprs().count()))) {
+            LOG_WARN("failed to push_back",
+                K(ret), K(winfunc_exprs.at(i)->get_partition_exprs().count()));
+          }
+        }
+        if (OB_FAIL(ret)) {
+        } else if ((need_sort || top_is_local_order)
+            && !sort_keys.empty()
+            && OB_FAIL(allocate_sort_as_top(top,
+                                            sort_keys,
+                                            need_sort && !top_is_local_order ? prefix_pos : 0,
+                                            need_sort ? false : top_is_local_order))) {
+          LOG_WARN("failed to allcoate sort as top", K(ret));
+        } else if (OB_FAIL(allocate_window_function_as_top(winfunc_exprs,
                                          single_part_parallel,
                                          is_partition_wise,
-                                         range_dist_keys,
+                                         ObLogWindowFunction::WindowFunctionRoleType::PARTICIPATOR,
+                                         sort_keys,
+                                         range_dist_keys_cnt,
                                          range_dist_pby_prefix,
-                                         top));
-    // single partition parallel or serialize
-    } else {
+                                         top,
+                                         wf_aggr_status_expr,
+                                         pushdown_info))) {
+          LOG_WARN("failed to allocate_window_function_as_top", K(ret));
+        } /*else if (FALSE_IT(wf_aggr_status_expr =
+                   static_cast<ObLogWindowFunction*>(top)->get_aggr_status_expr())) {
+        } */else if (OB_FAIL(get_pushdown_window_function_exchange_info(winfunc_exprs,
+                                                                    top->get_output_equal_sets(),
+                                                                    wf_aggr_status_expr,
+                                                                    exch_info))) {
+        LOG_WARN("failed to get pushdown window function exchange info", K(ret));
+        } else if (OB_FAIL(tmp_sort_keys.assign(sort_keys))) {
+          LOG_WARN("failed to assign sort_keys to tmp_sort_keys", K(ret));
+        } else if (OB_FAIL(tmp_sort_keys.push_back(
+                   OrderItem(wf_aggr_status_expr, default_desc_direction())))) {
+          LOG_WARN("failed to push_back extra sort key of aggr status to tmp_sort_keys", K(ret));
+        } else if (OB_FAIL(allocate_sort_and_exchange_as_top(top,
+                                                             exch_info,
+                                                             tmp_sort_keys,
+                                                             false,
+                                                             prefix_pos,
+                                                             top->get_is_local_order()))) {
+          LOG_WARN("failed to allocate sort as top", K(ret));
+        } else if (OB_FAIL(allocate_window_function_as_top(winfunc_exprs,
+                                         single_part_parallel,
+                                         is_partition_wise,
+                                         ObLogWindowFunction::WindowFunctionRoleType::CONSOLIDATOR,
+                                         sort_keys,
+                                         range_dist_keys_cnt,
+                                         range_dist_pby_prefix,
+                                         top,
+                                         wf_aggr_status_expr,
+                                         pushdown_info))) {
+          LOG_WARN("failed to allocate_window_function_as_top", K(ret));
+        } else if (FALSE_IT(static_cast<ObLogWindowFunction*>(top)->set_aggr_status_expr(
+                            wf_aggr_status_expr))) {
+          // use the value of wf_aggr_status_expr to decide how to compute in consilidator wf op
+        }
+      }
+    } else { // single partition parallel or serialize
       if (top->is_distributed()) {
         OZ(match_window_function_parallel(winfunc_exprs, single_part_parallel));
       }
@@ -4549,9 +5676,13 @@ int ObSelectLogPlan::create_merge_window_function_plan(ObLogicalOperator *&top,
       OZ(allocate_window_function_as_top(winfunc_exprs,
                                          single_part_parallel,
                                          is_partition_wise,
-                                         range_dist_keys,
+                                         ObLogWindowFunction::WindowFunctionRoleType::NORMAL,
+                                         sort_keys,
+                                         range_dist_keys_cnt,
                                          range_dist_pby_prefix,
-                                         top));
+                                         top,
+                                         wf_aggr_status_expr,
+                                         pushdown_info));
     }
   }
   return ret;
@@ -4568,28 +5699,31 @@ int ObSelectLogPlan::create_merge_window_function_plan(ObLogicalOperator *&top,
  * 这里窗口函数会按照分组表达式数量进行排序（只统计非常量的分组表达式数量，数量多的排在前）。
  */
 int ObSelectLogPlan::create_hash_window_function_plan(ObLogicalOperator *&top,
-                                                      ObIArray<ObWinFunRawExpr*> &adjusted_winfunc_exprs,
+                                                      const ObIArray<ObWinFunRawExpr*> &adjusted_winfunc_exprs,
                                                       const ObIArray<OrderItem> &sort_keys,
-                                                      ObIArray<ObRawExpr*> &partition_exprs,
-                                                      const int64_t part_cnt)
+                                                      const ObIArray<ObRawExpr*> &partition_exprs,
+                                                      const int64_t part_cnt,
+                                                      const bool is_pushdown,
+                                                      ObOpPseudoColumnRawExpr *wf_aggr_status_expr,
+                                                      const ObIArray<bool> &pushdown_info)
 {
   int ret = OB_SUCCESS;
   ObExchangeInfo exch_info;
-  bool match_parallel = false;
+  OrderItem hash_sortkey;
   bool is_partition_wise = false;
-  const ObArray<OrderItem> range_dist_keys;
+  const int64_t range_dist_keys_cnt = 0;
   const int64_t range_dist_pby_prefix = 0;
-  if (OB_ISNULL(top)) {
+  LOG_DEBUG("create hash window function plan", K(part_cnt), K(sort_keys), K(adjusted_winfunc_exprs));
+  if (OB_ISNULL(top) || OB_UNLIKELY(partition_exprs.empty())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected error", K(top), K(ret));
-  } else if (top->is_distributed() && !partition_exprs.empty() &&
+    LOG_WARN("get unexpected error", K(ret), K(top), K(partition_exprs.empty()));
+  } else if (top->is_distributed() &&
              OB_FAIL(top->check_sharding_compatible_with_reduce_expr(partition_exprs,
                                                                      is_partition_wise))) {
     LOG_WARN("failed to check if sharding compatible", K(ret));
-  } else if (top->is_distributed() && !is_partition_wise && partition_exprs.empty() &&
-             OB_FAIL(match_window_function_parallel(adjusted_winfunc_exprs, match_parallel))) {
-    LOG_WARN("failed to check if match window function parallel", K(ret));
-  } else if (!top->is_distributed() || is_partition_wise || match_parallel) {
+  } else if (part_cnt > 0 && OB_FAIL(create_hash_sortkey(part_cnt, sort_keys, hash_sortkey))) {
+    LOG_WARN("failed to create hash sort key", K(ret), K(part_cnt), K(sort_keys));
+  } else if (!top->is_distributed() || is_partition_wise) {
     exch_info.dist_method_ = ObPQDistributeMethod::NONE;
     if (OB_FAIL(allocate_sort_and_exchange_as_top(top,
                                                   exch_info,
@@ -4599,38 +5733,127 @@ int ObSelectLogPlan::create_hash_window_function_plan(ObLogicalOperator *&top,
                                                   false, /* is_local_order */
                                                   NULL, /* topn_expr */
                                                   false, /* is_fetch_with_ties */
-                                                  part_cnt))) {
+                                                  part_cnt > 0 ? &hash_sortkey : NULL))) {
       LOG_WARN("failed to allocate sort as top", K(ret));
     } else if (OB_FAIL(allocate_window_function_as_top(adjusted_winfunc_exprs,
-                                                       match_parallel,
-                                                       is_partition_wise,
-                                                       range_dist_keys,
-                                                       range_dist_pby_prefix,
-                                                       top))) {
+                                               false, /* match_parallel */
+                                               is_partition_wise,
+                                               ObLogWindowFunction::WindowFunctionRoleType::NORMAL,
+                                               sort_keys,
+                                               range_dist_keys_cnt,
+                                               range_dist_pby_prefix,
+                                               top,
+                                               wf_aggr_status_expr,
+                                               pushdown_info))) {
       LOG_WARN("failed to allocate window function above top", K(ret));
     }
-  } else if (OB_FAIL(get_grouping_style_exchange_info(partition_exprs,
-                                                      top->get_output_equal_sets(),
-                                                      exch_info))) {
-    LOG_WARN("failed to get grouping style exchange info", K(ret));
-  } else if (OB_FAIL(allocate_sort_and_exchange_as_top(top,
-                                                       exch_info,
-                                                       sort_keys,
-                                                       true, /* need_sort */
-                                                       0, /* prefix_pos */
-                                                       top->get_is_local_order(),
-                                                       NULL, /* topn_expr */
-                                                       false, /* is_fetch_with_ties */
-                                                       part_cnt))) {
-    LOG_WARN("failed to allocate sort as top", K(ret));
-  } else if (OB_FAIL(allocate_window_function_as_top(adjusted_winfunc_exprs,
-                                                     match_parallel,
-                                                     is_partition_wise,
-                                                     range_dist_keys,
-                                                     range_dist_pby_prefix,
-                                                     top))) {
-    LOG_WARN("failed to allocate window function as top", K(ret));
-  } else { /*do nothing*/ }
+  } else if (!is_pushdown) {
+    if (OB_FAIL(get_grouping_style_exchange_info(partition_exprs,
+                                                 top->get_output_equal_sets(),
+                                                 exch_info))) {
+      LOG_WARN("failed to get grouping style exchange info", K(ret));
+    } else if (OB_FAIL(allocate_sort_and_exchange_as_top(top,
+                                                         exch_info,
+                                                         sort_keys,
+                                                         true, /* need_sort */
+                                                         0, /* prefix_pos */
+                                                         top->get_is_local_order(),
+                                                         NULL, /* topn_expr */
+                                                         false, /* is_fetch_with_ties */
+                                                         part_cnt > 0 ? &hash_sortkey : NULL))) {
+      LOG_WARN("failed to allocate sort as top", K(ret));
+    } else if (OB_FAIL(allocate_window_function_as_top(adjusted_winfunc_exprs,
+                                               false, /* match_parallel */
+                                               is_partition_wise,
+                                               ObLogWindowFunction::WindowFunctionRoleType::NORMAL,
+                                               sort_keys,
+                                               range_dist_keys_cnt,
+                                               range_dist_pby_prefix,
+                                               top,
+                                               wf_aggr_status_expr,
+                                               pushdown_info))) {
+      LOG_WARN("failed to allocate window function as top", K(ret));
+    }
+  } else { // need_pushdown
+    bool top_is_local_order = top->get_is_local_order();
+    // sort key + aggr_status desc, for EXCHANGE IN MERGE SORT DISTR
+    ObSEArray<OrderItem, 8> tmp_sort_keys;
+    for (int64_t i = 0; OB_SUCC(ret) && i < adjusted_winfunc_exprs.count(); ++i) {
+      // wf_hybrid_pby_exprs_cnt_array_ is used for hybrid dist
+      // take the value of aggr_status to decide to use which member of wf_hybrid_pby_exprs_cnt_array_ as nkey of hash dist
+      if (OB_FAIL(exch_info.wf_hybrid_pby_exprs_cnt_array_.push_back(
+          adjusted_winfunc_exprs.at(i)->get_partition_exprs().count()))) {
+        LOG_WARN("failed to push_back",
+            K(ret), K(adjusted_winfunc_exprs.at(i)->get_partition_exprs().count()));
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(allocate_sort_as_top(top,
+                                         sort_keys,
+                                         0,
+                                         false,
+                                         NULL,
+                                         false, // is_fetch_with_ties
+                                         part_cnt > 0 ? &hash_sortkey : NULL))) {
+      LOG_WARN("failed to allcoate sort as top", K(ret));
+    } else {
+      const OrderItem &hash_sortkey = static_cast<ObLogSort*>(top)->get_hash_sortkey();
+      if (OB_FAIL(allocate_window_function_as_top(adjusted_winfunc_exprs,
+                                          false, /* match_parallel */
+                                          is_partition_wise,
+                                          ObLogWindowFunction::WindowFunctionRoleType::PARTICIPATOR,
+                                          sort_keys,
+                                          range_dist_keys_cnt,
+                                          range_dist_pby_prefix,
+                                          top,
+                                          wf_aggr_status_expr,
+                                          pushdown_info))) {
+        LOG_WARN("failed to allocate_window_function_as_top", K(ret));
+      } else if (OB_FAIL(get_pushdown_window_function_exchange_info(adjusted_winfunc_exprs,
+                                                                    top->get_output_equal_sets(),
+                                                                    wf_aggr_status_expr,
+                                                                    exch_info))) {
+        LOG_WARN("failed to get pushdown window function exchange info", K(ret));
+      } else if (OB_FAIL(tmp_sort_keys.push_back(hash_sortkey))) {
+        LOG_WARN("failed to push_back extra sort key hash_sortkey of aggr status to tmp_sort_keys",
+            K(ret));
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < sort_keys.count(); ++i) {
+          if (OB_FAIL(tmp_sort_keys.push_back(sort_keys.at(i)))) {
+            LOG_WARN("failed to assign sort_keys to tmp_sort_keys", K(ret));
+          }
+        }
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(tmp_sort_keys.push_back(
+            OrderItem(wf_aggr_status_expr, default_desc_direction())))) {
+          LOG_WARN("failed to push_back extra sort key of aggr status to tmp_sort_keys", K(ret));
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(allocate_sort_and_exchange_as_top(top,
+                                                           exch_info,
+                                                           tmp_sort_keys,
+                                                           false,
+                                                           0,
+                                                           top->get_is_local_order()))) {
+        LOG_WARN("failed to allocate sort as top", K(ret));
+      } else if (OB_FAIL(allocate_window_function_as_top(adjusted_winfunc_exprs,
+                                         false, /* match_parallel */
+                                         is_partition_wise,
+                                         ObLogWindowFunction::WindowFunctionRoleType::CONSOLIDATOR,
+                                         sort_keys,
+                                         range_dist_keys_cnt,
+                                         range_dist_pby_prefix,
+                                         top,
+                                         wf_aggr_status_expr,
+                                         pushdown_info))) {
+        LOG_WARN("failed to allocate_window_function_as_top", K(ret));
+      } else if (FALSE_IT(static_cast<ObLogWindowFunction*>(top)->set_aggr_status_expr(
+                 wf_aggr_status_expr))) {
+        // use the value of wf_aggr_status_expr to decide how to compute in consilidator wf op
+      }
+    }
+  }
   return ret;
 }
 
@@ -4639,8 +5862,8 @@ int ObSelectLogPlan::create_hash_window_function_plan(ObLogicalOperator *&top,
  * 同一个分组中的 win_expr 应该按照一定的顺序排序。
  * 同一个ObWindowFunction中的多个 win_expr 要按照一定的顺序组织，譬如：
  * w1(c) over (partition by e1, e2, e3)
- * w2(c) over (partition by e2)
- * w3(c) over (partition by e2 e3)
+ * w2(c) over (partition by e1)
+ * w3(c) over (partition by e1 e2)
  * 一定要按照 w1, w3, w2 的顺序来组织。即排在后面的win_expr的partition表达式是前面对象的子集。
  * 这里窗口函数会按照分组表达式数量进行排序（只统计非常量的分组表达式数量，数量多的排在前）。
  */
@@ -4691,7 +5914,12 @@ int ObSelectLogPlan::match_window_function_parallel(const ObIArray<ObWinFunRawEx
       case T_FUN_SUM:
       case T_FUN_MAX:
       case T_FUN_MIN: {
-        /*do nothing*/
+        if (OB_ISNULL(win_expr->get_agg_expr())) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected null agg expr", K(ret));
+        } else if (win_expr->get_agg_expr()->is_param_distinct()) {
+          can_parallel = false;
+        }
         break;
       }
       default: {
@@ -4735,6 +5963,73 @@ int ObSelectLogPlan::check_wf_range_dist_supported(ObWinFunRawExpr *win_expr,
         can_rd_parallel = false;
       }
     }
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::check_wf_pushdown_supported(ObWinFunRawExpr *win_expr,
+                                                 bool &can_wf_pushdown)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(win_expr)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else {
+    // only reporting window function can pushdown
+    // If win_expr->get_partition_exprs().empty(), use window_function_parallel in single partition by yishen instead
+    can_wf_pushdown = can_wf_pushdown
+                      && !win_expr->get_partition_exprs().empty()
+                      && win_expr->get_upper().type_ == BoundType::BOUND_UNBOUNDED
+                      && win_expr->get_lower().type_ == BoundType::BOUND_UNBOUNDED;
+    switch(win_expr->get_func_type()) {
+      case T_FUN_SYS_BIT_AND:
+      case T_FUN_SYS_BIT_OR:
+      case T_FUN_SYS_BIT_XOR:
+      case T_FUN_MIN:
+      case T_FUN_MAX: {
+        break;
+      }
+      case T_FUN_COUNT:
+      case T_FUN_SUM: {
+        if (OB_ISNULL(win_expr->get_agg_expr())) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("get unexpected null", K(ret), KPC(win_expr));
+        } else if (win_expr->get_agg_expr()->is_param_distinct()) {
+          // If aggr expr is count distinct or sum distinct, wf can't be parallel.
+          can_wf_pushdown = false;
+        }
+        break;
+      }
+      default: {
+        can_wf_pushdown = false;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObSelectLogPlan::get_pushdown_window_function_exchange_info(
+    const ObIArray<ObWinFunRawExpr *> &win_exprs,
+    const EqualSets & equal_sets,
+    ObOpPseudoColumnRawExpr *wf_aggr_status_expr,
+    ObExchangeInfo &exch_info)
+{
+  int ret = OB_SUCCESS;
+  if (0 == win_exprs.count()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("count of win_exprs is zero", K(ret));
+  } else if (OB_ISNULL(win_exprs.at(0))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  // get the pby expr of the first win_expr, the pby col count of first pby expr is the most
+  } else if (OB_FAIL(get_grouping_style_exchange_info(win_exprs.at(0)->get_partition_exprs(),
+                                                      equal_sets,
+                                                      exch_info))) {
+    LOG_WARN("failed to get grouping style exchange info", K(ret));
+  } else {
+    exch_info.is_wf_hybrid_ = true;
+    // use the value of wf_aggr_status_expr to decide how to distribute in ex op
+    exch_info.wf_hybrid_aggr_status_expr_ = wf_aggr_status_expr;
   }
   return ret;
 }
@@ -4888,6 +6183,9 @@ int ObSelectLogPlan::convert_project_columns(ObSelectStmt *stmt,
   } else {
     ColumnItem *item = NULL;
     ObColumnRefRawExpr *expr = NULL;
+    common::ObSEArray<ColumnItem, 16> new_col_items;
+    common::ObSEArray<ObRawExpr *, 4> gen_exprs;
+    common::ObSEArray<ObRawExpr *, 4> dependant_exprs;
     for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_column_size(); ++i) {
       if (OB_ISNULL(item = stmt->get_column_item(i)) || OB_ISNULL(expr = item->get_expr())) {
         ret = OB_ERR_UNEXPECTED;
@@ -4897,62 +6195,42 @@ int ObSelectLogPlan::convert_project_columns(ObSelectStmt *stmt,
         item->set_ref_id(project_table_item->table_id_, item->column_id_);
         expr->set_ref_id(project_table_item->table_id_, expr->get_column_id());
         expr->set_table_name(project_table_item->get_table_name());
-        if (expr->is_generated_column() &&
-            OB_FAIL(project_generate_column(expr_copier,
-                                            stmt,
-                                            table_id,
-                                            project_table_item,
-                                            index_columns,
-                                            expr))) {
-          LOG_WARN("failed to project dependant expr", K(ret));
+        if (expr->is_virtual_generated_column()) {
+          if (item->is_geo_ == true && expr->get_srs_id() != SPATIAL_COLUMN_SRID_MASK) {
+            // spatial index generated column, cannot projet from main table
+            if (OB_FAIL(new_col_items.push_back(*item))) {
+              LOG_WARN("failed to push back column item", K(ret));
+            }
+          } else if (OB_FAIL(gen_exprs.push_back(expr))) {
+            LOG_WARN("failed to push back", K(ret));
+          } else if (OB_FAIL(dependant_exprs.push_back(expr->get_dependant_expr()))) {
+            LOG_WARN("failed to push back", K(ret));
+          }
+        } else {
+          if (OB_FAIL(new_col_items.push_back(*item))) {
+            LOG_WARN("failed to push back column item", K(ret));
+          }
         }
-      } else { /*do nothing*/ }
+      } else if (OB_FAIL(new_col_items.push_back(*item))){
+        LOG_WARN("failed to push back column item", K(ret));
+      }
     }
-  }
-  return ret;
-}
 
-int ObSelectLogPlan::project_generate_column(ObIRawExprCopier &expr_copier,
-                                             ObSelectStmt *stmt,
-                                             uint64_t table_id,
-                                             TableItem *project_table_item,
-                                             ObIArray<uint64_t> &index_columns,
-                                             ObColumnRefRawExpr* expr)
-{
-  int ret = OB_SUCCESS;
-  ObSEArray<ObRawExpr*, 4> dependant_columns;
-  if (OB_ISNULL(expr) || OB_ISNULL(expr->get_dependant_expr()) ||
-      OB_ISNULL(stmt)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpect null expr", K(ret));
-  } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(expr->get_dependant_expr(),
-                                                          dependant_columns))) {
-    LOG_WARN("failed to extrace column expr", K(ret));
-  }
-  for (int64_t i = 0; OB_SUCC(ret) && i < dependant_columns.count(); ++i) {
-    ColumnItem *col_item = NULL;
-    ColumnItem copy_col_item;
-    ObRawExpr* col_expr = dependant_columns.at(i);
-    ObColumnRefRawExpr* col = static_cast<ObColumnRefRawExpr*>(col_expr);
-    if (OB_ISNULL(col_expr) || OB_UNLIKELY(!col_expr->is_column_ref_expr())) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpect null expr", K(ret));
-    } else if (!ObOptimizerUtil::find_item(index_columns, col->get_column_id())) {
-      // do nothing
-    } else if (OB_ISNULL(col_item = stmt->get_column_item(table_id, col->get_column_id()))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpect null column item", K(ret));
-    } else if (OB_FAIL(copy_col_item.deep_copy(expr_copier, *col_item))) {
-      LOG_WARN("failed to copy column item", K(ret));
-    } else if (OB_ISNULL(copy_col_item.expr_)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpect null expr", K(ret));
-    } else {
-      copy_col_item.set_ref_id(project_table_item->table_id_, col->get_column_id());
-      copy_col_item.expr_->set_ref_id(project_table_item->table_id_, col->get_column_id());
-      copy_col_item.expr_->set_table_name(project_table_item->get_table_name());
-      if (OB_FAIL(stmt->add_column_item(copy_col_item))) {
-        LOG_WARN("failed to add column item", K(ret));
+    common::ObSEArray<ObRawExprPointer, 16> relation_exprs;
+    if (OB_FAIL(ret) || new_col_items.count() == stmt->get_column_size()) {
+    } else if (OB_FAIL(stmt->get_column_items().assign(new_col_items))) {
+      LOG_WARN("failed to assign", K(ret));
+    } else if (OB_FAIL(stmt->get_relation_exprs(relation_exprs))) {
+      LOG_WARN("failed to get exprs", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < relation_exprs.count(); i++) {
+      ObRawExpr *replace_expr = NULL;
+      if (OB_FAIL(relation_exprs.at(i).get(replace_expr))) {
+        LOG_WARN("failed to get expr", K(ret));
+      } else if (OB_FAIL(ObTransformUtils::replace_expr(gen_exprs, dependant_exprs, replace_expr))) {
+        LOG_WARN("failed to replace", K(ret));
+      } else if (OB_FAIL(relation_exprs.at(i).set(replace_expr))) {
+        LOG_WARN("failed to set expr", K(ret));
       }
     }
   }
@@ -5085,7 +6363,6 @@ int ObSelectLogPlan::adjust_late_materialization_plan_structure(ObLogicalOperato
         LOG_WARN("get unexpected null", K(left_expr), K(right_expr), K(ret));
       } else if (OB_FAIL(ObRawExprUtils::create_new_exec_param(optimizer_context_.get_query_ctx(),
                                                                optimizer_context_.get_expr_factory(),
-                                                               get_stmt()->get_current_level(),
                                                                left_expr))) {
         LOG_WARN("create param for stmt error in extract_params_for_nl", K(ret));
       } else if (OB_FAIL(ObRawExprUtils::create_equal_expr(optimizer_context_.get_expr_factory(),
@@ -5225,6 +6502,7 @@ int ObSelectLogPlan::generate_late_materialization_table_get(ObLogTableScan *ind
     table_scan->set_location_type(index_scan->get_location_type());
     table_scan->set_flashback_query_expr(index_scan->get_flashback_query_expr());
     table_scan->set_flashback_query_type(index_scan->get_flashback_query_type());
+    table_scan->set_fq_read_tx_uncommitted(index_scan->get_fq_read_tx_uncommitted());
     table_scan->set_part_ids(index_scan->get_part_ids());
     table_scan->get_table_name() = table_item->alias_name_.length() > 0 ?
                                    table_item->alias_name_ : table_item->table_name_;
@@ -5266,6 +6544,7 @@ int ObSelectLogPlan::generate_late_materialization_table_item(ObSelectStmt *stmt
     temp_item->is_view_table_ = old_table_item->is_view_table_;
     temp_item->table_id_ = new_table_id;
     temp_item->ref_id_ = old_table_item->ref_id_;
+    temp_item->table_type_ = old_table_item->table_type_;
 
     const char *str = "_alias";
     char *buf = static_cast<char*>(get_allocator().alloc(
@@ -5338,8 +6617,6 @@ int ObSelectLogPlan::allocate_late_materialization_join_as_top(ObLogicalOperator
                                                        get_optimizer_context().get_cost_model_type());
     if (OB_FAIL(join->set_op_ordering(left_child->get_op_ordering()))) {
       LOG_WARN("failed to set op ordering", K(ret));
-    } else if (OB_FAIL(join->est_cost())) {
-      LOG_WARN("failed to estimate cost", K(ret));
     } else {
       join->set_location_type(left_child->get_location_type());
       join->set_phy_plan_type(left_child->get_phy_plan_type());
@@ -5408,12 +6685,24 @@ int ObSelectLogPlan::if_plan_need_late_materialization(ObLogicalOperator *top,
         LOG_WARN("failed to get column ids", K(ret));
       } else if (OB_FAIL(ObRawExprUtils::extract_column_ids(temp_exprs, used_column_ids))) {
         LOG_WARN("failed to extract column ids", K(ret));
-      } else {
-        need = ObOptimizerUtil::is_subset(used_column_ids, index_column_ids);
+      } else if (ObOptimizerUtil::is_subset(used_column_ids, index_column_ids)){
+        bool has_other_col = false;
+        for (int64_t i = 0; OB_SUCC(ret) && !has_other_col && i < stmt->get_column_size(); i++) {
+          const ColumnItem *item = stmt->get_column_item(i);
+          if (OB_ISNULL(item)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (item->get_expr()->is_virtual_generated_column()) {
+            // do nothing
+          } else if (!ObOptimizerUtil::find_item(index_column_ids, item->base_cid_)) {
+            has_other_col = true;
+          }
+        }
+        need = has_other_col;
       }
     }
     // update cost for late materialization
     if (OB_SUCC(ret) && need) {
+      OPT_TRACE("try late materialization plan, normal plan cost:", top->get_cost());
       if (OB_ISNULL(table_scan->get_est_cost_info())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(ret));
@@ -5476,11 +6765,13 @@ int ObSelectLogPlan::if_plan_need_late_materialization(ObLogicalOperator *top,
           LOG_WARN("failed to compute property", K(ret));
         } else {
           index_scan = table_scan;
-          ObOptEstCost::cost_late_materialization(top->get_cost(),
-                                                  top->get_card(),
+          ObOptEstCost::cost_late_materialization(top->get_card(),
+                                                  top->get_cost(),
                                                   stmt->get_column_size(),
                                                   late_mater_cost,
                                                   get_optimizer_context().get_cost_model_type());
+
+          OPT_TRACE("late materialization plan cost:", late_mater_cost);
         }
       }
     }
@@ -5585,6 +6876,8 @@ int ObSelectLogPlan::init_selectivity_metas_for_set(ObSelectLogPlan *sub_plan,
   if (OB_ISNULL(sub_plan) || OB_ISNULL(sub_stmt = sub_plan->get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret), K(sub_plan), K(sub_stmt));
+  } else if (OB_INVALID_ID != sub_stmt->get_dblink_id()) {
+    // skip
   } else if (OB_FAIL(sub_plan->get_candidate_plans().get_best_plan(best_plan))) {
     LOG_WARN("failed to get best plan", K(ret));
   } else if (OB_ISNULL(best_plan)) {
@@ -5599,6 +6892,27 @@ int ObSelectLogPlan::init_selectivity_metas_for_set(ObSelectLogPlan *sub_plan,
   } else if (OB_FAIL(get_update_table_metas().copy_table_meta_info(get_basic_table_metas(),
                                                                    child_offset))) {
     LOG_WARN("failed to copy table meta info", K(ret));
+  }
+  return ret;
+}
+
+
+int ObSelectLogPlan::check_external_table_scan(ObSelectStmt *stmt, bool &has_external_table)
+{
+  int ret = OB_SUCCESS;
+  ObArray<ObSelectStmt*> child_stmts;
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("stmt is null", K(ret));
+  } else if (stmt->has_external_table()) {
+    has_external_table = true;
+  } else {
+    if (OB_FAIL(stmt->get_child_stmts(child_stmts))) {
+      LOG_WARN("fail to get child stmt", K(ret));
+    }
+    for (int i = 0; OB_SUCC(ret) && !has_external_table && i < child_stmts.count(); i++) {
+      ret = SMART_CALL(check_external_table_scan(child_stmts.at(i), has_external_table));
+    }
   }
   return ret;
 }

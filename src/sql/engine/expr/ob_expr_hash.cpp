@@ -24,7 +24,7 @@ namespace sql
 {
 
 ObExprHash::ObExprHash(ObIAllocator &alloc)
-  : ObExprOperator(alloc, T_FUN_SYS_HASH, N_HASH, MORE_THAN_ONE, NOT_ROW_DIMENSION,
+  : ObExprOperator(alloc, T_FUN_SYS_HASH, N_HASH, MORE_THAN_ONE, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION,
                    INTERNAL_IN_MYSQL_MODE, INTERNAL_IN_ORACLE_MODE)
 {
 }
@@ -55,8 +55,10 @@ int ObExprHash::calc_hash_value_expr(const ObExpr &expr, ObEvalCtx &ctx, ObDatum
     if (OB_FAIL(expr.args_[i]->eval(ctx, datum))) {
       LOG_WARN("failed to eval datum", K(ret));
     } else {
-      ObExprHashFuncType hash_func = expr.args_[i]->basic_funcs_->murmur_hash_;
-      hash_value = hash_func(*datum, hash_value);
+      ObExprHashFuncType hash_func = expr.args_[i]->basic_funcs_->murmur_hash_v2_;
+      if (OB_FAIL(hash_func(*datum, hash_value, hash_value))) {
+        LOG_WARN("failed to do hash", K(ret));
+      }
     }
   }
   res_datum.set_uint(hash_value);
@@ -79,7 +81,7 @@ int ObExprHash::calc_hash_value_expr_batch(
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("failed to locate batch datums", K(ret));
       } else {
-        ObBatchDatumHashFunc hash_func = expr.args_[i]->basic_funcs_->murmur_hash_batch_;
+        ObBatchDatumHashFunc hash_func = expr.args_[i]->basic_funcs_->murmur_hash_v2_batch_;
         hash_func(batch_hash_vals, datums, expr.args_[i]->is_batch_result(), skip, batch_size,
                   i > 0 ? batch_hash_vals: &hash_seed, i > 0);
       }

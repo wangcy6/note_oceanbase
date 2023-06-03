@@ -66,6 +66,8 @@ public:
     return hash_val;
   }
 
+  int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
+
   TO_STRING_KV(K_(tenant_id), K_(table_id), K_(column_id));
 
   uint64_t tenant_id_;
@@ -98,7 +100,9 @@ struct AutoincParam
       autoinc_intervals_count_(0),
       part_level_(schema::PARTITION_LEVEL_ZERO),
       auto_increment_cache_size_(DEFAULT_INCREMENT_CACHE_SIZE),
-      autoinc_mode_is_order_(true)
+      autoinc_mode_is_order_(true),
+      autoinc_version_(0),
+      autoinc_auto_increment_(1)
   {}
 
   TO_STRING_KV("tenant_id"               , tenant_id_,
@@ -121,7 +125,9 @@ struct AutoincParam
                "part_level"              , part_level_,
                "auto_increment_cache_size"  , auto_increment_cache_size_,
                "part_value_no_order"     , part_value_no_order_,
-               "autoinc_mode_is_order"   , autoinc_mode_is_order_);
+               "autoinc_mode_is_order"   , autoinc_mode_is_order_,
+               "autoinc_version"         , autoinc_version_,
+               "autoinc_auto_increment"  , autoinc_auto_increment_);
 
   inline bool with_order() const { return !part_value_no_order_; }
   // pay attention to schema changes
@@ -148,7 +154,7 @@ struct AutoincParam
   // in order to support partitioning with auto increment pkey,
   // we have to **loose the restriction** that generated number must be
   // in intra-partition ascending order.
-  // https://aone.alibaba-inc.com/req/34489012
+  //
   // If part_value_no_order_ flag = true, we can break this ordering restriction.
   // for compatibility consideration, part_value_no_order_ defaults to false
   bool              part_value_no_order_;
@@ -158,6 +164,8 @@ struct AutoincParam
   schema::ObPartitionLevel part_level_;
   int64_t auto_increment_cache_size_;
   bool              autoinc_mode_is_order_;
+  int64_t           autoinc_version_;
+  uint64_t          autoinc_auto_increment_; // auto increment value of table schema
   OB_UNIS_VERSION(1);
 };
 

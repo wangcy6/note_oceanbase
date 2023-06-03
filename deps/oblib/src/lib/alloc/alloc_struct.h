@@ -68,12 +68,20 @@ enum ObAllocPrio
 struct ObLabel
 {
   ObLabel()
-    : ObLabel(nullptr)
+    : str_(nullptr)
   {}
-  template<typename T>
-  ObLabel(const T &t)
+  template<std::size_t N>
+  ObLabel(const char (&str)[N])
   {
-    *this = t;
+    STATIC_ASSERT(N - 1 <= AOBJECT_LABEL_SIZE,
+        "label length longer than 15 is not allowed!");
+    str_ = str;
+  }
+  template <typename T, typename DUMP_T=
+            typename std::enable_if<std::is_convertible<T, const char*>::value>::type>
+  ObLabel(T str)
+  {
+    str_ = str;
   }
   // The caller needs to ensure that it ends with'\0'
   template<std::size_t N>
@@ -104,13 +112,14 @@ struct ObLabel
   }
   // for format print
   operator const char*() const;
-  bool is_valid() const { return nullptr != str_; }
+  bool is_valid() const { return nullptr != str_ && '\0' != str_[0]; }
   int64_t to_string(char *buf, const int64_t buf_len) const;
   const char *str_;
 };
 
 struct ObMemAttr
 {
+  friend ObMemAttr DoNotUseMe(ObMemAttr &attr);
   uint64_t tenant_id_;
   ObLabel label_;
   uint64_t ctx_id_;
@@ -126,7 +135,38 @@ struct ObMemAttr
         ctx_id_(ctx_id),
         prio_(prio) {}
   int64_t to_string(char* buf, const int64_t buf_len) const;
+  bool use_500() const { return use_500_; }
+private:
+  bool use_500_ = false;
 };
+
+inline ObMemAttr DoNotUseMe(ObMemAttr &attr)
+{
+#ifdef ENABLE_500_FALLBACK
+  attr.use_500_ = true;
+#endif
+  return attr;
+}
+
+inline ObMemAttr DoNotUseMe(const ObMemAttr &&attr)
+{
+  ObMemAttr attr_cpy = attr;
+  return DoNotUseMe(attr_cpy);
+}
+
+inline ObMemAttr DoNotUseMe(const ObLabel &label)
+{
+  ObMemAttr attr(OB_SERVER_TENANT_ID, label);
+  return DoNotUseMe(attr);
+}
+
+inline ObMemAttr DoNotUseMe(const ObLabel &label, const uint64_t ctx_id)
+{
+  ObMemAttr attr(OB_SERVER_TENANT_ID, label, ctx_id);
+  return DoNotUseMe(attr);
+}
+
+#define SET_USE_500(args...) ::oceanbase::lib::DoNotUseMe(args)
 
 struct AllocHelper
 {
@@ -157,7 +197,7 @@ struct AChunk {
   OB_INLINE char *blk_data(const ABlock *block) const;
   OB_INLINE void mark_unused_blk_offset_bit(int offset);
   OB_INLINE void unmark_unused_blk_offset_bit(int offset);
-
+  OB_INLINE bool is_all_blks_unused();
   union {
     uint32_t MAGIC_CODE_;
     struct {
@@ -237,6 +277,7 @@ struct AObject {
     struct {
       struct {
         uint8_t on_leak_check_ : 1;
+        uint8_t on_malloc_sample_ : 1;
       };
     };
   };
@@ -361,6 +402,20 @@ void AChunk::unmark_unused_blk_offset_bit(int offset)
   unused_blk_bs_.unset(offset);
 }
 
+bool AChunk::is_all_blks_unused()
+{
+  bool ret = false;
+  if (0 != washed_size_) {
+    auto blk_bs = blk_bs_;
+    blk_bs.combine(unused_blk_bs_,
+          [](int64_t left, int64_t right) { return (left ^ right); });
+    ret = -1 == blk_bs.min_bit_ge(0);
+  } else {
+    ret = -1 == blk_bs_.min_bit_ge(1);
+  }
+  return ret;
+}
+
 ABlock *AChunk::offset2blk(int offset) const
 {
   return (ABlock*)data_ + offset;
@@ -417,6 +472,7 @@ char *AChunk::blk_data(const ABlock *block) const
 ABlock::ABlock() :
     MAGIC_CODE_(ABLOCK_MAGIC_CODE),
     alloc_bytes_(0),
+    ablock_size_(0),
     obj_set_(NULL), mem_context_(0),
     prev_(this), next_(this)
 {}
@@ -460,7 +516,8 @@ char *ABlock::data() const
 AObject::AObject()
     : MAGIC_CODE_(FREE_AOBJECT_MAGIC_CODE),
       nobjs_(0), nobjs_prev_(0), obj_offset_(0),
-      alloc_bytes_(0), tenant_id_(0)
+      alloc_bytes_(0), tenant_id_(0),
+      on_leak_check_(false), on_malloc_sample_(false)
 {
 }
 
@@ -529,6 +586,27 @@ private:
   static void fmt(char *buf, int64_t buf_len, int64_t &pos, const char *str);
 private:
   char buf_[MAX_LEN + 1];
+};
+
+class ObMallocHookAttrGuard
+{
+public:
+  ObMallocHookAttrGuard(const ObMemAttr& attr)
+   : old_attr_(tl_mem_attr)
+  {
+    tl_mem_attr = attr;
+  }
+  ~ObMallocHookAttrGuard()
+  {
+    tl_mem_attr = old_attr_;
+  }
+  static ObMemAttr get_tl_mem_attr()
+  {
+    return tl_mem_attr;
+  }
+private:
+  static thread_local ObMemAttr tl_mem_attr;
+  ObMemAttr old_attr_;
 };
 
 } // end of namespace lib

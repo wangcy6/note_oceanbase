@@ -143,7 +143,8 @@ int ObMergeGroupByOp::init_rollup_distributor()
       int64_t row_count = child_->get_spec().rows_;
       if (OB_FAIL(ret)) {
       } else if (OB_FAIL(inner_sort_.init(ctx_.get_my_session()->get_effective_tenant_id(),
-          &MY_SPEC.sort_collations_, &MY_SPEC.sort_cmp_funcs_, &eval_ctx_, &ctx_,
+          &MY_SPEC.sort_collations_, &MY_SPEC.sort_cmp_funcs_,
+          &eval_ctx_, &ctx_,
           MY_SPEC.enable_encode_sort_, false, false /* need_rewind */))) {
         LOG_WARN("failed to init sort", K(ret));
       } else if (OB_FAIL(ObPxEstimateSizeUtil::get_px_size(&ctx_,
@@ -242,6 +243,7 @@ int ObMergeGroupByOp::init()
         for (int64_t i = 0; !has_dup_group_expr_ && i < MY_SPEC.is_duplicate_rollup_expr_.count(); ++i) {
           has_dup_group_expr_ = MY_SPEC.is_duplicate_rollup_expr_.at(i);
         }
+        aggr_processor_.set_op_eval_infos(&eval_infos_);
       }
     }
   }
@@ -362,7 +364,7 @@ int ObMergeGroupByOp::rewrite_rollup_column(ObExpr *&diff_expr)
       : MY_SPEC.rollup_exprs_[cur_output_group_id_ - MY_SPEC.group_exprs_.count()]);
   LOG_DEBUG("debug write rollup column 1", KP(diff_expr), K(cur_output_group_id_));
   //for SELECT GROUPING(z0_test0) FROM Z0CASE GROUP BY z0_test0, ROLLUP(z0_test0);
-  //issue:https://work.aone.alibaba-inc.com/issue/33780805
+  //issue:
   if (cur_output_group_id_ >= MY_SPEC.group_exprs_.count()) {
     for (int64_t i = 0; diff_expr != NULL && i < MY_SPEC.group_exprs_.count(); ++i) {
       if (MY_SPEC.group_exprs_[i] == diff_expr) {
@@ -448,8 +450,9 @@ int ObMergeGroupByOp::collect_local_ndvs()
     ObExpr *expr = all_groupby_exprs_.at(i);
     if (OB_FAIL(expr->eval(eval_ctx_, datum))) {
       LOG_WARN("failed to eval expr", K(ret));
+    } else if (OB_FAIL(expr->basic_funcs_->murmur_hash_v2_(*datum, hash_value, hash_value))) {
+      LOG_WARN("failed to do hash", K(ret));
     } else {
-      hash_value = expr->basic_funcs_->murmur_hash_(*datum, hash_value);
       if ((0 < n_group && i == n_group - 1) || i >= n_group) {
         if (0 < n_group) {
           ndv_calculator_[i - n_group + 1].set(hash_value);
@@ -477,9 +480,11 @@ int ObMergeGroupByOp::process_parallel_rollup_key(ObRollupNDVInfo &ndv_info)
     ObRollupKeyPieceMsg piece;
     piece.op_id_ = MY_SPEC.id_;
     piece.thread_id_ = GETTID();
-    piece.dfo_id_ = proxy.get_dfo_id();
+    piece.source_dfo_id_ = proxy.get_dfo_id();
+    piece.target_dfo_id_ = proxy.get_dfo_id();
     piece.rollup_ndv_ = ndv_info;
-    if (OB_FAIL(proxy.get_dh_msg(MY_SPEC.id_,
+    if (OB_FAIL(proxy.get_dh_msg_sync(MY_SPEC.id_,
+        dtl::DH_ROLLUP_KEY_WHOLE_MSG,
         piece,
         temp_whole_msg,
         ctx_.get_physical_plan_ctx()->get_timeout_timestamp()))) {
@@ -523,7 +528,7 @@ int ObMergeGroupBySpec::register_to_datahub(ObExecContext &ctx) const
         ObRollupKeyWholeMsg::WholeMsgProvider *provider =
           new (buf)ObRollupKeyWholeMsg::WholeMsgProvider();
         ObSqcCtx &sqc_ctx = ctx.get_sqc_handler()->get_sqc_ctx();
-        if (OB_FAIL(sqc_ctx.add_whole_msg_provider(get_id(), *provider))) {
+        if (OB_FAIL(sqc_ctx.add_whole_msg_provider(get_id(), dtl::DH_ROLLUP_KEY_WHOLE_MSG, *provider))) {
           LOG_WARN("fail add whole msg provider", K(ret));
         }
       }
@@ -761,6 +766,9 @@ int ObMergeGroupByOp::get_child_next_batch_row(
       } else {
         LOG_WARN("failed to get sorted row", K(ret));
       }
+    } else if (aggr_processor_.get_need_advance_collect() &&
+      OB_FAIL(brs_holder_.save(MY_SPEC.max_batch_size_))) {
+      LOG_WARN("failed to backup child exprs", K(ret));
     } else {
       const_cast<ObBatchRows *>(batch_rows)->size_ = read_rows;
       const_cast<ObBatchRows *>(batch_rows)->end_ = false;
@@ -779,6 +787,9 @@ int ObMergeGroupByOp::get_child_next_batch_row(
   } else {
     if (OB_FAIL(child_->get_next_batch(max_row_cnt, batch_rows))) {
       LOG_WARN("failed to get child row", K(ret));
+    } else if (aggr_processor_.get_need_advance_collect() &&
+      OB_FAIL(brs_holder_.save(MY_SPEC.max_batch_size_))) {
+      LOG_WARN("failed to backup child exprs", K(ret));
     }
   }
   return ret;
@@ -814,10 +825,10 @@ int ObMergeGroupByOp::batch_collect_local_ndvs(const ObBatchRows *child_brs)
       bool is_batch_seed = (0 != i);
       ObDatum &curr_datum = expr->locate_batch_datums(eval_ctx_)[0];
       if (0 == i) {
-        expr->basic_funcs_->murmur_hash_batch_(rollup_hash_vals_, &curr_datum, expr->is_batch_result(),
+        expr->basic_funcs_->murmur_hash_v2_batch_(rollup_hash_vals_, &curr_datum, expr->is_batch_result(),
                   *child_brs->skip_, child_brs->size_, &hash_value_seed, is_batch_seed);
       } else {
-        expr->basic_funcs_->murmur_hash_batch_(rollup_hash_vals_, &curr_datum, expr->is_batch_result(),
+        expr->basic_funcs_->murmur_hash_v2_batch_(rollup_hash_vals_, &curr_datum, expr->is_batch_result(),
                   *child_brs->skip_, child_brs->size_, rollup_hash_vals_, is_batch_seed);
       }
       // whether it need skip???
@@ -879,6 +890,18 @@ int ObMergeGroupByOp::batch_process_rollup_distributor(const int64_t max_row_cnt
   return ret;
 }
 
+int ObMergeGroupByOp::advance_collect_result(int64_t group_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(aggr_processor_.advance_collect_result(group_id))) {
+    LOG_WARN("failed to calc and material distinct result", K(ret), K(group_id));
+  } else if (OB_FAIL(brs_holder_.restore())) {
+    LOG_WARN("failed to restore child exprs", K(ret));
+  }
+  clear_evaluated_flag();
+  return ret;
+}
+
 int ObMergeGroupByOp::inner_get_next_batch(const int64_t max_row_cnt)
 {
   // TODO qubin.qb: support rollup in next release
@@ -909,6 +932,7 @@ int ObMergeGroupByOp::inner_get_next_batch(const int64_t max_row_cnt)
     }
 
     if (OB_SUCC(ret)) {
+      brs_holder_.reset();
       while (OB_SUCC(ret) &&
              OB_SUCC(get_child_next_batch_row(child_batch_cnt, child_brs))) {
         if (child_brs->end_ && child_brs->size_ == 0) {
@@ -925,7 +949,13 @@ int ObMergeGroupByOp::inner_get_next_batch(const int64_t max_row_cnt)
           LOG_WARN("failed to process_batch_result", K(ret));
         } else if (stop_batch_iterating(*child_brs, output_batch_cnt)) {
           // backup child exprs for this round
-          OZ(brs_holder_.save(std::min(MY_SPEC.max_batch_size_, get_output_queue_cnt())));
+          // for the vectorized merge distinct scenario, the result will be calculated and materialized
+          // in advance. therefore, when a backup is performed after a batch processing is completed
+          // the output expression of the child has been refilled. so, it is necessary to perform backup
+          // after get next batch from the child operator, and there is no need to backup again.
+          if (!aggr_processor_.get_need_advance_collect()) {
+            OZ(brs_holder_.save(std::min(MY_SPEC.max_batch_size_, get_output_queue_cnt())));
+          }
           LOG_DEBUG("break out of iteratation", K(child_brs->end_),
                     K(output_batch_cnt), K(output_queue_cnt_));
           break;
@@ -936,6 +966,7 @@ int ObMergeGroupByOp::inner_get_next_batch(const int64_t max_row_cnt)
       if (OB_SUCC(ret) && child_brs->end_ && !OB_ISNULL(cur_group_row_)) {
         // add last unfinised grouprow into output group
         inc_output_queue_cnt();
+        const int64_t advance_collect_group_id = curr_group_rowid_;
         if (MY_SPEC.has_rollup_) {
           int64_t start_rollup_id = MY_SPEC.group_exprs_.count() - 1;
           int64_t end_rollup_id = all_groupby_exprs_.count() - 1;
@@ -966,6 +997,11 @@ int ObMergeGroupByOp::inner_get_next_batch(const int64_t max_row_cnt)
                 curr_group_rowid_))) {
               LOG_WARN("failed to genereate rollup group row", K(ret));
           }
+        }
+        if (OB_FAIL(ret)) {
+        } else if (aggr_processor_.get_need_advance_collect()
+          && OB_FAIL(advance_collect_result(advance_collect_group_id))) {
+          LOG_WARN("failed to collect distinct result", K(ret), K(advance_collect_group_id));
         }
       }
       if (OB_SUCC(ret) &&
@@ -1242,7 +1278,10 @@ int ObMergeGroupByOp::gen_rollup_group_rows(
       ++curr_group_rowid_;
       curr_group_row = nullptr;
       inc_output_queue_cnt();
-      if (OB_FAIL(get_empty_rollup_row(curr_group_rowid_, curr_group_row))) {
+      if (aggr_processor_.get_need_advance_collect()
+        && OB_FAIL(advance_collect_result(prev_group_row_id))) {
+        LOG_WARN("failed to calc and material distinct result", K(ret), K(prev_group_row_id));
+      } else if (OB_FAIL(get_empty_rollup_row(curr_group_rowid_, curr_group_row))) {
         LOG_WARN("failed to get one new group row", K(ret));
       } else if (OB_FAIL(aggr_processor_.swap_group_row(prev_group_row_id, curr_group_rowid_))) {
         LOG_WARN("failed to swap group row", K(ret));
@@ -1272,6 +1311,7 @@ int ObMergeGroupByOp::process_batch(const ObBatchRows &brs)
   int64_t all_group_cnt = all_groupby_exprs_.count();
   bool no_need_process = false;
   bool need_dup_data = 0 < MY_SPEC.distinct_exprs_.count() && 0 == MY_SPEC.rollup_exprs_.count();
+  int cmp_ret = 0;
   LOG_DEBUG("begin process_batch_results", K(brs.size_),
            K(group_start_idx), K(group_end_idx), K(curr_group_rowid_));
 
@@ -1314,7 +1354,9 @@ int ObMergeGroupByOp::process_batch(const ObBatchRows &brs)
         ObExpr *expr = all_groupby_exprs_.at(i);
         // performance critical: use expr directly NO defensive check
         ObDatum &result = expr->locate_expr_datum(eval_ctx_);
-        if (0 != expr->basic_funcs_->null_first_cmp_(last_datum, result)) {
+        if (OB_FAIL(expr->basic_funcs_->null_first_cmp_(last_datum, result, cmp_ret))) {
+          LOG_WARN("compare failed", K(ret));
+        } else if (0 != cmp_ret) {
           found_new_group = true;
           if (i < group_count) {
             diff_group_idx = std::max(i, MY_SPEC.group_exprs_.count() - 1);
@@ -1345,6 +1387,7 @@ int ObMergeGroupByOp::process_batch(const ObBatchRows &brs)
           LOG_WARN("failed to aggregate_group_rows", K(curr_group_rowid_), K(ret),
                   K(group_start_idx), K(group_end_idx));
         } else {
+          const int64_t advance_collect_group_id = curr_group_rowid_;
           if (MY_SPEC.has_rollup_) {
             int64_t start_rollup_id = diff_group_idx;
             int64_t end_rollup_id = all_groupby_exprs_.count() - 1;
@@ -1377,14 +1420,19 @@ int ObMergeGroupByOp::process_batch(const ObBatchRows &brs)
               LOG_WARN("failed to genereate rollup group row", K(ret));
             }
           }
-          ++curr_group_rowid_;
-          // create new group
           if (OB_FAIL(ret)) {
-          } else if (OB_FAIL(get_cur_group_row(curr_group_rowid_, cur_group_row_,
-              all_groupby_exprs_, all_groupby_exprs_.count()))) {
-            LOG_WARN("failed to get one new group row", K(ret));
+          } else if (aggr_processor_.get_need_advance_collect()
+            && OB_FAIL(advance_collect_result(advance_collect_group_id))) {
+            LOG_WARN("failed to collect distinct result", K(ret), K(advance_collect_group_id));
           } else {
-            group_start_idx = idx; // record new start idx in next round
+            ++curr_group_rowid_;
+            // create new group
+            if (OB_FAIL(get_cur_group_row(curr_group_rowid_, cur_group_row_,
+                all_groupby_exprs_, all_groupby_exprs_.count()))) {
+              LOG_WARN("failed to get one new group row", K(ret));
+            } else {
+              group_start_idx = idx; // record new start idx in next round
+            }
           }
         }
       }
@@ -1473,6 +1521,7 @@ int ObMergeGroupByOp::check_same_group(
   ObAggregateProcessor::GroupRow *cur_group_row, int64_t &diff_pos)
 {
   int ret = OB_SUCCESS;
+  int cmp_ret = 0;
   diff_pos = OB_INVALID_INDEX;
   int64_t all_group_cnt = all_groupby_exprs_.count();
   if (0 >= all_group_cnt) {
@@ -1492,7 +1541,9 @@ int ObMergeGroupByOp::check_same_group(
       if (OB_FAIL(expr->eval(eval_ctx_, result))) {
         LOG_WARN("eval failed", K(ret));
       } else {
-        if (0 != expr->basic_funcs_->null_first_cmp_(last_datum, *result)) {
+        if (OB_FAIL(expr->basic_funcs_->null_first_cmp_(last_datum, *result, cmp_ret))) {
+          LOG_WARN("compare failed", K(ret));
+        } else if (0 != cmp_ret) {
           found_new_group = true;
           diff_pos = i;
         } // end if
@@ -1508,6 +1559,7 @@ int ObMergeGroupByOp::check_unique_distinct_columns(
   ObAggregateProcessor::GroupRow *cur_group_row, bool &is_same_before_row)
 {
   int ret = OB_SUCCESS;
+  int cmp_ret = 0;
   ObDatum *prev_cells = nullptr;
   ObDatum *cur_datum = nullptr;
   is_same_before_row = true;
@@ -1536,7 +1588,9 @@ int ObMergeGroupByOp::check_unique_distinct_columns(
         if (OB_FAIL(expr->eval(eval_ctx_, cur_datum))) {
           LOG_WARN("eval failed", K(ret));
         } else {
-          if (0 != expr->basic_funcs_->null_first_cmp_(last_datum, *cur_datum)) {
+          if (OB_FAIL(expr->basic_funcs_->null_first_cmp_(last_datum, *cur_datum, cmp_ret))) {
+            LOG_WARN("compare failed", K(ret));
+          } else if (0 != cmp_ret) {
             is_same_before_row = false;
           } // end if
         } // end if
@@ -1564,6 +1618,7 @@ int ObMergeGroupByOp::check_unique_distinct_columns_for_batch(
   bool &is_same_before_row, int64_t cur_row_idx)
 {
   int ret = OB_SUCCESS;
+  int cmp_ret = 0;
   if (is_first_calc_) {
     is_same_before_row = false;
     LOG_DEBUG("debug is_first_calc", K(ret), K(is_same_before_row));
@@ -1583,8 +1638,11 @@ int ObMergeGroupByOp::check_unique_distinct_columns_for_batch(
         }
         ObExpr *expr = MY_SPEC.distinct_exprs_.at(i);
         ObDatumVector datums = expr->locate_expr_datumvector(eval_ctx_);
-        if (0 != expr->basic_funcs_->null_first_cmp_(*datums.at(cur_group_last_row_idx_),
-                                                     *datums.at(cur_row_idx))) {
+        if (OB_FAIL(expr->basic_funcs_->null_first_cmp_(*datums.at(cur_group_last_row_idx_),
+                                                        *datums.at(cur_row_idx),
+                                                        cmp_ret))) {
+          LOG_WARN("compare failed", K(ret));
+        } else if (0 != cmp_ret) {
           is_same_before_row = false;
         } // end if
       } // end for
@@ -1600,7 +1658,9 @@ int ObMergeGroupByOp::check_unique_distinct_columns_for_batch(
         const ObDatum &last_datum = prev_cells[distinct_col_idx_in_output_.at(i)];
         ObExpr *expr = MY_SPEC.distinct_exprs_.at(i);
         ObDatum &result = expr->locate_expr_datum(eval_ctx_);
-        if (0 != expr->basic_funcs_->null_first_cmp_(last_datum, result)) {
+        if (OB_FAIL(expr->basic_funcs_->null_first_cmp_(last_datum, result, cmp_ret))){
+          LOG_WARN("compare failed", K(ret));
+        } else if (0 != cmp_ret) {
           is_same_before_row = false;
         } // end if
       } // end for

@@ -15,10 +15,21 @@
 #include "sql/engine/px/ob_px_sqc_handler.h"
 #include "sql/engine/px/ob_px_util.h"
 #include "sql/engine/px/ob_px_sqc_handler.h"
+#include "share/external_table/ob_external_table_file_mgr.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 using namespace oceanbase::sql::dtl;
+
+OB_SERIALIZE_MEMBER(ObPxDetectableIds,
+                    qc_detectable_id_,
+                    sqc_detectable_id_);
+
+OB_SERIALIZE_MEMBER(ObP2PDhMapInfo,
+                    p2p_sequence_ids_,
+                    target_addrs_);
+
+OB_SERIALIZE_MEMBER(ObQCMonitoringInfo, sql_, qc_tid_);
 
 OB_SERIALIZE_MEMBER(ObPxSqcMeta,
                     execution_id_,
@@ -48,7 +59,14 @@ OB_SERIALIZE_MEMBER(ObPxSqcMeta,
                     partition_pruning_table_locations_,
                     ignore_vtable_error_,
                     temp_table_ctx_,
-                    access_table_location_keys_);
+                    access_table_location_keys_,
+                    adjoining_root_dfo_,
+                    is_single_tsc_leaf_dfo_,
+                    access_external_table_files_,
+                    px_detectable_ids_,
+                    p2p_dh_map_info_,
+                    sqc_count_,
+                    monitoring_info_);
 OB_SERIALIZE_MEMBER(ObPxTask,
                     qc_id_,
                     dfo_id_,
@@ -75,6 +93,31 @@ OB_SERIALIZE_MEMBER(ObSqcTableLocationKey,
                     tablet_id_,
                     is_dml_,
                     is_loc_uncertain_);
+OB_SERIALIZE_MEMBER(ObPxCleanDtlIntermResInfo, ch_total_info_, sqc_id_, task_count_);
+OB_SERIALIZE_MEMBER(ObPxCleanDtlIntermResArgs, info_, batch_size_);
+
+int ObQCMonitoringInfo::init(const ObExecContext &exec_ctx) {
+  int ret = OB_SUCCESS;
+  qc_tid_ = GETTID();
+  if (OB_NOT_NULL(exec_ctx.get_sql_ctx())) {
+    sql_ = exec_ctx.get_sql_ctx()->cur_sql_;
+  }
+  if (sql_.length() > ObQCMonitoringInfo::LIMIT_LENGTH) {
+    sql_.set_length(ObQCMonitoringInfo::LIMIT_LENGTH);
+  }
+  return ret;
+}
+
+int ObQCMonitoringInfo::assign(const ObQCMonitoringInfo &other) {
+  int ret = OB_SUCCESS;
+  sql_ = other.sql_;
+  qc_tid_ = other.qc_tid_;
+  return ret;
+}
+
+void ObQCMonitoringInfo::reset() {
+  sql_.reset();
+}
 
 int ObPxSqcMeta::assign(const ObPxSqcMeta &other)
 {
@@ -102,6 +145,10 @@ int ObPxSqcMeta::assign(const ObPxSqcMeta &other)
     LOG_WARN("failed to assgin to table location keys.", K(ret));
   } else if (OB_FAIL(access_table_location_indexes_.assign(other.access_table_location_indexes_))) {
     LOG_WARN("failed to assgin to table location keys.", K(ret));
+  } else if (OB_FAIL(p2p_dh_map_info_.assign(other.p2p_dh_map_info_))) {
+    LOG_WARN("fail to assign p2p dh map info", K(ret));
+  } else if (OB_FAIL(monitoring_info_.assign(other.monitoring_info_))) {
+    LOG_WARN("fail to assign qc monitoring info", K(ret));
   } else {
     execution_id_ = other.execution_id_;
     qc_id_ = other.qc_id_;
@@ -130,6 +177,23 @@ int ObPxSqcMeta::assign(const ObPxSqcMeta &other)
     recieve_use_interm_result_ = other.recieve_use_interm_result_;
     ignore_vtable_error_ = other.ignore_vtable_error_;
     server_not_alive_ = other.server_not_alive_;
+    adjoining_root_dfo_ = other.adjoining_root_dfo_;
+    is_single_tsc_leaf_dfo_ = other.is_single_tsc_leaf_dfo_;
+    px_detectable_ids_ = other.px_detectable_ids_;
+    interrupt_by_dm_ = other.interrupt_by_dm_;
+    sqc_count_ = other.sqc_count_;
+  }
+  access_external_table_files_.reuse();
+  for (int i = 0; OB_SUCC(ret) && i < other.access_external_table_files_.count(); i++) {
+    const ObExternalFileInfo &other_file = other.access_external_table_files_.at(i);
+    ObExternalFileInfo temp_file;
+    temp_file.file_id_ = other_file.file_id_;
+    temp_file.file_addr_ = other_file.file_addr_;
+    if (OB_FAIL(ob_write_string(allocator_, other_file.file_url_, temp_file.file_url_))) {
+      LOG_WARN("fail to write string", K(ret));
+    } else if (OB_FAIL(access_external_table_files_.push_back(temp_file))) {
+      LOG_WARN("fail to push back", K(ret));
+    }
   }
   return ret;
 }
@@ -352,40 +416,6 @@ int ObDfo::alloc_data_xchg_ch()
   }
   return ret;
 }
-int ObDfo::alloc_bloom_filter_ch()
-{
-  int ret = OB_SUCCESS;
-  if (is_px_create_bloom_filter()) {
-  } else if (is_px_use_bloom_filter()) {
-    use_filter_ch_map_.set_filter_id(px_bf_id_);
-  }
-  return ret;
-}
-
-
-int ObDfo::condition_push_back(ObPxBloomFilterChSet &ch_set, ObPxBloomFilterChSets &ch_sets)
-{
-  int ret = OB_SUCCESS;
-  bool repeat = false;
-  for (int i = 0;i < ch_sets.count(); ++i) {
-    if (ch_set.get_exec_addr() == ch_sets.at(i).get_exec_addr()) {
-      repeat = true;
-      break;
-    }
-  }
-  if (!repeat && OB_FAIL(ch_sets.push_back(ch_set))) {
-    LOG_WARN("fail to push back ch_set", K(ret));
-  }
-  return ret;
-}
-
-
-int ObDfo::get_use_filter_chs(ObPxBloomFilterChInfo &create_filter_ch_map)
-{
-  int ret = OB_SUCCESS;
-  ret = create_filter_ch_map.assign(use_filter_ch_map_);
-  return ret;
-}
 
 int ObDfo::get_task_transmit_chs_for_update(ObIArray<ObPxTaskChSet *> &ch_sets)
 {
@@ -579,7 +609,7 @@ int ObPxRpcInitSqcArgs::serialize_common_parts_2(
                 buf, buf_len, pos, *exec_ctx_, *const_cast<ObExprFrameInfo *>(frame_info)))) {
       LOG_WARN("failed to serialize rt expr", K(ret));
     } else if (OB_FAIL(ObPxTreeSerializer::serialize_tree(
-                buf, buf_len, pos, *op_spec_root_, sqc_.is_fulltree(), &seri_ctx))) {
+                buf, buf_len, pos, *op_spec_root_, sqc_.is_fulltree(), sqc_.get_exec_addr(), &seri_ctx))) {
       LOG_WARN("fail serialize root_op", K(ret), K(buf_len), K(pos));
     } else if (OB_FAIL(ObPxTreeSerializer::serialize_op_input(
                 buf, buf_len, pos, *op_spec_root_, exec_ctx_->get_kit_store(), sqc_.is_fulltree()))) {
@@ -719,7 +749,7 @@ int ObPxRpcInitSqcArgs::do_deserialize(int64_t &pos, const char *net_buf, int64_
     }
     if (OB_SUCC(ret)) {
       // Compact mode may not set while rpc argument deserialize, set it manually.
-      // See: https://work.aone.alibaba-inc.com/issue/22053604
+      // See:
       lib::CompatModeGuard g(ORACLE_MODE == exec_ctx_->get_my_session()->get_compatibility_mode()
           ? lib::Worker::CompatMode::ORACLE
           : lib::Worker::CompatMode::MYSQL);
@@ -777,7 +807,6 @@ OB_DEF_SERIALIZE(ObPxRpcInitTaskArgs)
     ret = OB_NOT_INIT;
     LOG_WARN("task not init", K_(exec_ctx), K_(ser_phy_plan));
   }
-
   uint64_t sqc_task_ptr_val = reinterpret_cast<uint64_t>(sqc_task_ptr_);
   uint64_t sqc_handler_ptr_val = reinterpret_cast<uint64_t>(sqc_handler_);
 
@@ -798,7 +827,7 @@ OB_DEF_SERIALIZE(ObPxRpcInitTaskArgs)
         buf, buf_len, pos, *exec_ctx_, *const_cast<ObExprFrameInfo *>(frame_info)))) {
       LOG_WARN("failed to serialize rt expr", K(ret));
     } else if (OB_FAIL(ObPxTreeSerializer::serialize_tree(
-                buf, buf_len, pos, *op_spec_root_, task_.is_fulltree()))) {
+                buf, buf_len, pos, *op_spec_root_, task_.is_fulltree(), task_.get_exec_addr()))) {
       LOG_WARN("fail serialize root_op", K(ret), K(buf_len), K(pos));
     } else if (OB_FAIL(ObPxTreeSerializer::serialize_op_input(
         buf, buf_len, pos, *op_spec_root_, exec_ctx_->get_kit_store(), task_.is_fulltree()))) {
@@ -983,6 +1012,7 @@ void ObDfo::reset_resource(ObDfo *dfo)
       }
     }
     dfo->transmit_ch_sets_.reset();
+    dfo->p2p_dh_map_info_.destroy();
     dfo->~ObDfo();
     dfo = nullptr;
   }

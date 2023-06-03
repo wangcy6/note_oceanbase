@@ -43,6 +43,8 @@ struct ObCurTraceId
     OB_UNIS_VERSION(1);
   public:
     inline TraceId() { uval_[0] = 0; uval_[1] = 0; uval_[2] = 0; uval_[3] = 0; }
+
+    inline bool is_valid() const { return id_.seq_ != 0; }
     inline bool is_invalid() const { return id_.seq_ == 0 ? true : false; }
     inline void init(const ObAddr &ip_port)
     {
@@ -165,6 +167,8 @@ struct ObCurTraceId
       return hash_value;
     }
 
+    inline int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
+
     inline bool operator == (const TraceId &other) const
     {
       return equals(other);
@@ -266,7 +270,7 @@ struct ObCurTraceId
     }
   }
 #ifdef COMPILE_DLL_MODE
-private:		
+private:
   static TLOCAL(TraceId, trace_id_);
 #endif
 };

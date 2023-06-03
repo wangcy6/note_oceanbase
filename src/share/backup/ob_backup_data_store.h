@@ -103,6 +103,25 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObBackupDataTabletToLSDesc);
 };
 
+struct ObBackupDeletedTabletToLSDesc final : public ObExternBackupDataDesc
+{
+public:
+  static const uint8_t FILE_VERSION = 1;
+  OB_UNIS_VERSION(FILE_VERSION);
+public:
+  ObBackupDeletedTabletToLSDesc()
+    : ObExternBackupDataDesc(ObBackupFileType::BACKUP_DELETED_TABLET_INFO, FILE_VERSION),
+      deleted_tablet_to_ls_() {}
+  virtual ~ObBackupDeletedTabletToLSDesc() {}
+
+  bool is_valid() const override;
+  INHERIT_TO_STRING_KV("ObExternBackupDataDesc", ObExternBackupDataDesc, K_(deleted_tablet_to_ls));
+public:
+  ObSArray<ObBackupDataTabletToLSInfo> deleted_tablet_to_ls_;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObBackupDeletedTabletToLSDesc);
+};
+
 struct ObExternBackupSetPlaceholderDesc final : public ObExternBackupDataDesc
 {
 public:
@@ -273,6 +292,9 @@ public:
   int read_tablet_to_ls_info(const int64_t turn_id, ObBackupDataTabletToLSDesc &tablet_to_ls_info);
   int read_tablet_to_ls_info(const ObLSID &ls_id, const int64_t turn_id, const int64_t retry_id, 
       ObBackupDataTabletToLSDesc &tablet_to_ls_info);
+  // write and read deleted_tablet_info
+  int write_deleted_tablet_info(const ObBackupDeletedTabletToLSDesc &deleted_tablet_info);
+  int read_deleted_tablet_info(const ObLSID &ls_id, ObIArray<ObTabletID> &deleted_tablet_ids);
   
   // write tenant backup set infos
   int write_tenant_backup_set_infos(const ObTenantBackupSetInfosDesc &tenant_backup_set_infos);
@@ -295,7 +317,13 @@ public:
 
   int get_backup_set_array(const common::ObString &passwd_array, const SCN &restore_scn,
       SCN &restore_start_scn, common::ObIArray<share::ObRestoreBackupSetBriefInfo> &backup_set_list);
+<<<<<<< HEAD
+=======
+  int get_max_backup_set_file_info(const common::ObString &passwd_array, ObBackupSetFileDesc &output_desc);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int get_max_sys_ls_retry_id(const share::ObBackupPath &backup_path, const ObLSID &ls_id, int64_t &retry_id);
+  int write_root_key_info(const uint64_t tenant_id);
+  int read_root_key_info(const uint64_t tenant_id);
 
   TO_STRING_KV(K_(backup_desc));
 

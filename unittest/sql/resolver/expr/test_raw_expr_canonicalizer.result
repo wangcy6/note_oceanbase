@@ -27,8 +27,6 @@ not (10 > 5 and 100 < 9)
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_OP_LE",
@@ -55,8 +53,6 @@ not (10 > 5 and 100 < 9)
         "CNT_CONST"
       ],
       "rel_id": [
-      ],
-      "expr_levels": [
       ],
       "children": [
          {
@@ -146,8 +142,6 @@ not (10 > 5 and 100 < 9)
         "CNT_CONST"
       ],
       "rel_id": [
-      ],
-      "expr_levels": [
       ],
       "children": [
          {
@@ -240,8 +234,6 @@ not not a > b
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_REF_COLUMN",
@@ -276,9 +268,6 @@ not not a > b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -289,7 +278,10 @@ not not a > b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     },
      {
       "item_type":"T_REF_COLUMN",
@@ -324,9 +316,6 @@ not not a > b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -337,7 +326,10 @@ not not a > b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     }
   ]
 }
@@ -367,8 +359,6 @@ not a > b
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_REF_COLUMN",
@@ -403,9 +393,6 @@ not a > b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -416,7 +403,10 @@ not a > b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     },
      {
       "item_type":"T_REF_COLUMN",
@@ -451,9 +441,6 @@ not a > b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -464,7 +451,10 @@ not a > b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     }
   ]
 }
@@ -494,8 +484,6 @@ not a = b
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_REF_COLUMN",
@@ -530,9 +518,6 @@ not a = b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -543,7 +528,10 @@ not a = b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     },
      {
       "item_type":"T_REF_COLUMN",
@@ -578,9 +566,6 @@ not a = b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -591,7 +576,10 @@ not a = b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     }
   ]
 }
@@ -621,8 +609,6 @@ not a < b
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_REF_COLUMN",
@@ -657,9 +643,6 @@ not a < b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -670,7 +653,10 @@ not a < b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     },
      {
       "item_type":"T_REF_COLUMN",
@@ -705,9 +691,6 @@ not a < b
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -718,7 +701,10 @@ not a < b
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     }
   ]
 }
@@ -749,8 +735,6 @@ not a is true
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_REF_COLUMN",
@@ -785,9 +769,6 @@ not a is true
       "synonym_name":"",
       "synonym_db_name":"",
       "column_name":"",
-      "expr_level":-1,
-      "expr_levels": [
-      ],
       "column_flags":0,
       "enum_set_values": [
       ],
@@ -798,7 +779,10 @@ not a is true
       "from_alias_table":false,
       "is_rowkey_column":false,
       "is_unique_key_column":false,
-      "is_mul_key_column":false
+      "is_mul_key_column":false,
+      "is_strict_json_column":0,
+      "srs_id":-1,
+      "udt_set_id":0
     },
      {
       "item_type":"T_BOOL",
@@ -828,36 +812,6 @@ not a is true
       ],
       "value": {
         "TINYINT":1
-      }
-    },
-     {
-      "item_type":"T_BOOL",
-      "result_type": {
-        "meta": {
-          "type":"TINYINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":-1,
-          "precision":-1,
-          "scale":-1
-        },
-        "flag":0,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "TINYINT":0
       }
     }
   ]
@@ -891,8 +845,6 @@ not a between 1 and 100
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_OP_LT",
@@ -920,8 +872,6 @@ not a between 1 and 100
         "IS_RANGE_COND"
       ],
       "rel_id": [
-      ],
-      "expr_levels": [
       ],
       "children": [
          {
@@ -957,9 +907,6 @@ not a between 1 and 100
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -970,7 +917,10 @@ not a between 1 and 100
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         },
          {
           "item_type":"T_INT",
@@ -1031,8 +981,6 @@ not a between 1 and 100
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_REF_COLUMN",
@@ -1067,9 +1015,6 @@ not a between 1 and 100
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -1080,7 +1025,10 @@ not a between 1 and 100
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         },
          {
           "item_type":"T_INT",
@@ -1143,406 +1091,9 @@ not a between 1 and 100
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":1
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":2
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":3
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":4
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":5
-      }
-    }
-  ]
-}
-(1 or 2) or (3 or 4 or 5)
-{
-  "item_type":"T_OP_OR",
-  "result_type": {
-    "meta": {
-      "type":"",
-      "collation":"binary",
-      "coercibility":"NUMERIC"
-    },
-    "accuracy": {
-      "length":-1,
-      "precision":-1,
-      "scale":-1
-    },
-    "flag":0,
-    "calc_type": {
-      "type":"NULL",
-      "collation":"invalid_type",
-      "coercibility":"INVALID"
-    }
-  },
-  "expr_info": [
-    "IS_CONST_EXPR",
-    "CNT_CONST"
-  ],
-  "rel_id": [
-  ],
-  "expr_levels": [
-  ],
-  "children": [
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":1
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":2
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":3
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":4
-      }
-    },
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":5
-      }
-    }
-  ]
-}
-(1 and 2) or (3 and 1)
-{
-  "item_type":"T_OP_AND",
-  "result_type": {
-    "meta": {
-      "type":"TINYINT",
-      "collation":"binary",
-      "coercibility":"NUMERIC"
-    },
-    "accuracy": {
-      "length":-1,
-      "precision":-1,
-      "scale":-1
-    },
-    "flag":0,
-    "calc_type": {
-      "type":"NULL",
-      "collation":"invalid_type",
-      "coercibility":"INVALID"
-    }
-  },
-  "expr_info": [
-    "IS_CONST_EXPR",
-    "CNT_CONST",
-    "CNT_OR"
-  ],
-  "rel_id": [
-  ],
-  "expr_levels": [
-  ],
-  "children": [
-     {
-      "item_type":"T_INT",
-      "result_type": {
-        "meta": {
-          "type":"BIGINT",
-          "collation":"binary",
-          "coercibility":"NUMERIC"
-        },
-        "accuracy": {
-          "length":1,
-          "precision":1,
-          "scale":0
-        },
-        "flag":1,
-        "calc_type": {
-          "type":"NULL",
-          "collation":"invalid_type",
-          "coercibility":"INVALID"
-        }
-      },
-      "expr_info": [
-        "IS_CONST",
-        "CNT_CONST"
-      ],
-      "rel_id": [
-      ],
-      "value": {
-        "BIGINT":1
-      }
-    },
-     {
-      "item_type":"T_OP_OR",
+      "item_type":"T_OP_BOOL",
       "result_type": {
         "meta": {
           "type":"",
@@ -1562,14 +1113,71 @@ not a between 1 and 100
         }
       },
       "expr_info": [
-        "IS_OR",
         "IS_CONST_EXPR",
         "CNT_CONST",
-        "CNT_OR"
+        "IS_INNER_ADDED_EXPR"
       ],
       "rel_id": [
       ],
-      "expr_levels": [
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":1
+          }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
       ],
       "children": [
          {
@@ -1601,7 +1209,37 @@ not a between 1 and 100
           "value": {
             "BIGINT":2
           }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
         },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
          {
           "item_type":"T_INT",
           "result_type": {
@@ -1631,6 +1269,698 @@ not a between 1 and 100
           "value": {
             "BIGINT":3
           }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":4
+          }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":5
+          }
+        }
+      ]
+    }
+  ]
+}
+(1 or 2) or (3 or 4 or 5)
+{
+  "item_type":"T_OP_OR",
+  "result_type": {
+    "meta": {
+      "type":"",
+      "collation":"binary",
+      "coercibility":"NUMERIC"
+    },
+    "accuracy": {
+      "length":-1,
+      "precision":-1,
+      "scale":-1
+    },
+    "flag":0,
+    "calc_type": {
+      "type":"NULL",
+      "collation":"invalid_type",
+      "coercibility":"INVALID"
+    }
+  },
+  "expr_info": [
+    "IS_CONST_EXPR",
+    "CNT_CONST"
+  ],
+  "rel_id": [
+  ],
+  "children": [
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":1
+          }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":2
+          }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":3
+          }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":4
+          }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":5
+          }
+        }
+      ]
+    }
+  ]
+}
+(1 and 2) or (3 and 1)
+{
+  "item_type":"T_OP_AND",
+  "result_type": {
+    "meta": {
+      "type":"TINYINT",
+      "collation":"binary",
+      "coercibility":"NUMERIC"
+    },
+    "accuracy": {
+      "length":-1,
+      "precision":-1,
+      "scale":-1
+    },
+    "flag":0,
+    "calc_type": {
+      "type":"NULL",
+      "collation":"invalid_type",
+      "coercibility":"INVALID"
+    }
+  },
+  "expr_info": [
+    "IS_CONST_EXPR",
+    "CNT_CONST",
+    "CNT_OR"
+  ],
+  "rel_id": [
+  ],
+  "children": [
+     {
+      "item_type":"T_OP_BOOL",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "IS_INNER_ADDED_EXPR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_INT",
+          "result_type": {
+            "meta": {
+              "type":"BIGINT",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":1,
+              "precision":1,
+              "scale":0
+            },
+            "flag":1,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST",
+            "CNT_CONST"
+          ],
+          "rel_id": [
+          ],
+          "value": {
+            "BIGINT":1
+          }
+        }
+      ]
+    },
+     {
+      "item_type":"T_OP_OR",
+      "result_type": {
+        "meta": {
+          "type":"",
+          "collation":"binary",
+          "coercibility":"NUMERIC"
+        },
+        "accuracy": {
+          "length":-1,
+          "precision":-1,
+          "scale":-1
+        },
+        "flag":0,
+        "calc_type": {
+          "type":"NULL",
+          "collation":"invalid_type",
+          "coercibility":"INVALID"
+        }
+      },
+      "expr_info": [
+        "IS_OR",
+        "IS_CONST_EXPR",
+        "CNT_CONST",
+        "CNT_OR"
+      ],
+      "rel_id": [
+      ],
+      "children": [
+         {
+          "item_type":"T_OP_BOOL",
+          "result_type": {
+            "meta": {
+              "type":"",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":-1,
+              "precision":-1,
+              "scale":-1
+            },
+            "flag":0,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST_EXPR",
+            "CNT_CONST",
+            "IS_INNER_ADDED_EXPR"
+          ],
+          "rel_id": [
+          ],
+          "children": [
+             {
+              "item_type":"T_INT",
+              "result_type": {
+                "meta": {
+                  "type":"BIGINT",
+                  "collation":"binary",
+                  "coercibility":"NUMERIC"
+                },
+                "accuracy": {
+                  "length":1,
+                  "precision":1,
+                  "scale":0
+                },
+                "flag":1,
+                "calc_type": {
+                  "type":"NULL",
+                  "collation":"invalid_type",
+                  "coercibility":"INVALID"
+                }
+              },
+              "expr_info": [
+                "IS_CONST",
+                "CNT_CONST"
+              ],
+              "rel_id": [
+              ],
+              "value": {
+                "BIGINT":2
+              }
+            }
+          ]
+        },
+         {
+          "item_type":"T_OP_BOOL",
+          "result_type": {
+            "meta": {
+              "type":"",
+              "collation":"binary",
+              "coercibility":"NUMERIC"
+            },
+            "accuracy": {
+              "length":-1,
+              "precision":-1,
+              "scale":-1
+            },
+            "flag":0,
+            "calc_type": {
+              "type":"NULL",
+              "collation":"invalid_type",
+              "coercibility":"INVALID"
+            }
+          },
+          "expr_info": [
+            "IS_CONST_EXPR",
+            "CNT_CONST",
+            "IS_INNER_ADDED_EXPR"
+          ],
+          "rel_id": [
+          ],
+          "children": [
+             {
+              "item_type":"T_INT",
+              "result_type": {
+                "meta": {
+                  "type":"BIGINT",
+                  "collation":"binary",
+                  "coercibility":"NUMERIC"
+                },
+                "accuracy": {
+                  "length":1,
+                  "precision":1,
+                  "scale":0
+                },
+                "flag":1,
+                "calc_type": {
+                  "type":"NULL",
+                  "collation":"invalid_type",
+                  "coercibility":"INVALID"
+                }
+              },
+              "expr_info": [
+                "IS_CONST",
+                "CNT_CONST"
+              ],
+              "rel_id": [
+              ],
+              "value": {
+                "BIGINT":3
+              }
+            }
+          ]
         }
       ]
     }
@@ -1664,8 +1994,6 @@ not(not(a))
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_OP_NOT",
@@ -1694,8 +2022,6 @@ not(not(a))
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_OP_BOOL",
@@ -1722,8 +2048,6 @@ not(not(a))
             "IS_INNER_ADDED_EXPR"
           ],
           "rel_id": [
-          ],
-          "expr_levels": [
           ],
           "children": [
              {
@@ -1759,9 +2083,6 @@ not(not(a))
               "synonym_name":"",
               "synonym_db_name":"",
               "column_name":"",
-              "expr_level":-1,
-              "expr_levels": [
-              ],
               "column_flags":0,
               "enum_set_values": [
               ],
@@ -1772,7 +2093,10 @@ not(not(a))
               "from_alias_table":false,
               "is_rowkey_column":false,
               "is_unique_key_column":false,
-              "is_mul_key_column":false
+              "is_mul_key_column":false,
+              "is_strict_json_column":0,
+              "srs_id":-1,
+              "udt_set_id":0
             }
           ]
         }
@@ -1808,8 +2132,6 @@ A or (A And B) or (A And C)
     "CNT_OR"
   ],
   "rel_id": [
-  ],
-  "expr_levels": [
   ],
   "children": [
      {
@@ -1868,8 +2190,6 @@ A or (A And B) or (A And C)
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_REF_COLUMN",
@@ -1904,9 +2224,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -1917,7 +2234,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     }
@@ -1949,8 +2269,6 @@ A or (A And B) or (A And C)
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_OP_BOOL",
@@ -1977,8 +2295,6 @@ A or (A And B) or (A And C)
         "IS_INNER_ADDED_EXPR"
       ],
       "rel_id": [
-      ],
-      "expr_levels": [
       ],
       "children": [
          {
@@ -2014,9 +2330,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -2027,7 +2340,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     },
@@ -2057,8 +2373,6 @@ A or (A And B) or (A And C)
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_REF_COLUMN",
@@ -2093,9 +2407,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -2106,7 +2417,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     }
@@ -2138,8 +2452,6 @@ A or (A And B) or (A And C)
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_OP_BOOL",
@@ -2166,8 +2478,6 @@ A or (A And B) or (A And C)
         "IS_INNER_ADDED_EXPR"
       ],
       "rel_id": [
-      ],
-      "expr_levels": [
       ],
       "children": [
          {
@@ -2203,9 +2513,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -2216,7 +2523,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     },
@@ -2246,8 +2556,6 @@ A or (A And B) or (A And C)
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_REF_COLUMN",
@@ -2282,9 +2590,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -2295,7 +2600,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     }
@@ -2327,8 +2635,6 @@ A or (A And B) or (A And C)
   ],
   "rel_id": [
   ],
-  "expr_levels": [
-  ],
   "children": [
      {
       "item_type":"T_OP_BOOL",
@@ -2356,8 +2662,6 @@ A or (A And B) or (A And C)
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_REF_COLUMN",
@@ -2392,9 +2696,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -2405,7 +2706,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     },
@@ -2435,8 +2739,6 @@ A or (A And B) or (A And C)
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_REF_COLUMN",
@@ -2471,9 +2773,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -2484,7 +2783,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     },
@@ -2514,8 +2816,6 @@ A or (A And B) or (A And C)
       ],
       "rel_id": [
       ],
-      "expr_levels": [
-      ],
       "children": [
          {
           "item_type":"T_REF_COLUMN",
@@ -2550,9 +2850,6 @@ A or (A And B) or (A And C)
           "synonym_name":"",
           "synonym_db_name":"",
           "column_name":"",
-          "expr_level":-1,
-          "expr_levels": [
-          ],
           "column_flags":0,
           "enum_set_values": [
           ],
@@ -2563,7 +2860,10 @@ A or (A And B) or (A And C)
           "from_alias_table":false,
           "is_rowkey_column":false,
           "is_unique_key_column":false,
-          "is_mul_key_column":false
+          "is_mul_key_column":false,
+          "is_strict_json_column":0,
+          "srs_id":-1,
+          "udt_set_id":0
         }
       ]
     }

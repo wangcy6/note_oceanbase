@@ -24,7 +24,7 @@
 #include "common/object/ob_object.h"
 #include "lib/json_type/ob_json_bin.h"
 #include "lib/json_type/ob_json_base.h"
-
+#include "lib/geo/ob_geo_bin.h"
 using namespace oceanbase::common;
 
 namespace oceanbase
@@ -318,7 +318,7 @@ int ObMySQLUtil::store_obstr_nzt_with_pre_space(char *buf, int64_t len, ObString
 void ObMySQLUtil::prepend_zeros(char *buf, int64_t org_char_size, int64_t offset) {
   // memmove(buf + offset, buf, org_char_size);
   if (OB_ISNULL(buf)) {
-    LOG_WARN("invalid buf input", KP(buf));
+    LOG_WARN_RET(common::OB_INVALID_ARGUMENT, "invalid buf input", KP(buf));
   } else {
     char *src_last = buf + org_char_size;
     char *dst_last = src_last + offset;
@@ -360,16 +360,22 @@ int ObMySQLUtil::int_cell_str(
       }
       /* skip bytes_to_store_len bytes to store length */
       int64_t bytes_to_store_len = get_number_store_len(length);
-      MEMCPY(buf + pos + bytes_to_store_len, ffi.ptr(), ffi.length());
-      if (zero_cnt > 0) {
-        /*zero_cnt > 0 indicates that zerofill is true */
-        MEMSET(buf + pos + bytes_to_store_len, '0', zero_cnt);
-        MEMCPY(buf + pos + bytes_to_store_len + zero_cnt, ffi.ptr(), ffi.length());
+      if (OB_UNLIKELY(pos + bytes_to_store_len + ffi.length() > len)) {
+        ret = OB_SIZE_OVERFLOW;
+      } else if (zero_cnt > 0 && OB_UNLIKELY(pos + bytes_to_store_len + zero_cnt + ffi.length() > len)) {
+        ret = OB_SIZE_OVERFLOW;
       } else {
         MEMCPY(buf + pos + bytes_to_store_len, ffi.ptr(), ffi.length());
+        if (zero_cnt > 0) {
+          /*zero_cnt > 0 indicates that zerofill is true */
+          MEMSET(buf + pos + bytes_to_store_len, '0', zero_cnt);
+          MEMCPY(buf + pos + bytes_to_store_len + zero_cnt, ffi.ptr(), ffi.length());
+        } else {
+          MEMCPY(buf + pos + bytes_to_store_len, ffi.ptr(), ffi.length());
+        }
+        ret = ObMySQLUtil::store_length(buf, pos + bytes_to_store_len, length, pos);
+        pos += length;
       }
-      ret = ObMySQLUtil::store_length(buf, pos + bytes_to_store_len, length, pos);
-      pos += length;
     } else {
       switch (obj_type) {
         case ObTinyIntType:
@@ -668,13 +674,15 @@ int ObMySQLUtil::time_cell_str(
         LOG_WARN("convert usec to timestamp failed", K(ret));
       } else {
         timelen = 12;
+        int ob_time_day = ob_time.parts_[DT_DATE] + ob_time.parts_[DT_HOUR] / 24;
+        int ob_time_hour = ob_time.parts_[DT_HOUR] % 24;
         if (OB_FAIL(ObMySQLUtil::store_int1(buf, len, timelen, pos))) {//length
           LOG_WARN("fail to store int", K(ret));
         } else if (OB_FAIL(ObMySQLUtil::store_int1(buf, len, static_cast<int8_t>(DT_MODE_NEG & ob_time.mode_), pos))) {//is_negative(1)
           LOG_WARN("fail to store int", K(ret));
-        } else if (OB_FAIL(ObMySQLUtil::store_int4(buf, len, static_cast<int32_t>(ob_time.parts_[DT_DATE]), pos))) {//days(4)
+        } else if (OB_FAIL(ObMySQLUtil::store_int4(buf, len, static_cast<int32_t>(ob_time_day), pos))) {//days(4)
           LOG_WARN("fail to store int", K(ret));
-        } else if (OB_FAIL(ObMySQLUtil::store_int1(buf, len, static_cast<int8_t>(ob_time.parts_[DT_HOUR]), pos))) {//hour(1)
+        } else if (OB_FAIL(ObMySQLUtil::store_int1(buf, len, static_cast<int8_t>(ob_time_hour), pos))) {//hour(1)
           LOG_WARN("fail to store int", K(ret));
         } else if (OB_FAIL(ObMySQLUtil::store_int1(buf, len, static_cast<int8_t>(ob_time.parts_[DT_MIN]), pos))) {//minute(1)
           LOG_WARN("fail to store int", K(ret));
@@ -1034,6 +1042,13 @@ int ObMySQLUtil::urowid_cell_str(char *buf, const int64_t len, const ObURowIDDat
   return ret;
 }
 
+int ObMySQLUtil::sql_utd_cell_str(char *buf, const int64_t len, const ObString &val, int64_t &pos)
+{
+  INIT_SUCC(ret);
+  ret = OB_NOT_SUPPORTED;
+  return ret;
+}
+
 int ObMySQLUtil::json_cell_str(char *buf, const int64_t len, const ObString &val, int64_t &pos)
 {
   int ret = OB_SUCCESS;
@@ -1051,7 +1066,7 @@ int ObMySQLUtil::json_cell_str(char *buf, const int64_t len, const ObString &val
   } else if (OB_FAIL(j_bin.reset_iter())) {
     OB_LOG(WARN, "fail to reset json bin iter", K(ret), K(val));
   } else if (OB_FAIL(j_base->print(jbuf, true))) {
-    OB_LOG(WARN, "json binary to string failed", K(ret), K(val), K(*j_base));
+    OB_LOG(WARN, "json binary to string failed in mysql mode", K(ret), K(val), K(*j_base));
   } else {
     int64_t new_length = jbuf.length();
     if (OB_LIKELY(new_length < len - pos)) {
@@ -1072,6 +1087,54 @@ int ObMySQLUtil::json_cell_str(char *buf, const int64_t len, const ObString &val
     }
   }
 
+  return ret;
+}
+
+int ObMySQLUtil::geometry_cell_str(char *buf, const int64_t len, const ObString &val, int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  int64_t length = val.length();
+  if (OB_ISNULL(buf)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid input args", K(ret), KP(buf));
+  } else if (length < WKB_DATA_OFFSET + WKB_GEO_TYPE_SIZE) {
+    if (OB_LIKELY(length < len - pos)) {
+      int64_t pos_bk = pos;
+      if (OB_FAIL(ObMySQLUtil::store_length(buf, len, length, pos))) {
+        LOG_WARN("geometry_cell_str store length failed", K(ret), K(len), K(length), K(pos));
+      } else {
+        if (OB_LIKELY(length <= len - pos)) {
+          MEMCPY(buf + pos, val.ptr(), length);
+          pos += length;
+        } else {
+          pos = pos_bk;
+          ret = OB_SIZE_OVERFLOW;
+        }
+      }
+    } else {
+      ret = OB_SIZE_OVERFLOW;
+    }
+  } else {
+    length = val.length() - WKB_VERSION_SIZE;
+    if (OB_LIKELY(length < len - pos)) {
+      int64_t pos_bk = pos;
+      if (OB_FAIL(ObMySQLUtil::store_length(buf, len, length, pos))) {
+        LOG_WARN("geometry_cell_str store length failed", K(ret), K(len), K(length), K(pos));
+      } else {
+        if (OB_LIKELY(length <= len - pos)) {
+          MEMCPY(buf + pos, val.ptr(), WKB_GEO_SRID_SIZE); // srid
+          pos += WKB_GEO_SRID_SIZE;
+          MEMCPY(buf + pos, val.ptr() + WKB_OFFSET, length - WKB_GEO_SRID_SIZE);
+          pos += (length - WKB_GEO_SRID_SIZE);
+        } else {
+          pos = pos_bk;
+          ret = OB_SIZE_OVERFLOW;
+        }
+      }
+    } else {
+      ret = OB_SIZE_OVERFLOW;
+    }
+  }
   return ret;
 }
 

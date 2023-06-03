@@ -52,7 +52,7 @@ int ObExprCollectionConstruct::ExtraInfo::deep_copy(common::ObIAllocator &alloca
 ObExprCollectionConstruct::ObExprCollectionConstruct(common::ObIAllocator &alloc)
     : ObFuncExprOperator(
         alloc, T_FUN_PL_COLLECTION_CONSTRUCT, N_PL_COLLECTION_CONSTRUCT,
-        PARAM_NUM_UNKNOWN, NOT_ROW_DIMENSION, false, INTERNAL_IN_ORACLE_MODE),
+        PARAM_NUM_UNKNOWN, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION, false, INTERNAL_IN_ORACLE_MODE),
       type_(pl::ObPLType::PL_INVALID_TYPE),
       not_null_(false),
       elem_type_(),
@@ -69,8 +69,15 @@ int ObExprCollectionConstruct::calc_result_typeN(ObExprResType &type,
   int ret = OB_SUCCESS;
   UNUSED(type_ctx);
   for (int64_t i = 0; OB_SUCC(ret) && i < param_num; i++) {
-    types[i].set_calc_accuracy(elem_type_.get_accuracy());
-    types[i].set_calc_meta(elem_type_.get_meta_type());
+    if ((ObExtendType == elem_type_.get_obj_type()
+          && types[i].get_type() != ObExtendType && types[i].get_type() != ObNullType)
+        ||(ObExtendType == types[i].get_type() && elem_type_.get_obj_type() != ObExtendType)) {
+      ret = OB_ERR_CALL_WRONG_ARG;
+      LOG_WARN("PLS-00306: wrong number or types of arguments in call", K(ret));
+    } else {
+      types[i].set_calc_accuracy(elem_type_.get_accuracy());
+      types[i].set_calc_meta(elem_type_.get_meta_type());
+    }
   }
   OX (type.set_type(ObExtendType));
   OX (type.set_udt_id(udt_id_));
@@ -109,6 +116,41 @@ int ObExprCollectionConstruct::cg_expr(ObExprCGCtx &op_cg_ctx,
       }
     }
   }
+  return ret;
+}
+
+
+int ObExprCollectionConstruct::check_match(const ObObj &element_obj, pl::ObElemDesc &desc, pl::ObPLINS &ns)
+{
+  int ret = OB_SUCCESS;
+  pl::ObPLType type = desc.get_pl_type();
+  bool is_comp = false;
+  if (pl::PL_NESTED_TABLE_TYPE == element_obj.get_meta().get_extend_type() ||
+      pl::PL_VARRAY_TYPE == element_obj.get_meta().get_extend_type()) {
+    is_comp = pl::PL_NESTED_TABLE_TYPE == type || pl::PL_VARRAY_TYPE == type;
+  } else {
+    is_comp = element_obj.get_meta().get_extend_type() == type;
+  }
+
+  if (is_comp) {
+    pl::ObPLComposite *composite = reinterpret_cast<pl::ObPLComposite*>(element_obj.get_ext());
+    CK (OB_NOT_NULL(composite));
+    if (OB_FAIL(ret)) {
+    } else if (composite->get_id() != desc.get_udt_id()) {
+      if (composite->is_record()) {
+        OZ (pl::ObPLResolver::check_composite_compatible(ns, composite->get_id(),
+                                                         desc.get_udt_id(),
+                                                         is_comp));
+      } else {
+        is_comp = false;
+      }
+    }
+  }
+  if (OB_SUCC(ret) && !is_comp) {
+    ret = OB_ERR_CALL_WRONG_ARG;
+    LOG_WARN("invalid argument. unexpected composite value", K(ret));
+  }
+
   return ret;
 }
 

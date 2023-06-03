@@ -23,6 +23,9 @@
 #include "share/backup/ob_backup_config.h"
 #include "share/backup/ob_backup_lease_info_mgr.h"
 #include "storage/tx/ob_i_ts_source.h"
+#include "share/backup/ob_backup_data_store.h"
+#include "share/backup/ob_archive_struct.h"
+#include "storage/tx/ob_ts_mgr.h"
 
 
 using namespace oceanbase;
@@ -150,7 +153,7 @@ int ObPhysicalRestoreBackupDestList::get_backup_set_list_format_str(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected format str", KR(ret), K(str_buf), K(str_buf_len));
   } else {
-    str.assign_ptr(str_buf, str_buf_len - 1);
+    str.assign_ptr(str_buf, static_cast<int32_t>(str_buf_len - 1));
     LOG_DEBUG("get format backup set path list str", KR(ret), K(str));
   }
   return ret;
@@ -186,7 +189,7 @@ int ObPhysicalRestoreBackupDestList::get_backup_set_desc_list_format_str(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected format str", KR(ret), K(str_buf), K(str_buf_len));
   } else {
-    str.assign_ptr(str_buf, STRLEN(str_buf));
+    str.assign_ptr(str_buf, static_cast<int32_t>(STRLEN(str_buf)));
     LOG_DEBUG("get format backup set path list str", KR(ret), K(str));
   }
   return ret;
@@ -221,7 +224,7 @@ int ObPhysicalRestoreBackupDestList::get_backup_piece_list_format_str(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected format str", KR(ret), K(str_buf), K(str_buf_len));
   } else {
-    str.assign_ptr(str_buf, str_buf_len - 1);
+    str.assign_ptr(str_buf, static_cast<int32_t>(str_buf_len - 1));
     LOG_DEBUG("get format backup piece path list str", KR(ret), K(str));
   }
   return ret;
@@ -256,7 +259,7 @@ int ObPhysicalRestoreBackupDestList::get_log_path_list_format_str(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected format str", KR(ret), K(str_buf), K(str_buf_len));
   } else {
-    str.assign_ptr(str_buf, str_buf_len - 1);
+    str.assign_ptr(str_buf, static_cast<int32_t>(str_buf_len - 1));
     LOG_DEBUG("get log path list str", KR(ret), K(str));
   }
   return ret;
@@ -508,7 +511,7 @@ int ObPhysicalRestoreBackupDestList::get_backup_set_list_hex_str(
     ret = OB_SIZE_OVERFLOW;
     LOG_WARN("encode error", KR(ret), K(hex_pos), K(hex_size));
   } else {
-    str.assign_ptr(hex_buf, hex_size);
+    str.assign_ptr(hex_buf, static_cast<int32_t>(hex_size));
     LOG_DEBUG("get hex backup set list str", KR(ret), K(str));
   }
   return ret;
@@ -545,7 +548,7 @@ int ObPhysicalRestoreBackupDestList::get_backup_piece_list_hex_str(
     ret = OB_SIZE_OVERFLOW;
     LOG_WARN("encode error", KR(ret), K(hex_pos), K(hex_size));
   } else {
-    str.assign_ptr(hex_buf, hex_size);
+    str.assign_ptr(hex_buf, static_cast<int32_t>(hex_size));
     LOG_DEBUG("get hex backup piece list str", KR(ret), K(str));
   }
   return ret;
@@ -582,7 +585,7 @@ int ObPhysicalRestoreBackupDestList::get_log_path_list_hex_str(
     ret = OB_SIZE_OVERFLOW;
     LOG_WARN("encode error", KR(ret), K(hex_pos), K(hex_size));
   } else {
-    str.assign_ptr(hex_buf, hex_size);
+    str.assign_ptr(hex_buf, static_cast<int32_t>(hex_size));
     LOG_DEBUG("get hex log path list str", KR(ret), K(str));
   }
   return ret;
@@ -1310,7 +1313,7 @@ int ObBackupStorageInfo::parse_authorization_(const char *authorization)
         }
       } else if (0 == strncmp(ACCESS_KEY, token, strlen(ACCESS_KEY))) {
         if (OB_FAIL(set_storage_info_field_(token, access_key_, sizeof(access_key_)))) {
-          LOG_WARN("failed to set access id", K(ret), K(token));
+          LOG_WARN("failed to set access key", K(ret), K(token));
         }
       } else {
         ret = OB_INVALID_ARGUMENT;
@@ -1398,11 +1401,11 @@ bool ObBackupStorageInfo::operator !=(const ObBackupStorageInfo &storage_info) c
 int64_t ObBackupStorageInfo::hash() const
 {
   int64_t hash_value = 0;
-  hash_value = murmurhash(&device_type_, sizeof(device_type_), hash_value);
-  hash_value = murmurhash(endpoint_, strlen(endpoint_), hash_value);
-  hash_value = murmurhash(access_id_, strlen(access_id_), hash_value);
-  hash_value = murmurhash(access_key_, strlen(access_key_), hash_value);
-  hash_value = murmurhash(extension_, strlen(extension_), hash_value);
+  hash_value = murmurhash(&device_type_, static_cast<int32_t>(sizeof(device_type_)), hash_value);
+  hash_value = murmurhash(endpoint_, static_cast<int32_t>(strlen(endpoint_)), hash_value);
+  hash_value = murmurhash(access_id_, static_cast<int32_t>(strlen(access_id_)), hash_value);
+  hash_value = murmurhash(access_key_, static_cast<int32_t>(strlen(access_key_)), hash_value);
+  hash_value = murmurhash(extension_, static_cast<int32_t>(strlen(extension_)), hash_value);
   return hash_value;
 }
 
@@ -1493,7 +1496,7 @@ int64_t ObBackupDest::hash() const
 {
   int64_t hash_val = 0;
   if (is_valid()) {
-    hash_val = murmurhash(root_path_, strlen(root_path_), hash_val);
+    hash_val = murmurhash(root_path_, static_cast<int32_t>(strlen(root_path_)), hash_val);
     hash_val += storage_info_->hash();
   }
   return hash_val;
@@ -1684,7 +1687,7 @@ int ObBackupDest::set(const char *root_path, const ObBackupStorageInfo *storage_
 
 void ObBackupDest::root_path_trim_()
 {
-  int len = strlen(root_path_);
+  int len = static_cast<int32_t>(strlen(root_path_));
   for (int i = len - 1; i >=0 ; i--) {
     if (root_path_[i] == '/') {
       root_path_[i] = '\0';
@@ -1795,7 +1798,7 @@ const char *ObBackupInfoStatus::get_status_str(const BackupStatus &status)
   };
   STATIC_ASSERT(MAX == ARRAYSIZEOF(info_backup_status_strs), "status count mismatch");
   if (status < 0 || status >= MAX) {
-    LOG_ERROR("invalid backup info status", K(status));
+    LOG_ERROR_RET(OB_INVALID_ARGUMENT, "invalid backup info status", K(status));
   } else {
     str = info_backup_status_strs[status];
   }
@@ -1887,7 +1890,7 @@ const char *ObBackupType::get_backup_type_str() const
   };
   STATIC_ASSERT(MAX == ARRAYSIZEOF(backup_func_type_strs), "types count mismatch");
   if (type_ < 0 || type_ >= MAX) {
-    LOG_ERROR("invalid backup type", K(type_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "invalid backup type", K(type_));
   } else {
     str = backup_func_type_strs[type_];
   }
@@ -1924,7 +1927,6 @@ int ObBackupType::set_backup_type(
   }
   return ret;
 }
-
 
 ObBaseBackupInfoStruct::ObBaseBackupInfoStruct()
   : tenant_id_(OB_INVALID_ID), backup_set_id_(0), incarnation_(0), backup_dest_(),
@@ -2031,6 +2033,22 @@ int ObBaseBackupInfoStruct::check_backup_info_match(
   return ret;
 }
 
+int ObBackupUtils::check_tenant_data_version_match(const uint64_t tenant_id, const uint64_t data_version)
+{
+  int ret = OB_SUCCESS;
+  uint64_t cur_data_version = 0;
+  if (!is_valid_tenant_id(tenant_id)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(tenant_id));
+  } else if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, cur_data_version))) {
+    LOG_WARN("failed to get min data version", K(ret), K(tenant_id));
+  } else if (cur_data_version != data_version) {
+    ret = OB_VERSION_NOT_MATCH;
+    LOG_WARN("tenant data version is not match", K(ret), K(tenant_id), K(cur_data_version), K(data_version));
+  }
+  return ret;
+}
+
 int ObBackupUtils::get_backup_info_default_timeout_ctx(ObTimeoutCtx &ctx)
 {
   int ret = OB_SUCCESS;
@@ -2087,7 +2105,6 @@ bool ObBackupUtils::is_need_retry_error(const int err)
     case OB_BACKUP_FILE_NOT_EXIST :
     case OB_LOG_ARCHIVE_INTERRUPTED :
     case OB_LOG_ARCHIVE_NOT_RUNNING :
-    case OB_TABLET_NOT_EXIST :
     case OB_CHECKSUM_ERROR :
       bret = false;
       break;
@@ -2163,6 +2180,37 @@ int ObBackupUtils::convert_timestamp_to_date(
       date = tmp_date;
     }
   }
+  return ret;
+}
+
+int ObBackupUtils::get_backup_scn(const uint64_t &tenant_id, share::SCN &scn)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("tenant id is invalid", KR(ret), K(tenant_id));
+  } else {
+    ret = OB_EAGAIN;
+    const transaction::MonotonicTs stc = transaction::MonotonicTs::current_time();
+    transaction::MonotonicTs unused_ts(0);
+    const int64_t start_time = ObTimeUtility::fast_current_time();
+    const int64_t TIMEOUT = 10 * 1000 * 1000; //10s
+    while (OB_EAGAIN == ret) {
+      if (ObTimeUtility::fast_current_time() - start_time > TIMEOUT) {
+        ret = OB_TIMEOUT;
+        LOG_WARN("stmt is timeout", KR(ret), K(start_time), K(TIMEOUT));
+      } else if (OB_FAIL(OB_TS_MGR.get_gts(tenant_id, stc, NULL,
+                                           scn, unused_ts))) {
+        if (OB_EAGAIN != ret) {
+          LOG_WARN("failed to get gts", KR(ret), K(tenant_id));
+        } else {
+          // waiting 10ms
+          ob_usleep(10L * 1000L);
+        }
+      }
+    }
+  }
+  LOG_INFO("get tenant gts", KR(ret), K(tenant_id), K(scn));
   return ret;
 }
 
@@ -2266,6 +2314,30 @@ int ObBackupUtils::check_is_tmp_file(const common::ObString &file_name, bool &is
         is_tmp_file = false;
       }
     }
+  }
+  return ret;
+}
+
+int ObBackupUtils::calc_start_replay_scn(
+    const share::ObBackupSetTaskAttr &set_task_attr,
+    const share::ObBackupLSMetaInfosDesc &ls_meta_infos,
+    const share::ObTenantArchiveRoundAttr &round_attr,
+    share::SCN &start_replay_scn)
+{
+  int ret = OB_SUCCESS;
+  SCN tmp_start_replay_scn = set_task_attr.start_scn_;
+  // To ensure that restore can be successfully initiated,
+  // we need to avoid clearing too many logs and the start_replay_scn less than the start_scn of the first piece.
+  // so we choose the minimum palf_base_info.prev_log_info_.scn firstly, to ensure keep enough logs.
+  // Then we choose the max(minimum palf_base_info.prev_log_info_.scn, round_attr.start_scn) as the start_replay_scn,
+  // to ensure the start_replay_scn is greater than the start scn of first piece
+  ARRAY_FOREACH_X(ls_meta_infos.ls_meta_packages_, i, cnt, OB_SUCC(ret)) {
+    const palf::PalfBaseInfo &palf_base_info = ls_meta_infos.ls_meta_packages_.at(i).palf_meta_;
+    tmp_start_replay_scn = SCN::min(tmp_start_replay_scn, palf_base_info.prev_log_info_.scn_);
+  }
+  if (OB_SUCC(ret)) {
+    start_replay_scn = SCN::max(tmp_start_replay_scn, round_attr.start_scn_);
+    LOG_INFO("calculate start replay scn finish", K(start_replay_scn), K(ls_meta_infos), K(round_attr));
   }
   return ret;
 }
@@ -2723,16 +2795,16 @@ bool ObNonFrozenBackupPieceInfo::is_valid() const
 
   if (!cur_piece_info_.is_valid()) {
     is_valid = false;
-    LOG_WARN("cur piece info is invalid", K(*this));
+    LOG_WARN_RET(OB_INVALID_ERROR, "cur piece info is invalid", K(*this));
   }
 
   if (has_prev_piece_info_ && is_valid) {
     if (!prev_piece_info_.is_valid()) {
       is_valid = false;
-      LOG_WARN("prev piece info is invalid", K(*this));
+      LOG_WARN_RET(OB_INVALID_ERROR, "prev piece info is invalid", K(*this));
     } else if (ObBackupPieceStatus::BACKUP_PIECE_ACTIVE == prev_piece_info_.status_) {
       is_valid = false;
-      LOG_WARN("previous piece info is active", K(*this));
+      LOG_WARN_RET(OB_INVALID_ERROR, "previous piece info is active", K(*this));
     }
   }
 
@@ -2935,7 +3007,7 @@ const char* ObBackupStatus::get_str() const
 
   STATIC_ASSERT(MAX_STATUS == ARRAYSIZEOF(status_strs), "status count mismatch");
   if (status_ < INIT || status_ >= MAX_STATUS) {
-    LOG_ERROR("invalid backup data job status", K(status_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "invalid backup data job status", K(status_));
   } else {
     str = status_strs[status_];
   }
@@ -3008,7 +3080,7 @@ const char* ObBackupTaskStatus::get_str() const
   };
   STATIC_ASSERT(MAX_STATUS == ARRAYSIZEOF(status_strs), "status count mismatch");
   if (status_ < INIT || status_ >= MAX_STATUS) {
-    LOG_ERROR("invalid backup data task status", K(status_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "invalid backup data task status", K(status_));
   } else {
     str = status_strs[status_];
   }
@@ -3284,7 +3356,7 @@ const char* ObBackupDataTaskType::get_str() const
     "BACKUP_META"
   };
   if (type_ < Type::BACKUP_DATA_SYS || type_ >= Type::BACKUP_MAX) {
-    LOG_ERROR("invalid compressor type", K(type_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "invalid compressor type", K(type_));
   } else {
     str = type_strs[type_];
   }
@@ -3467,7 +3539,7 @@ int ObBackupLSTaskAttr::assign(const ObBackupLSTaskAttr &other)
 OB_SERIALIZE_MEMBER(ObBackupSetFileDesc, backup_set_id_, incarnation_, tenant_id_, dest_id_, backup_type_,
     plus_archivelog_, date_, prev_full_backup_set_id_, prev_inc_backup_set_id_, stats_, start_time_, end_time_, status_,
     result_, encryption_mode_, passwd_, file_status_, backup_path_, start_replay_scn_, min_restore_scn_,
-    tenant_compatible_, backup_compatible_, data_turn_id_, meta_turn_id_);
+    tenant_compatible_, backup_compatible_, data_turn_id_, meta_turn_id_, cluster_version_);
 
 ObBackupSetFileDesc::ObBackupSetFileDesc()
   : backup_set_id_(0),
@@ -3493,7 +3565,8 @@ ObBackupSetFileDesc::ObBackupSetFileDesc()
     tenant_compatible_(0),
     backup_compatible_(Compatible::MAX_COMPATIBLE_VERSION),
     data_turn_id_(0),
-    meta_turn_id_(0)
+    meta_turn_id_(0),
+    cluster_version_(0)
 {
 }
 
@@ -3523,6 +3596,7 @@ void ObBackupSetFileDesc::reset()
   backup_compatible_ = Compatible::MAX_COMPATIBLE_VERSION;
   data_turn_id_ = 0;
   meta_turn_id_ = 0;
+  cluster_version_ = 0;
 }
 
 
@@ -3551,7 +3625,7 @@ const char *ObBackupSetFileDesc::get_backup_set_status_str() const
 
   STATIC_ASSERT(MAX == ARRAYSIZEOF(backup_set_file_info_status_strs), "status count mismatch");
   if (status_ < 0 || status_ >= MAX) {
-    LOG_WARN("invalid backup set status", K(status_));
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid backup set status", K(status_));
   } else {
     str = backup_set_file_info_status_strs[status_];
   }
@@ -3658,6 +3732,7 @@ int ObBackupSetFileDesc::assign(const ObBackupSetFileDesc &other)
     backup_compatible_ = other.backup_compatible_;
     data_turn_id_ = other.data_turn_id_;
     meta_turn_id_ = other.meta_turn_id_;
+    cluster_version_ = other.cluster_version_;
   }
   return ret;
 }
@@ -3669,7 +3744,8 @@ ObBackupSkipTabletAttr::ObBackupSkipTabletAttr()
     retry_id_(0),
     backup_set_id_(0),
     tablet_id_(0),
-    ls_id_()
+    ls_id_(),
+    skipped_type_()
 {
 }
 
@@ -3681,7 +3757,8 @@ bool ObBackupSkipTabletAttr::is_valid() const
       && retry_id_ > 0
       && tablet_id_.is_valid()
       && backup_set_id_ > 0
-      && ls_id_.is_valid();
+      && ls_id_.is_valid()
+      && skipped_type_.is_valid();
 }
 
 ObBackupLSTaskInfoAttr::ObBackupLSTaskInfoAttr()
@@ -3723,7 +3800,7 @@ const char *ObBackupLevel::get_str() const
     "USER_TENANT"
   };
   if (level_ < Level::CLUSTER || level_ >= Level::MAX_LEVEL) {
-    LOG_ERROR("invalid backup level", K(level_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "invalid backup level", K(level_));
   } else {
     str = level_strs[level_];
   }
@@ -3754,9 +3831,11 @@ int ObBackupLevel::set_level(const char *str)
   return ret;
 }
 
+OB_SERIALIZE_MEMBER(ObLogArchiveDestState, state_);
+
 bool ObLogArchiveDestState::is_valid() const
 {
-  return state_ >= State::ENBALE && state_ < State::MAX;
+  return state_ >= State::ENABLE && state_ < State::MAX;
 }
 
 int ObLogArchiveDestState::set_state(const char *buf)
@@ -3764,10 +3843,8 @@ int ObLogArchiveDestState::set_state(const char *buf)
   int ret = OB_SUCCESS;
   ObString s(buf);
   const char *str[] = {
-    "ENBALE",
-    "DISABLE",
-    "DEFER",
-    "INTERRUPT"
+    "ENABLE",
+    "DEFER"
   };
   STATIC_ASSERT(State::MAX == ARRAYSIZEOF(str), "count mismatch");
   const int64_t count = ARRAYSIZEOF(str);
@@ -3778,6 +3855,7 @@ int ObLogArchiveDestState::set_state(const char *buf)
     for (int64_t i = 0; i < count; ++i) {
       if (0 == s.case_compare(str[i])) {
         state_ = static_cast<State>(i);
+        break;
       }
     }
   }
@@ -3800,13 +3878,11 @@ const char *ObLogArchiveDestState::get_str() const
 {
   const char *str = "UNKNOWN";
   const char *state_strs[] = {
-    "ENBALE",
-    "DISABLE",
-    "DEFER",
-    "INTERRUPT"
+    "ENABLE",
+    "DEFER"
   };
   if (!is_valid()) {
-    LOG_ERROR("invalid state", K(state_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "invalid state", K(state_));
   } else {
     str = state_strs[state_];
   }
@@ -3821,7 +3897,7 @@ ObLogArchiveDestAtrr::ObLogArchiveDestAtrr()
   dest_id_ = 0;
   piece_switch_interval_ = OB_DEFAULT_PIECE_SWITCH_INTERVAL;
   lag_target_ = OB_DEFAULT_LAG_TARGET;
-  state_.set_disable();
+  state_.set_enable();
 }
 
 int ObLogArchiveDestAtrr::set_piece_switch_interval(const char *buf)
@@ -4001,6 +4077,32 @@ int ObLogArchiveDestAtrr::gen_config_items(common::ObIArray<BackupConfigItemPair
   return ret;
 }
 
+int ObLogArchiveDestAtrr::gen_path_config_items(common::ObIArray<BackupConfigItemPair> &items) const
+{
+  int ret = OB_SUCCESS;
+  items.reset();
+  BackupConfigItemPair config;
+  if (!dest_.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arguement", KR(ret), KPC(this));
+  }
+
+  // gen path config
+  ObBackupPathString tmp;
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_STR_PATH))) {
+    LOG_WARN("failed to assign key", KR(ret), KPC(this));
+  } else if (OB_FAIL(dest_.get_backup_dest_str(tmp.ptr(), tmp.capacity()))) {
+    LOG_WARN("failed to get backup dest", KR(ret), KPC(this));
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign value", KR(ret), KPC(this));
+  } else if(OB_FAIL(items.push_back(config))) {
+     LOG_WARN("failed to push backup config", KR(ret), KPC(this));
+  }
+
+  return ret;
+}
+
 int ObLogArchiveDestAtrr::get_binding(char *buf, int64_t len) const
 {
   int ret = OB_SUCCESS;
@@ -4040,6 +4142,689 @@ int ObLogArchiveDestAtrr::assign(const ObLogArchiveDestAtrr& that)
   return ret;
 }
 
+ObRestoreSourceServiceUser::ObRestoreSourceServiceUser()
+  : user_name_(),
+    tenant_name_(),
+    mode_(ObCompatibilityMode::OCEANBASE_MODE),
+    tenant_id_(OB_INVALID_TENANT_ID),
+    cluster_id_(OB_INVALID_CLUSTER_ID)
+{
+  user_name_[0] = '\0';
+  tenant_name_[0] = '\0';
+}
+
+void ObRestoreSourceServiceUser::reset()
+{
+  user_name_[0] = '\0';
+  tenant_name_[0] = '\0';
+  mode_ = ObCompatibilityMode::OCEANBASE_MODE;
+  tenant_id_ = OB_INVALID_TENANT_ID;
+  cluster_id_ = OB_INVALID_CLUSTER_ID;
+}
+
+bool ObRestoreSourceServiceUser::is_valid() const
+{
+  return STRLEN(user_name_) != 0
+      && STRLEN(tenant_name_) != 0
+      && (ObCompatibilityMode::OCEANBASE_MODE != mode_)
+      && (tenant_id_ != OB_INVALID_TENANT_ID)
+      && (cluster_id_ != OB_INVALID_CLUSTER_ID);
+}
+
+bool ObRestoreSourceServiceUser::operator== (const ObRestoreSourceServiceUser &other) const
+{
+  return (STRLEN(this->user_name_) == STRLEN(other.user_name_))
+         && (STRLEN(this->tenant_name_) == STRLEN(other.tenant_name_))
+         && (0 == STRCMP(this->user_name_, other.user_name_))
+         && (0 == STRCMP(this->tenant_name_, other.tenant_name_))
+         && this->mode_ == other.mode_
+         && this->tenant_id_ == other.tenant_id_
+         && this->cluster_id_ == other.cluster_id_;
+}
+
+int ObRestoreSourceServiceUser::assign(const ObRestoreSourceServiceUser &user)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!user.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(user));
+  } else if (OB_FAIL(databuff_printf(user_name_, sizeof(user_name_), "%s", user.user_name_))) {
+    LOG_WARN("user_name_ assign failed", K(user));
+  } else if (OB_FAIL(databuff_printf(tenant_name_, sizeof(tenant_name_), "%s", user.tenant_name_))) {
+    LOG_WARN("tenant_name_ assign failed", K(user));
+  } else {
+    mode_ = user.mode_;
+    tenant_id_ = user.tenant_id_;
+    cluster_id_ = user.cluster_id_;
+  }
+  return ret;
+}
+
+ObRestoreSourceServiceAttr::ObRestoreSourceServiceAttr()
+  : addr_(),
+    user_()
+{
+  encrypt_passwd_[0] = '\0';
+}
+
+void ObRestoreSourceServiceAttr::reset()
+{
+  addr_.reset();
+  user_.reset();
+  encrypt_passwd_[0] = '\0';
+}
+
+/*
+   parse service attr from string
+   eg: "ip_list=127.0.0.1:1001;127.0.0.1:1002,USER=restore_user@primary_tenant,PASSWORD=xxxxxx,TENANT_ID=1002,
+   CLUSTER_ID=10001,COMPATIBILITY_MODE=MYSQL,IS_ENCRYPTED=true"
+*/
+int ObRestoreSourceServiceAttr::parse_service_attr_from_str(ObSqlString &value)
+{
+  int ret = OB_SUCCESS;
+  char tmp_str[OB_MAX_BACKUP_DEST_LENGTH + 1] = { 0 };
+  char *token = nullptr;
+  char *saveptr = nullptr;
+
+  if (OB_UNLIKELY(value.empty() || value.length() > OB_MAX_BACKUP_DEST_LENGTH)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("log restore source attr value is invalid");
+  } else if (OB_FAIL(databuff_printf(tmp_str, sizeof(tmp_str), "%.*s", static_cast<int>(value.length()), value.ptr()))) {
+    LOG_WARN("fail to print attr value", K(value));
+  } else {
+    token = tmp_str;
+    for (char *str = token; OB_SUCC(ret); str = nullptr) {
+      token = ::STRTOK_R(str, ",", &saveptr);
+      if (nullptr == token) {
+        break;
+      } else if (OB_FAIL(do_parse_sub_service_attr(token))) {
+        LOG_WARN("fail to parse service attr str", K(token));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::do_parse_sub_service_attr(const char *sub_value)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_ISNULL(sub_value) || OB_UNLIKELY(0 == STRLEN(sub_value) || STRLEN(sub_value) > OB_MAX_BACKUP_DEST_LENGTH)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("log restore source service attr sub value is invalid", K(sub_value));
+  } else {
+    char tmp_str[OB_MAX_BACKUP_DEST_LENGTH + 1] = { 0 };
+    char *token = nullptr;
+    char *saveptr = nullptr;
+    if (OB_FAIL(databuff_printf(tmp_str, sizeof(tmp_str), "%s", sub_value))) {
+      LOG_WARN("fail to print sub_value", K(sub_value));
+    } else if (OB_ISNULL(token = ::STRTOK_R(tmp_str, "=", &saveptr))) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("fail to split sub_value str", K(token), KP(tmp_str));
+    } else if (OB_FALSE_IT(str_tolower(token, strlen(token)))) {
+    } else if (0 == STRCASECMP(token, OB_STR_IP_LIST)) {
+      if (OB_FAIL(parse_ip_port_from_str(saveptr, ";"/*delimiter*/))) {
+        LOG_WARN("fail to parse ip list from str", K(token), K(saveptr));
+      }
+    } else if (0 == STRCASECMP(token, OB_STR_USER)) {
+      if (OB_FAIL(set_service_user_config(saveptr))) {
+        LOG_WARN("fail to set restore service user and tenant", K(token), K(saveptr));
+      }
+    } else if (0 == STRCASECMP(token, OB_STR_TENANT_ID)) {
+      if (OB_FAIL(set_service_tenant_id(saveptr))) {
+        LOG_WARN("fail to set restore service user and tenant", K(token), K(saveptr));
+      }
+    } else if (0 == STRCASECMP(token, OB_STR_CLUSTER_ID)) {
+      if (OB_FAIL(set_service_cluster_id(saveptr))) {
+        LOG_WARN("fail to set restore service user and tenant", K(token), K(saveptr));
+      }
+    } else if (0 == STRCASECMP(token, OB_COMPATIBILITY_MODE)) {
+      if (OB_FAIL(set_service_compatibility_mode(saveptr))) {
+        LOG_WARN("fail to set restore service compatibility mode", K(token), K(saveptr));
+      }
+    } else if (0 == STRCASECMP(token, OB_STR_PASSWORD)) {
+      if (OB_FAIL(set_service_passwd_no_encrypt(saveptr))) {
+        LOG_WARN("fail to set restore service passwd", K(token), K(saveptr));
+      }
+    } else if (0 == STRCASECMP(token, OB_STR_IS_ENCRYPTED)) {
+    } else {
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("log restore source service do not have this config", K(token));
+    }
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::set_service_user_config(const char *user_tenant)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(user_tenant) || OB_UNLIKELY(0 == STRLEN(user_tenant)
+      || STRLEN(user_tenant) > OB_MAX_RESTORE_USER_AND_TENANT_LEN)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("log restore source service user is invalid");
+  } else {
+    char *user_name = nullptr;
+    char *tenant_name = nullptr;
+    char tmp_str[OB_MAX_RESTORE_USER_AND_TENANT_LEN + 1] = { 0 };
+    if (OB_FAIL(databuff_printf(tmp_str, sizeof(tmp_str), "%s", user_tenant))) {
+      LOG_WARN("fail to print user_tenant", K(user_tenant));
+    } else if (OB_ISNULL(user_name = ::STRTOK_R(tmp_str, "@", &tenant_name))) {
+      LOG_WARN("fail to split user_tenant", K(tmp_str));
+    } else if (OB_FAIL(set_service_user(user_name, tenant_name))) {
+      LOG_WARN("fail to set service user", K(user_name), K(tenant_name));
+    }
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::set_service_user(const char *user, const char *tenant)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(user) || OB_ISNULL(tenant) || OB_UNLIKELY(0 == STRLEN(user) || 0 == STRLEN(tenant)
+      || STRLEN(user) > OB_MAX_USER_NAME_LENGTH || STRLEN(tenant) > OB_MAX_ORIGINAL_NANE_LENGTH)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("log restore source service user name or tenant name is invalid");
+  } else if (OB_FAIL(databuff_printf(user_.user_name_, sizeof(user_.user_name_), "%s", user))) {
+    LOG_WARN("fail to print user name", K(user));
+  } else if (OB_FAIL(databuff_printf(user_.tenant_name_, sizeof(user_.tenant_name_), "%s", tenant))) {
+    LOG_WARN("fail to print tenant name", K(tenant));
+  }
+  LOG_DEBUG("set service user", K(user), K(tenant), K(user_));
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::set_service_tenant_id(const char *tenant_id)
+{
+  int ret = OB_SUCCESS;
+  user_.tenant_id_ = atoi(tenant_id);
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::set_service_cluster_id(const char *cluster_id)
+{
+  int ret = OB_SUCCESS;
+  user_.cluster_id_ = atoi(cluster_id);
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::set_service_compatibility_mode(const char *compat_mode)
+{
+  int ret = OB_SUCCESS;
+  char token[OB_MAX_COMPAT_MODE_STR_LEN + 1] = { 0 };
+  if (OB_ISNULL(compat_mode) || OB_UNLIKELY(0 == STRLEN(compat_mode)
+      || STRLEN(compat_mode) > OB_MAX_COMPAT_MODE_STR_LEN)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("log restore source service compat_mode is invalid");
+  } else if (OB_FAIL(databuff_printf(token, sizeof(token), "%s", compat_mode))) {
+    LOG_WARN("fail to print compat mode", K(compat_mode));
+  } else if (OB_FALSE_IT(str_toupper(token, STRLEN(token)))) {
+  } else if ((0 == STRCASECMP(token, "MYSQL"))) {
+    user_.mode_ = ObCompatibilityMode::MYSQL_MODE;
+  } else if ((0 == STRCASECMP(token, "ORACLE"))) {
+    user_.mode_ = ObCompatibilityMode::ORACLE_MODE;
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid compatibility mode", K(compat_mode), K(ret));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::set_service_passwd_to_encrypt(const char *passwd)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(passwd) || OB_UNLIKELY(0 == STRLEN(passwd) || STRLEN(passwd) > OB_MAX_PASSWORD_LENGTH)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument");
+  } else if (OB_FAIL(databuff_printf(encrypt_passwd_, sizeof(encrypt_passwd_), "%s", passwd))) {
+    LOG_WARN("fail to print encrypt password");
+  }
+  LOG_INFO("set service password success");
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::set_service_passwd_no_encrypt(const char *passwd)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(passwd) || OB_UNLIKELY(0 == STRLEN(passwd) || STRLEN(passwd) > OB_MAX_PASSWORD_LENGTH)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument");
+  } else if (OB_FAIL(databuff_printf(encrypt_passwd_, sizeof(encrypt_passwd_), "%s", passwd))) {
+    LOG_WARN("fail to print encrypt password");
+  }
+  return ret;
+}
+
+// 127.0.0.1:1000;127.0.0.1:1001;127.0.0.1:1002 ==> 127.0.0.1:1000 127.0.0.1:1001 127.0.0.1:1002
+int ObRestoreSourceServiceAttr::parse_ip_port_from_str(const char *ip_list, const char *delimiter)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(ip_list) || OB_ISNULL(delimiter) || OB_UNLIKELY(STRLEN(ip_list) > OB_MAX_RESTORE_SOURCE_IP_LIST_LEN)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("log restore source service ip list is invalid");
+  }
+
+  char tmp_str[OB_MAX_RESTORE_SOURCE_IP_LIST_LEN + 1] = { 0 };
+  char *token = nullptr;
+  char *saveptr = nullptr;
+  if (OB_FAIL(databuff_printf(tmp_str, sizeof(tmp_str), "%s", ip_list))) {
+    LOG_WARN("fail to get ip list", K(ip_list));
+  } else {
+    token = tmp_str;
+    for (char *str = token; OB_SUCC(ret); str = nullptr) {
+      token = ::STRTOK_R(str, delimiter, &saveptr);
+      if (nullptr == token) {
+        break;
+      } else {
+        ObAddr addr;
+        if (OB_FAIL(addr.parse_from_string(ObString(token)))) {
+          LOG_WARN("fail to parse addr", K(addr), K(token));
+        } else if (!addr.is_valid()) {
+          ret = OB_INVALID_ARGUMENT;
+          LOG_WARN("service addr is invalid", K(addr), K(ip_list));
+        } else if (OB_FAIL(addr_.push_back(addr))){
+          LOG_WARN("fail to push addr", K(addr));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+bool ObRestoreSourceServiceAttr::is_valid() const
+{
+  return service_user_is_valid()
+      && service_host_is_valid()
+      && service_password_is_valid();
+}
+
+bool ObRestoreSourceServiceAttr::service_user_is_valid() const
+{
+  return user_.is_valid();
+}
+
+bool ObRestoreSourceServiceAttr::service_host_is_valid() const
+{
+   return !addr_.empty();
+}
+
+bool ObRestoreSourceServiceAttr::service_password_is_valid() const
+{
+   return strlen(encrypt_passwd_) != 0;
+}
+
+int ObRestoreSourceServiceAttr::gen_config_items(common::ObIArray<BackupConfigItemPair> &items) const
+{
+  int ret = OB_SUCCESS;
+  BackupConfigItemPair config;
+  if (!is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arguement", KPC(this));
+  }
+
+  ObSqlString tmp;
+  // gen ip list config
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_STR_IP_LIST))) {
+    LOG_WARN("failed to assign ip list key");
+  } else if (OB_FAIL(get_ip_list_str_(tmp))) {
+    LOG_WARN("failed to get ip list str");
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign ip list value");
+  } else if(OB_FAIL(items.push_back(config))) {
+     LOG_WARN("failed to push service source attr config", K(config));
+  }
+
+  // gen user config
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_STR_USER))) {
+    LOG_WARN("failed to assign user key");
+  } else if (OB_FAIL(get_user_str_(tmp))) {
+    LOG_WARN("failed to get user str");
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign user value");
+  } else if (OB_FAIL(items.push_back(config))) {
+    LOG_WARN("failed to push service source attr config", K(config));
+  }
+
+  // gen password config
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_STR_PASSWORD))) {
+    LOG_WARN("failed to assign password key");
+  } else if (OB_FAIL(get_password_str_(tmp))) {
+    LOG_WARN("failed to get password str");
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign password value");
+  } else if (OB_FAIL(items.push_back(config))) {
+    LOG_WARN("failed to push service source attr config", K(config));
+  }
+
+  // gen tenant id
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_STR_TENANT_ID))) {
+    LOG_WARN("failed to assign tenant id key");
+  } else if (OB_FAIL(get_tenant_id_str_(tmp))) {
+    LOG_WARN("failed to get tenant id str");
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign tenant id value");
+  } else if (OB_FAIL(items.push_back(config))) {
+    LOG_WARN("failed to push service source attr config", K(config));
+  }
+
+  // gen cluster id
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_STR_CLUSTER_ID))) {
+    LOG_WARN("failed to assign cluster id key");
+  } else if (OB_FAIL(get_cluster_id_str_(tmp))) {
+    LOG_WARN("failed to get cluster id str");
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign cluster id value");
+  } else if (OB_FAIL(items.push_back(config))) {
+    LOG_WARN("failed to push service source attr config", K(config));
+  }
+
+  // gen compatibility mode
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_COMPATIBILITY_MODE))) {
+    LOG_WARN("failed to assign compatibility mode");
+  } else if (OB_FAIL(get_compatibility_mode_str_(tmp))) {
+    LOG_WARN("failed to get compatibility mode str");
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign compatibility mode value");
+  } else if (OB_FAIL(items.push_back(config))) {
+    LOG_WARN("failed to push service source attr config", K(config));
+  }
+
+  // gen is encrypted
+   if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(config.key_.assign(OB_STR_IS_ENCRYPTED))) {
+    LOG_WARN("failed to assign encrypted key");
+  } else if (OB_FAIL(get_is_encrypted_str_(tmp))) {
+    LOG_WARN("failed to get is encrypted str");
+  } else if (OB_FAIL(config.value_.assign(tmp.ptr()))) {
+    LOG_WARN("failed to assign encrypted value");
+  } else if (OB_FAIL(items.push_back(config))) {
+    LOG_WARN("failed to push service source attr config", K(config));
+  }
+
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::gen_service_attr_str(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  ObSqlString str;
+  ObSqlString ip_str;
+  ObSqlString user_str;
+  ObSqlString passwd_str;
+  ObSqlString compat_str;
+  ObSqlString is_encrypted_str;
+
+  if (OB_UNLIKELY(!is_valid() || OB_ISNULL(buf) || buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid service attr argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(get_ip_list_str_(ip_str))) {
+    LOG_WARN("get ip list str failed");
+  } else if (OB_FAIL(get_user_str_(user_str))) {
+    LOG_WARN("get user str failed");
+  } else if (OB_FAIL(get_password_str_(passwd_str))) {
+    LOG_WARN("get password str failed");
+  } else if (OB_FAIL(get_compatibility_mode_str_(compat_str))) {
+    LOG_WARN("get compatibility mode str failed");
+  } else if (OB_FAIL(get_is_encrypted_str_(is_encrypted_str))) {
+    LOG_WARN("get encrypted str failed");
+  } else if (OB_FAIL(str.assign_fmt("IP_LIST=%s,USER=%s,PASSWORD=%s,TENANT_ID=%ld,CLUSTER_ID=%ld,COMPATIBILITY_MODE=%s",
+    ip_str.ptr(), user_str.ptr(), passwd_str.ptr(), user_.tenant_id_, user_.cluster_id_, compat_str.ptr()))) {
+    LOG_WARN("fail to assign str");
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%.*s", static_cast<int>(str.length()), str.ptr()))) {
+    LOG_WARN("fail to print str", K(str));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_ip_list_str_(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  ObSqlString str;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid ip list argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(get_ip_list_str_(str))) {
+    LOG_WARN("get ip list str failed");
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%.*s", static_cast<int>(str.length()), str.ptr()))) {
+    LOG_WARN("fail to print str", K(str));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_ip_list_str_(ObSqlString &str) const
+{
+  int ret = OB_SUCCESS;
+
+  ARRAY_FOREACH_N(addr_, idx, cnt) {
+    char ip_str[MAX_IP_PORT_LENGTH] = { 0 };
+    const ObAddr ip = addr_.at(idx);
+    if (OB_FAIL(ip.ip_port_to_string(ip_str, sizeof(ip_str)))) {
+      LOG_WARN("fail to convert ip port to string", K(ip), K(ip_str));
+    } else {
+      if (0 == idx && (OB_FAIL(str.assign_fmt("%s", ip_str)))) {
+        LOG_WARN("fail to assign ip str", K(str) ,K(ip), K(ip_str));
+      } else if ( 0 != idx && OB_FAIL(str.append_fmt(";%s", ip_str))) {
+        LOG_WARN("fail to append ip str", K(str), K(ip), K(ip_str));
+      }
+    }
+  }
+  LOG_DEBUG("get ip list str", K(str));
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_user_str_(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  ObSqlString res_str;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid user str argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(get_user_str_(res_str))) {
+    LOG_WARN("fail to get user str");
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%.*s", static_cast<int>(res_str.length()), res_str.ptr()))) {
+    LOG_WARN("fail to print str");
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_user_str_(ObSqlString &user_str) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(user_str.assign(user_.user_name_))) {
+    LOG_WARN("fail to assign user name" ,K(user_.user_name_));
+  } else if (OB_FAIL(user_str.append_fmt("@%s",user_.tenant_name_))) {
+    LOG_WARN("fail to assign tenant name", K(user_.user_name_));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_password_str_(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  ObSqlString passwd_str;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid password str argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(get_password_str_(passwd_str))) {
+    LOG_WARN("fail to get password str");
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%.*s", static_cast<int>(passwd_str.length()), passwd_str.ptr()))) {
+    LOG_WARN("fail to print str");
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_password_str_(ObSqlString &passwd_str) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(passwd_str.assign(encrypt_passwd_))) {
+     LOG_WARN("fail to assign password");
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_tenant_id_str_(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid tenant id str argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%ld", user_.tenant_id_))) {
+    LOG_WARN("fail to print tenant id str", K(user_.tenant_id_));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_tenant_id_str_(ObSqlString &tenant_str) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(tenant_str.assign_fmt("%ld", user_.tenant_id_))) {
+    LOG_WARN("fail to assign tenant id str", K(user_.tenant_id_));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_cluster_id_str_(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid cluster id str argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%ld", user_.cluster_id_))) {
+    LOG_WARN("fail to print cluster id str", K(user_.cluster_id_));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_cluster_id_str_(ObSqlString &cluster_str) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(cluster_str.assign_fmt("%ld", user_.cluster_id_))) {
+    LOG_WARN("fail to assign cluster id str", K(user_.cluster_id_));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_compatibility_mode_str_(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  ObSqlString tmp_str;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid compatibilidy mode str argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(get_compatibility_mode_str_(tmp_str))) {
+    LOG_WARN("fail to get compatibility mode str");
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%.*s", static_cast<int>(tmp_str.length()), tmp_str.ptr()))) {
+    LOG_WARN("fail to print compatibility mode str", K(tmp_str));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_compatibility_mode_str_(ObSqlString &compatibility_str) const
+{
+  int ret = OB_SUCCESS;
+  const char *compat_mode = "INVALID";
+  if (ObCompatibilityMode::MYSQL_MODE == user_.mode_) {
+    compat_mode = "MYSQL";
+  } else if (ObCompatibilityMode::ORACLE_MODE == user_.mode_) {
+    compat_mode = "ORACLE";
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("compatibility mode is invalid", K(user_.mode_));
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(compatibility_str.assign_fmt("%s", compat_mode))) {
+    LOG_WARN("fail to assign compatibility mode", K(compat_mode));
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_is_encrypted_str_(char *buf, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid encrypted str argument", KP(buf), K(buf_size));
+  } else if (OB_FAIL(databuff_printf(buf, buf_size, "%s", "false"))) {
+    LOG_WARN("fail to print encrypted str");
+  }
+  return ret;
+}
+
+int ObRestoreSourceServiceAttr::get_is_encrypted_str_(ObSqlString &encrypted_str) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(encrypted_str.assign("false"))) {
+    LOG_WARN("fail to print str");
+  }
+  return ret;
+}
+
+
+int ObRestoreSourceServiceAttr::get_password(char *passwd, const int64_t buf_size) const
+{
+  int ret = OB_SUCCESS;
+  char tmp_passwd[OB_MAX_PASSWORD_LENGTH + 1] = { 0 };
+  if (OB_ISNULL(passwd) || OB_UNLIKELY((buf_size <= 0) || (buf_size < OB_MAX_PASSWORD_LENGTH))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid parameter when get password", K(passwd), K(STRLEN(passwd)));
+  } else if (OB_FAIL(databuff_printf(passwd, sizeof(passwd), "%s", encrypt_passwd_))) {
+    LOG_WARN("failed to print encrypt_passwd_ key", K(encrypt_passwd_));
+  }
+  return ret;
+}
+
+bool ObRestoreSourceServiceAttr::compare_addr_(common::ObArray<common::ObAddr> addr) const
+{
+  int bret = true;
+  int ret = OB_SUCCESS;
+  if (addr.size() != this->addr_.size()) {
+    bret = false;
+  } else {
+    ARRAY_FOREACH_N(addr, idx, cnt) {
+      bool tmp_cmp = false;
+      ARRAY_FOREACH_N(this->addr_, idx1, cnt1) {
+        if (addr.at(idx) == this->addr_.at(idx1)) {
+          tmp_cmp = true;
+        }
+      }
+      if (!tmp_cmp) {
+        bret = false;
+        break;
+      }
+    }
+  }
+  return bret;
+}
+
+bool ObRestoreSourceServiceAttr::operator==(const ObRestoreSourceServiceAttr &other) const
+{
+  return (this->user_ == other.user_)
+         && (STRLEN(this->encrypt_passwd_) == STRLEN(other.encrypt_passwd_))
+         && (0 == STRCMP(this->encrypt_passwd_, other.encrypt_passwd_))
+         && compare_addr_(other.addr_);
+}
+
+int ObRestoreSourceServiceAttr::assign(const ObRestoreSourceServiceAttr &attr)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!attr.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(attr));
+  } else if (FALSE_IT(addr_.reset())) {
+  } else if (OB_FAIL(addr_.assign(attr.addr_))) {
+    LOG_WARN("addr_ assign failed", K(attr));
+  } else if (OB_FAIL(user_.assign(attr.user_))) {
+    LOG_WARN("user_ assign failed", K(attr));
+  } else if (OB_FAIL(databuff_printf(encrypt_passwd_, sizeof(attr.encrypt_passwd_), "%s", attr.encrypt_passwd_))) {
+    LOG_WARN("passwd_ assign failed", K(attr));
+  }
+  return ret;
+}
 
 int share::trim_right_backslash(ObBackupPathString &path)
 {
@@ -4057,15 +4842,19 @@ int share::trim_right_backslash(ObBackupPathString &path)
   return ret;
 }
 
+<<<<<<< HEAD
 // Convert a scn to time string.
 int share::backup_scn_to_strftime(const SCN &scn, char *buf,
+=======
+// Convert time string.
+int share::backup_time_to_strftime(const int64_t &ts_s, char *buf,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     const int64_t buf_len, int64_t &pos, const char concat)
 {
   int ret = OB_SUCCESS;
   ObSqlString format;
   struct tm lt;
-  int strftime_len = 0;
-  const int64_t ts_s = trans_scn_to_second(scn);
+  int64_t strftime_len = 0;
   time_t t = static_cast<time_t>(ts_s);
 
   (void) localtime_r(&t, &lt);
@@ -4088,7 +4877,8 @@ int share::backup_scn_to_strftime(const SCN &scn, char *buf,
 int share::backup_scn_to_time_tag(const SCN &scn, char *buf, const int64_t buf_len, int64_t &pos)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(share::backup_scn_to_strftime(scn, buf, buf_len, pos, 'T'/* concat */))) {
+  const int64_t ts_s = trans_scn_to_second(scn);
+  if (OB_FAIL(share::backup_time_to_strftime(ts_s, buf, buf_len, pos, 'T'/* concat */))) {
     LOG_WARN("failed to format time tag", K(ret), K(scn));
   }
   return ret;
@@ -4104,6 +4894,42 @@ int ObRestoreBackupSetBriefInfo::assign(const ObRestoreBackupSetBriefInfo &that)
     LOG_WARN("fail to assign backup set path", K(ret), K(that));
   } else {
     backup_set_desc_ = that.backup_set_desc_;
+  }
+  return ret;
+}
+
+/* ObBackupSkippedType */
+
+const char *ObBackupSkippedType::str() const
+{
+  const char *str = "INVALID_TYPE";
+  switch (type_) {
+  case DELETED: {
+    str = "DELETED";
+    break;
+  }
+  case TRANSFER: {
+    str = "TRANSFER";
+    break;
+  }
+  default: {
+    str = "INVALID_TYPE";
+  }
+  }
+  return str;
+}
+
+int ObBackupSkippedType::parse_from_str(const ObString &str)
+{
+  int ret = OB_SUCCESS;
+  if (0 == str.case_compare("DELETED")) {
+    type_ = DELETED;
+  } else if (0 == str.case_compare("TRANSFER")) {
+    type_ = TRANSFER;
+  } else {
+    type_ = MAX_TYPE;
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid backup skipped type str", KR(ret), K(str));
   }
   return ret;
 }

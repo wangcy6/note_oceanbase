@@ -92,7 +92,7 @@ int ObTransformGroupByPushdown::transform_one_stmt(common::ObIArray<ObParentDMLS
   } else if (OB_FAIL(get_tables_from_params(*stmt, params, trans_tables))) {
     LOG_WARN("get tables failed", K(ret));
   } else if (OB_FAIL(accept_transform(parent_stmts, stmt, trans_stmt,
-                                      NULL != myhint && myhint->is_enable_hint(),
+                                      NULL != myhint && myhint->is_enable_hint(), false,
                                       trans_happened, &push_down_ctx))) {
     LOG_WARN("failed to accept transform", K(ret));
   } else if (!trans_happened) {
@@ -158,23 +158,6 @@ int ObTransformGroupByPushdown::adjust_transform_types(uint64_t &transform_types
   return ret;
 }
 
-int ObTransformGroupByPushdown::check_join_condition_contain_lob(ObDMLStmt &stmt, bool &is_valid)
-{
-  int ret = OB_SUCCESS;
-  bool has_lob = false;;
-  ObSEArray<ObRawExpr *, 4> conditions;
-  if (OB_FAIL(append(conditions, stmt.get_condition_exprs()))) {
-    LOG_WARN("extract colum failed", K(ret));
-  } else if (OB_FAIL(ObTransformUtils::get_on_conditions(stmt, conditions))) {
-    LOG_WARN("failed to get all on conditions", K(ret));
-  } else if (OB_FAIL(ObTransformUtils::check_exprs_contain_lob_type(conditions, has_lob))) {
-    LOG_WARN("check lob failed", K(ret));
-  } else {
-    is_valid = !has_lob;
-  }
-  return ret;
-}
-
 int ObTransformGroupByPushdown::check_groupby_push_down_validity(ObSelectStmt *stmt,
                                                                   bool &is_valid)
 {
@@ -190,6 +173,7 @@ int ObTransformGroupByPushdown::check_groupby_push_down_validity(ObSelectStmt *s
     LOG_WARN("failed to check if contain inner table", K(ret));
   } else if (contain_inner_table && !stmt->get_stmt_hint().has_enable_hint(T_PLACE_GROUP_BY)) {
     is_valid = false;
+    OPT_TRACE("do not rewrite inner table stmt with cost-based rule");
     // do not rewrite inner table stmt with cost-based rule
   } else if (stmt->has_window_function() ||
              stmt->has_rollup() ||
@@ -206,24 +190,26 @@ int ObTransformGroupByPushdown::check_groupby_push_down_validity(ObSelectStmt *s
     //                                  where t1.c1 = t2.c1;
     is_valid = false;
     LOG_TRACE("invalid stmt for eager aggregation", K(is_valid));
+    OPT_TRACE("invalid stmt for eager aggregation");
   } else if (OB_FAIL(stmt->has_rownum(has_rownum))) {
     LOG_WARN("failed to check stmt has rownum", K(ret));
   } else if (has_rownum) {
     is_valid = false;
+    OPT_TRACE("stmt contain rownum, can not transform");
   } else if (OB_FAIL(stmt->has_rand(has_rand))) {
     LOG_WARN("failed to check stmt has rand", K(ret));
   } else if (has_rand) {
     is_valid = false;
+    OPT_TRACE("stmt has rand expr, can not transform");
   } else if (OB_FAIL(check_groupby_validity(*stmt, is_valid))) {
     LOG_WARN("failed to check group by validity", K(ret));
   } else if (!is_valid) {
     // do nothing
+    OPT_TRACE("not a valid group stmt");
   } else if (OB_FAIL(check_collation_validity(*stmt, is_valid))) {
     LOG_WARN("failed to check collation validity", K(ret));
   } else if (!is_valid) {
     // do nothing
-  } else if (OB_FAIL(check_join_condition_contain_lob(*stmt, is_valid))) {
-     LOG_WARN("check join condition contain clob failed", K(ret));
   }
   for (int64_t i = 0; OB_SUCC(ret) && is_valid && i < stmt->get_aggr_item_size(); ++i) {
     ObAggFunRawExpr *aggr_expr = NULL;
@@ -236,6 +222,7 @@ int ObTransformGroupByPushdown::check_groupby_push_down_validity(ObSelectStmt *s
                 aggr_expr->get_expr_type() != T_FUN_MAX) ||
                aggr_expr->is_param_distinct()) {
       is_valid = false;
+      OPT_TRACE("invalid aggregation type for group by placement", aggr_expr);
       LOG_TRACE("invalid aggregation type for group by placement", K(is_valid),
                 K(aggr_expr->get_expr_type()), K(aggr_expr->is_param_distinct()));
     }
@@ -472,8 +459,7 @@ int ObTransformGroupByPushdown::check_outer_join_aggr(ObSelectStmt *stmt,
     } else if (OB_ISNULL(param = stmt->get_aggr_item(i)->get_param_expr(0))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("param expr is null", K(ret), K(param));
-    } else if (!param->get_expr_levels().has_member(stmt->get_current_level()) ||
-               !param->get_relation_ids().overlap2(null_table_set)) {
+    } else if (!param->get_relation_ids().overlap2(null_table_set)) {
       // do nothing
     } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(param, columns))) {
       LOG_WARN("failed to extract column exprs", K(ret));
@@ -566,8 +552,8 @@ int ObTransformGroupByPushdown::is_filterable_join(ObSelectStmt *stmt,
              OB_ISNULL(right_expr = join_cond->get_param_expr(1))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("params are null", K(ret), K(left_expr), K(right_expr));
-  } else if (!left_expr->get_expr_levels().has_member(stmt->get_current_level()) ||
-             !right_expr->get_expr_levels().has_member(stmt->get_current_level()) ||
+  } else if (!left_expr->has_flag(CNT_COLUMN) ||
+             !right_expr->has_flag(CNT_COLUMN) ||
              left_expr->get_relation_ids().overlap(right_expr->get_relation_ids())) {
     is_valid = false;
   } else if (OB_FAIL(check_join_expr_validity(stmt, params, left_expr, is_valid))) {
@@ -631,7 +617,7 @@ int ObTransformGroupByPushdown::check_join_expr_validity(ObSelectStmt *stmt,
       } else if (OB_ISNULL(param_expr = aggr->get_param_expr(0))) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("param expr is null", K(ret));
-      } else if (!param_expr->get_expr_levels().has_member(stmt->get_current_level())) {
+      } else if (!param_expr->has_flag(CNT_COLUMN)) {
         // do nothing
       } else {
         is_valid = param_expr->get_relation_ids().overlap(col->get_relation_ids());
@@ -641,8 +627,7 @@ int ObTransformGroupByPushdown::check_join_expr_validity(ObSelectStmt *stmt,
       ObArenaAllocator alloc;
       EqualSets &equal_sets = ctx_->equal_sets_;
       ObSEArray<ObRawExpr *, 4> const_exprs;
-      if (OB_FAIL(stmt->get_stmt_equal_sets(equal_sets, alloc, true,
-                                            EQUAL_SET_SCOPE::SCOPE_WHERE))) {
+      if (OB_FAIL(stmt->get_stmt_equal_sets(equal_sets, alloc, true))) {
         LOG_WARN("failed to get stmt equal sets", K(ret));
       } else if (OB_FAIL(ObOptimizerUtil::compute_const_exprs(stmt->get_condition_exprs(),
                                                               const_exprs))) {
@@ -670,8 +655,11 @@ int ObTransformGroupByPushdown::do_groupby_push_down(ObSelectStmt *stmt,
   int ret = OB_SUCCESS;
   ObSqlBitSet<> outer_table_set;
   trans_happend = false;
+  ObSQLSessionInfo *session_info = NULL;
+  bool enable_group_by_placement_transform = false;
   if (OB_ISNULL(stmt) || OB_ISNULL(ctx_) ||
-      OB_ISNULL(ctx_->stmt_factory_) || OB_ISNULL(ctx_->expr_factory_)) {
+      OB_ISNULL(ctx_->stmt_factory_) || OB_ISNULL(ctx_->expr_factory_) ||
+      OB_ISNULL(session_info = ctx_->session_info_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("params are invalid", K(ret), K(ctx_), K(stmt));
   } else if (OB_FAIL(ctx_->stmt_factory_->create_stmt(trans_stmt))) {
@@ -732,10 +720,19 @@ int ObTransformGroupByPushdown::do_groupby_push_down(ObSelectStmt *stmt,
       }
     }
     LOG_TRACE("push down params", K(ret));
+    bool hint_force_pushdown = false;
     if (OB_FAIL(ret) || !is_valid) {
-    } else if (OB_FAIL(check_hint_valid(static_cast<ObDMLStmt &>(*stmt), params, is_valid))) {
+    } else if (OB_FAIL(session_info->is_groupby_placement_transformation_enabled(enable_group_by_placement_transform))) {
+      LOG_WARN("failed to check group by placement transform enabled", K(ret));
+    } else if (OB_FAIL(check_hint_valid(static_cast<ObDMLStmt &>(*stmt),
+                                        params,
+                                        hint_force_pushdown,
+                                        is_valid))) {
       LOG_WARN("check hint failed", K(ret));
     } else if (!is_valid) {
+      OPT_TRACE("hint disable group by pushdown");
+    } else if (!enable_group_by_placement_transform && !hint_force_pushdown) {
+      OPT_TRACE("system variable disable group by pushdown");
     } else if (OB_FAIL(transform_groupby_push_down(trans_stmt,
                                                    flattern_joined_tables,
                                                    outer_table_set,
@@ -802,8 +799,6 @@ int ObTransformGroupByPushdown::distribute_group_aggr(ObSelectStmt *stmt,
       LOG_WARN("failed to formalize count expr", K(ret));
     } else if (OB_FAIL(param.aggr_exprs_.push_back(count_expr))) {
       LOG_WARN("failed to push back count expr", K(ret));
-    } else {
-      count_expr->set_expr_level(stmt->get_current_level());
     }
     if (OB_SUCC(ret) && (is_unique || param.aggr_exprs_.empty() ||
                          (param.join_columns_.empty() && param.group_exprs_.empty()))) {
@@ -848,7 +843,7 @@ int ObTransformGroupByPushdown::distribute_filter(ObSelectStmt *stmt,
   if (OB_ISNULL(stmt) || OB_ISNULL(cond)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("params have null", K(ret), K(stmt), K(cond));
-  } else if (!cond->get_expr_levels().has_member(stmt->get_current_level())) {
+  } else if (!cond->has_flag(CNT_COLUMN)) {
     // do nothing
   } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(cond, column_exprs))) {
     LOG_WARN("failed to extract column exprs", K(ret));
@@ -1048,10 +1043,14 @@ int ObTransformGroupByPushdown::transform_groupby_push_down(ObSelectStmt *stmt,
       }
     }
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(stmt->replace_inner_stmt_expr(origin_aggr_exprs, deduce_aggr_exprs))) {
+      if (OB_FAIL(stmt->replace_relation_exprs(origin_aggr_exprs, deduce_aggr_exprs))) {
         LOG_WARN("failed to replace inner stmt expr", K(ret));
+        // TODO link.zt seems to be useless
+      } else if (OB_FAIL(ObTransformUtils::replace_exprs(origin_aggr_exprs,
+                                                         deduce_aggr_exprs,
+                                                         stmt->get_aggr_items()))) {
+        LOG_WARN("failed to replace exprs", K(ret));
       } else {
-        stmt->get_deduced_exprs().reset();
       }
     }
   }
@@ -1122,8 +1121,6 @@ int ObTransformGroupByPushdown::push_down_group_by_into_view(ObSelectStmt *stmt,
   } else if (OB_FAIL(sub_stmt->get_stmt_hint().assign(stmt->get_stmt_hint()))) { 
     // zhanyue todo: remove some hint for sub stmt
     LOG_WARN("failed to assign stmt hint", K(ret));
-  } else {
-    sub_stmt->set_current_level(stmt->get_current_level());
   }
   /// 1. build table and from list
   for (int64_t i = 0; OB_SUCC(ret) && i < table_index_array.count(); ++i) {
@@ -1141,6 +1138,8 @@ int ObTransformGroupByPushdown::push_down_group_by_into_view(ObSelectStmt *stmt,
       LOG_WARN("failed to push back table item", K(ret));
     } else if (OB_FAIL(stmt->remove_table_item(table_item))) {
       LOG_WARN("failed to remove table item", K(ret));
+    } else if (OB_FAIL(stmt->remove_check_constraint_item(table_item->table_id_))) {
+      LOG_WARN("failed to remove table item info", K(ret));
     } else if (OB_FAIL(ObTransformUtils::get_from_item(stmt, table_item, from_item))) {
       LOG_WARN("failed to from item", K(ret));
     } else if (!from_item.is_joined_) {
@@ -1335,11 +1334,12 @@ int ObTransformGroupByPushdown::transform_aggregation_expr(ObDMLStmt &stmt,
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < eager_aggr_views.count(); ++i) {
     ObRawExpr *view_column = NULL;
-    if (OB_FAIL(get_view_column(stmt,
-                                eager_aggr_views.at(i),
-                                table_types.at(i),
-                                &aggr_expr,
-                                view_column))) {
+    if (OB_FAIL(ObTransformUtils::get_view_column(ctx_,
+                                                  stmt,
+                                                  eager_aggr_views.at(i),
+                                                  table_types.at(i),
+                                                  &aggr_expr,
+                                                  view_column))) {
       LOG_WARN("failed to get aggregation column", K(ret));
     } else if (OB_NOT_NULL(view_column)) {
       aggr_column = view_column;
@@ -1365,7 +1365,7 @@ int ObTransformGroupByPushdown::transform_aggregation_expr(ObDMLStmt &stmt,
   LOG_TRACE("transform aggregation", K(mul_params), K(aggr_column));
   if (OB_SUCC(ret) && OB_ISNULL(aggr_column)) {
     // the aggregation expr is not pushed into eager view
-    if (OB_FAIL(convert_aggr_expr(&stmt, &aggr_expr, aggr_column))) {
+    if (OB_FAIL(ObTransformUtils::convert_aggr_expr(ctx_, &stmt, &aggr_expr, aggr_column))) {
       LOG_WARN("failed to convert aggr expr to plain expr", K(ret));
     } else if (OB_ISNULL(aggr_column)) {
       ret = OB_ERR_UNEXPECTED;
@@ -1398,131 +1398,7 @@ int ObTransformGroupByPushdown::transform_aggregation_expr(ObDMLStmt &stmt,
       LOG_WARN("the copied aggregation expr is null", K(ret), K(group_aggr));
     } else {
       group_aggr->add_real_param_expr(new_aggr_expr);
-      group_aggr->set_expr_level(stmt.get_current_level());
       new_aggr_expr = group_aggr;
-    }
-  }
-  return ret;
-}
-
-int ObTransformGroupByPushdown::convert_aggr_expr(ObDMLStmt *stmt,
-                                                   ObAggFunRawExpr *aggr_expr,
-                                                   ObRawExpr *&output_expr)
-{
-  int ret = OB_SUCCESS;
-  // for sum
-  bool is_not_null = true;
-  ObConstRawExpr *value_one = NULL;
-  ObConstRawExpr *value_zero = NULL;
-  ObSEArray<ObRawExpr *, 4> constraints;
-  if (OB_ISNULL(stmt) || OB_ISNULL(aggr_expr) || OB_ISNULL(ctx_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("params have null", K(ret), K(stmt), K(aggr_expr));
-  } else if (aggr_expr->get_expr_type() == T_FUN_MAX ||
-             aggr_expr->get_expr_type() == T_FUN_MIN ||
-             aggr_expr->get_expr_type() == T_FUN_SUM) {
-    output_expr = aggr_expr->get_param_expr(0);
-  } else if (aggr_expr->get_expr_type() != T_FUN_COUNT) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("invalid aggregation type", K(ret));
-  } else if (aggr_expr->get_param_count() == 0) {
-    // Note 1: actually output expr should be "expr 1L"
-    // we do not create the dummy const expr, instead we let
-    // the caller to handle this case, which will ignore the expr
-    // in deduce the aggreagtion result
-    output_expr = aggr_expr;
-  } else if (OB_FAIL(ObTransformUtils::is_expr_not_null(ctx_,
-                                                        stmt,
-                                                        aggr_expr->get_real_param_exprs().at(0),
-                                                        NULLABLE_SCOPE::NS_WHERE,
-                                                        is_not_null,
-                                                        &constraints))) {
-    LOG_WARN("failed to check expr not null", K(ret));
-  } else if (is_not_null) {
-    // See Note 1
-    if (OB_FAIL(ObTransformUtils::add_param_not_null_constraint(*ctx_, constraints))) {
-      LOG_WARN("failed to add param not null constraint", K(ret));
-    } else {
-      output_expr = aggr_expr;
-    }  
-  } else if (OB_FAIL(ObTransformUtils::build_const_expr_for_count(*ctx_->expr_factory_, 1L,
-                                                                  value_one))) {
-    LOG_WARN("failed to create const int expr", K(ret));
-  } else if (OB_FAIL(ObTransformUtils::build_const_expr_for_count(*ctx_->expr_factory_, 0L,
-                                                                  value_zero))) {
-    LOG_WARN("failed to create const int expr", K(ret));
-  } else if (OB_FAIL(build_case_when(stmt, aggr_expr->get_real_param_exprs().at(0),
-                                     value_one, value_zero, output_expr))) {
-    LOG_WARN("failed to build case when", K(ret));
-  }
-  return ret;
-}
-
-int ObTransformGroupByPushdown::build_case_when(ObDMLStmt *stmt,
-                                                 ObRawExpr *when_expr,
-                                                 ObRawExpr *then_expr,
-                                                 ObRawExpr *else_expr,
-                                                 ObRawExpr *&case_when)
-{
-  int ret = OB_SUCCESS;
-  ObCaseOpRawExpr *case_expr = NULL;
-  ObOpRawExpr *is_not_expr = NULL;
-  if (OB_ISNULL(ctx_) || OB_ISNULL(ctx_->expr_factory_) || OB_ISNULL(ctx_->session_info_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("param expr is null", K(ret), K(ctx_));
-  } else if (OB_FAIL(ctx_->expr_factory_->create_raw_expr(T_OP_CASE, case_expr))) {
-    LOG_WARN("failed to create case expr", K(ret));
-  } else if (OB_FAIL(ObTransformUtils::add_is_not_null(ctx_, stmt, when_expr, is_not_expr))) {
-    LOG_WARN("failed to build is not null expr", K(ret));
-  } else if (OB_FAIL(case_expr->add_when_param_expr(is_not_expr))) {
-    LOG_WARN("failed to add when param expr", K(ret));
-  } else if (OB_FAIL(case_expr->add_then_param_expr(then_expr))) {
-    LOG_WARN("failed to add then expr", K(ret));
-  } else {
-    case_expr->set_default_param_expr(else_expr);
-    case_when = case_expr;
-    if (OB_FAIL(case_when->formalize(ctx_->session_info_))) {
-      LOG_WARN("failed to formalize case when expr", K(ret));
-    }
-  }
-  return ret;
-}
-
-int ObTransformGroupByPushdown::get_view_column(ObDMLStmt &stmt,
-                                                 TableItem *table_item,
-                                                 bool is_outer_join_table,
-                                                 ObRawExpr *aggr_expr,
-                                                 ObRawExpr *&aggr_column)
-{
-  int ret = OB_SUCCESS;
-  ObSelectStmt *select_stmt = NULL;
-  uint64_t column_id = OB_INVALID_ID;
-  aggr_column = NULL;
-  if (OB_ISNULL(table_item) || OB_ISNULL(aggr_expr)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("params are invalid", K(ret), K(table_item), K(aggr_expr));
-  } else if (OB_ISNULL(select_stmt = table_item->ref_query_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("table item is expected to be generated table", K(ret), K(*table_item));
-  }
-  for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
-    if (select_stmt->get_select_item(i).expr_ == aggr_expr) {
-      column_id = OB_APP_MIN_COLUMN_ID + i;
-      break;
-    }
-  }
-  if (OB_SUCC(ret) && column_id != OB_INVALID_ID) {
-    ObColumnRefRawExpr *col_expr = NULL;
-    if (OB_ISNULL(col_expr = stmt.get_column_expr_by_id(
-                    table_item->table_id_, column_id))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("failed to get column item", K(*table_item), K(column_id));
-    } else if (aggr_expr->get_expr_type() != T_FUN_COUNT ||
-               !is_outer_join_table) {
-      aggr_column = col_expr;
-    } else if (OB_FAIL(wrap_case_when_for_count(
-                               &stmt, col_expr, aggr_column))) {
-      LOG_WARN("failed to convert outer join count", K(ret));
     }
   }
   return ret;
@@ -1561,31 +1437,9 @@ int ObTransformGroupByPushdown::get_count_star(ObDMLStmt &stmt,
     LOG_WARN("failed to get column expr", K(*table_item));
   } else if (!is_outer_join_table) {
     count_column = col_expr;
-  } else if (OB_FAIL(wrap_case_when_for_count(&stmt, col_expr, count_column, true))) {
+  } else if (OB_FAIL(ObTransformUtils::wrap_case_when_for_count(ctx_, &stmt, col_expr,
+                                                                count_column, true))) {
     LOG_WARN("failed to convert count star", K(ret));
-  }
-  return ret;
-}
-
-int ObTransformGroupByPushdown::wrap_case_when_for_count(ObDMLStmt *stmt,
-                                                          ObColumnRefRawExpr *view_count,
-                                                          ObRawExpr *&output,
-                                                          bool is_count_star /*= false*/)
-{
-  int ret = OB_SUCCESS;
-  const int64_t const_int_value = (is_count_star ? 1 : 0);
-  ObRawExpr *case_when = NULL;
-  ObConstRawExpr *int_value = NULL;
-  if (OB_ISNULL(stmt) || OB_ISNULL(view_count)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("params have null", K(ret), K(stmt), K(view_count));
-  } else if (OB_FAIL(ObTransformUtils::build_const_expr_for_count(*ctx_->expr_factory_,
-                                                                  const_int_value, int_value))) {
-    LOG_WARN("failed to build const int expr", K(ret));
-  } else if (OB_FAIL(build_case_when(stmt, view_count, view_count, int_value, case_when))) {
-    LOG_WARN("failed to build case when expr", K(ret));
-  } else {
-    output = case_when;
   }
   return ret;
 }
@@ -1724,13 +1578,15 @@ int ObTransformGroupByPushdown::construct_transform_hint(ObDMLStmt &stmt, void *
   return ret;
 }
 
-int ObTransformGroupByPushdown::is_expected_plan(ObLogPlan *plan, void *check_ctx, bool &is_valid)
+int ObTransformGroupByPushdown::is_expected_plan(ObLogPlan *plan, void *check_ctx, bool is_trans_plan, bool &is_valid)
 {
   int ret = OB_SUCCESS;
   ObCostBasedPushDownCtx *push_down_ctx = static_cast<ObCostBasedPushDownCtx *>(check_ctx);
   if (OB_ISNULL(plan) || OB_ISNULL(push_down_ctx)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpect null param", K(ret));
+  } else if (!is_trans_plan) {
+    // do nothing
   } else if (OB_FAIL(check_nl_operator(plan->get_plan_root(), push_down_ctx, is_valid))) {
     LOG_WARN("check nl operator failed", K(ret));
   } 
@@ -1791,10 +1647,14 @@ int ObTransformGroupByPushdown::has_group_by_op(ObLogicalOperator *op, bool &bre
   return ret;
 }
 
-int ObTransformGroupByPushdown::check_hint_valid(ObDMLStmt &stmt, ObIArray<PushDownParam> &params, bool &is_valid)
+int ObTransformGroupByPushdown::check_hint_valid(ObDMLStmt &stmt,
+                                                 ObIArray<PushDownParam> &params,
+                                                 bool &hint_force_pushdown,
+                                                 bool &is_valid)
 {
   int ret = OB_SUCCESS;
   is_valid = false;
+  hint_force_pushdown = false;
   const ObQueryHint *query_hint = NULL; 
   const ObGroupByPlacementHint *hint = static_cast<const ObGroupByPlacementHint*>(get_hint(stmt.get_stmt_hint()));
   const ObHint *no_rewrite = stmt.get_stmt_hint().get_no_rewrite_hint();
@@ -1815,6 +1675,9 @@ int ObTransformGroupByPushdown::check_hint_valid(ObDMLStmt &stmt, ObIArray<PushD
         LOG_WARN("get unexpected null", K(ret), K(trans_tables));
       } else {
         is_valid = hint->enable_groupby_placement(query_hint->cs_type_, trans_tables.at(i));
+        if (is_valid) {
+          hint_force_pushdown = true;
+        }
         LOG_TRACE("succeed hint valid", K(is_valid), K(*trans_tables.at(i).at(0)), K(*hint));
         if (!is_valid) { break; }
       }

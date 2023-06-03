@@ -57,12 +57,14 @@ private:
       const bool is_tablet_freeze,
       memtable::ObIMemtable *memtable,
       bool &bool_ret);
-  int check_freeze_to_inc_write_ref(ObITable *table, bool &bool_ret);
+  int check_freeze_to_inc_write_ref(ObITable *table, bool &bool_ret, bool &for_replace_tablet_meta);
   bool need_to_refresh_table(ObTableStoreIterator &iter);
   bool check_if_need_log();
 private:
   static const int64_t LOG_INTERVAL_US = 10 * 1000 * 1000;
   static const int64_t GET_TS_INTERVAL = 10 * 1000;
+  static const int64_t SPEED_LIMIT_MAX_SLEEP_TIME = 20 * 1000 * 1000;
+  static const int64_t SLEEP_INTERVAL_PER_TIME = 20 * 1000;
 
   ObTablet *tablet_;
   ObStoreCtx &store_ctx_;
@@ -70,6 +72,8 @@ private:
   memtable::ObIMemtable *memtable_;
   int64_t retry_count_;
   int64_t last_ts_;
+  // record write latency
+  int64_t init_ts_;
   bool for_replay_;
   share::SCN replay_scn_;
   bool for_multi_source_data_;

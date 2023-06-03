@@ -23,7 +23,7 @@ namespace libobcdc
 {
 // The task may be destroyed by other module threads during the dispatch process, so it needs to be popped out before it can be consumed
 // The basic information of the task being dispatched is still recorded in the queue to satisfy the query of the dispatch progress
-// bug logging: https://work.aone.alibaba-inc.com/issue/21684127
+// bug logging:
 //
 // pop task needs to record basic information about the task
 PartTransTask* SafeTaskWithRecordQueue::pop()
@@ -77,7 +77,7 @@ void SafePartTransTaskQueue::print_task_queue()
 //
 void SafeTaskWithRecordQueue::update_dispatch_progress_by_task_queue(
     int64_t &dispatch_progress,
-    PartTransDispatchInfo &dispatch_info)
+    logfetcher::PartTransDispatchInfo &dispatch_info)
 {
   common::ObByteLockGuard guard(lock_);
   if (dispatching_task_info_.is_dispatching_) {

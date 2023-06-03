@@ -40,13 +40,15 @@ int ObResourceInnerSQLConnectionPool::init(ObMultiVersionSchemaService *schema_s
                                            const bool is_ddl)
 {
   int ret = OB_SUCCESS;
-  ObLatchWGuard guard(lock_, ObLatchIds::DEFAULT_MUTEX);
+  ObLatchWGuard guard(lock_, ObLatchIds::INNER_CONN_POOL_LOCK);
 
+  ObMemAttr attr(OB_SERVER_TENANT_ID, "IdConnMap");
+  SET_USE_500(attr);
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("ObResourceInnerSQLConnectionPool has already been inited", K(ret));
   } else if (OB_FAIL(id_conn_map_.create(ObInnerSQLConnectionPool::WARNNING_CONNECTION_CNT,
-                                         lib::ObLabel("IdConnMap")))) {
+                                         attr, attr))) {
     LOG_WARN("fail to create id_conn_map_", K(ret));
   } else if (OB_FAIL(inner_sql_conn_pool_.init(schema_service,
                                                ob_sql,
@@ -82,7 +84,7 @@ int ObResourceInnerSQLConnectionPool::acquire(
     common::sqlclient::ObISQLConnection *&conn, sql::ObSQLSessionInfo *session_info)
 {
   int ret = OB_SUCCESS;
-  ObLatchWGuard guard(lock_, ObLatchIds::DEFAULT_MUTEX);
+  ObLatchWGuard guard(lock_, ObLatchIds::INNER_CONN_POOL_LOCK);
   ObInnerSQLConnection *inner_conn = NULL;
 
   if (OB_UNLIKELY(!is_inited_)) {
@@ -123,7 +125,7 @@ int ObResourceInnerSQLConnectionPool::acquire(
       LOG_WARN("conn is null", K(ret), K(conn_id));
     } else if (!inner_conn->is_idle()) {
       if (kill_using_conn) {
-        /* related issue : https://work.aone.alibaba-inc.com/issue/43912619
+        /* related issue :
          * Why we need to set need_trans_rollback flag to inner_conn ?
          * Consider this situation:
          * Local obs inner sql rpc is timeout or gets some errors, and then will transmit a rollback inner sql to remote obs.
@@ -200,7 +202,7 @@ int ObResourceInnerSQLConnectionPool::release(
     common::sqlclient::ObISQLConnection *&conn)
 {
   int ret = OB_SUCCESS;
-  ObLatchWGuard guard(lock_, ObLatchIds::DEFAULT_MUTEX);
+  ObLatchWGuard guard(lock_, ObLatchIds::INNER_CONN_POOL_LOCK);
 
   if (OB_ISNULL(conn)) {
     if (reuse_conn) {

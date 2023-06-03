@@ -468,6 +468,19 @@ DEF_NAME(id, "id")
     DEF_NAME(replay_rollback_to, "replay rollback to")
     DEF_NAME(replay_active_info, "replay active info")
     DEF_NAME(scn_val, "value of scn")
+<<<<<<< HEAD
+=======
+
+    // txn_free_route
+    DEF_NAME(logic_clock, "the logical clock")
+    DEF_NAME(tx_free_route_update_static, "txn free route update static state")
+    DEF_NAME(tx_free_route_update_dynamic, "txn free route update dynamic state")
+    DEF_NAME(tx_free_route_update_participants, "txn free route update participants state")
+    DEF_NAME(tx_free_route_update_extra, "txn free route update extra state")
+    DEF_NAME(tx_free_route_send_state, "txn free route send state")
+    DEF_NAME(tx_free_route_recv_state, "txn free route receive state")
+
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     // perf event
     DEF_NAME(S_scan_iter, "storage: scan iterator")
     DEF_NAME(pc_fast_gen_stmt_key_end, "plan cache: fast genarate stmt_key")
@@ -570,9 +583,11 @@ DEF_NAME(id, "id")
 
     DEF_NAME_PAIR(get_das_id, "get_das_id")
     DEF_NAME_PAIR(do_local_das_task, "do_local_das_task")
-    DEF_NAME_PAIR(do_remote_das_task, "do_remote_das_task")
+    DEF_NAME_PAIR(do_async_remote_das_task, "do_async_remote_das_task")
+    DEF_NAME_PAIR(do_sync_remote_das_task, "do_sync_remote_das_task")
     DEF_NAME_PAIR(rescan_das_task, "rescan_das_task")
-    DEF_NAME_PAIR(das_rpc_process, "das_rpc_process")
+    DEF_NAME_PAIR(das_async_rpc_process, "das_async_rpc_process")
+    DEF_NAME_PAIR(das_sync_rpc_process, "das_sync_rpc_process")
     DEF_NAME_PAIR(close_das_task, "close_das_task")
     DEF_NAME_PAIR(fetch_das_extra_result, "fetch_das_extra_result")
     DEF_NAME_PAIR(fetch_das_result_process, "fetch_das_result_process")
@@ -832,6 +847,33 @@ DEF_NAME(id, "id")
     DEF_NAME(update_cluster_info, "update_cluster_info")
     DEF_NAME(update_master_key_info, "update_master_key_info")
     DEF_NAME(do_heartbeat_event, "do_heartbeat_event")
+
+    //ObTenantInfoLoader
+    DEF_NAME(ob_tenant_info_loader, "ob_tenant_info_loader")
+    DEF_NAME(cost_time_us, "cost_time_us")
+    DEF_NAME(broadcast_times, "broadcast_times")
+    DEF_NAME(is_inited, "is_inited")
+    DEF_NAME(tenant_info_cache, "tenant_info_cache")
+    DEF_NAME(tenant_info, "tenant_info")
+    DEF_NAME(ora_rowscn, "ora_rowscn")
+    DEF_NAME(switchover_epoch, "switchover_epoch")
+    DEF_NAME(sync_scn, "sync_scn")
+    DEF_NAME(replayable_scn, "replayable_scn")
+    DEF_NAME(standby_scn, "standby_scn")
+    DEF_NAME(recovery_until_scn, "recovery_until_scn")
+    DEF_NAME(log_mode, "log_mode")
+    DEF_NAME(tenant_role, "tenant_role")
+    DEF_NAME(switchover_status, "switchover_status")
+    DEF_NAME(is_sys_ls_leader, "is_sys_ls_leader")
+    DEF_NAME(broadcast_cost_time, "broadcast_cost_time")
+    DEF_NAME(broadcast_per_sec, "broadcast_per_sec")
+    DEF_NAME(rpc_update_times, "rpc_update_times")
+    DEF_NAME(rpc_update_per_sec, "rpc_update_per_sec")
+    DEF_NAME(last_rpc_update_time_us, "last_rpc_update_time_us")
+    DEF_NAME(sql_update_cost_time, "sql_update_cost_time")
+    DEF_NAME(sql_update_times, "sql_update_times")
+    DEF_NAME(last_sql_update_time, "last_sql_update_time")
+
     // << add pair events BEFORE this line
     DEF_NAME(NAME_COUNT, "invalid")
 #endif
@@ -863,7 +905,7 @@ const char* get_description(int32_t id);
 
 #define OB_ID(name_sym) (::oceanbase::name::name_sym)
 #define NAME(name_id) (::oceanbase::name::get_name(name_id))
-#define Y(x) OB_ID(x), x
-#define Y_(x) OB_ID(x), x ##_
+#define OB_Y(x) OB_ID(x), x
+#define OB_Y_(x) OB_ID(x), x ##_
 
 #endif /* _OB_NAME_ID_DEF_H */

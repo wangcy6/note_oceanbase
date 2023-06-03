@@ -27,7 +27,31 @@ class ObTransformOrExpansion: public ObTransformRule
   static const int64_t MAX_STMT_NUM_FOR_OR_EXPANSION;
   static const int64_t MAX_TIMES_FOR_OR_EXPANSION;
   typedef ObBitSet<8> ColumnBitSet;
-
+  struct TableColBitSet{
+  public:
+    TableColBitSet()
+      : table_id_(OB_INVALID_ID),
+        column_bit_set_() {}
+    TableColBitSet(int64_t table_id, const ColumnBitSet &column_bit_set)
+      : table_id_(table_id),
+        column_bit_set_(column_bit_set) {}
+    int assign(const TableColBitSet& other)
+    {
+      int ret = OB_SUCCESS;
+      table_id_ = other.table_id_;
+      ret = column_bit_set_.assign(other.column_bit_set_);
+      return ret;
+    }
+    bool operator==(const TableColBitSet& other) const
+    {
+      return table_id_ == other.table_id_ &&
+             column_bit_set_ == other.column_bit_set_;
+    }
+    int64_t table_id_;
+    ColumnBitSet column_bit_set_;
+    TO_STRING_KV(K_(table_id),
+                 K_(column_bit_set));
+  };
   enum OR_EXPAND_TYPE {
     INVALID_OR_EXPAND_TYPE        = 1 << 0,
     OR_EXPAND_HINT                = 1 << 1,
@@ -87,7 +111,7 @@ public:
                                  bool &trans_happened) override;
 protected:
   virtual int adjust_transform_types(uint64_t &transform_types) override;
-  virtual int is_expected_plan(ObLogPlan *plan, void *check_ctx, bool &is_valid) override;
+  virtual int is_expected_plan(ObLogPlan *plan, void *check_ctx, bool is_trans_plan, bool &is_valid) override;
   virtual int transform_one_stmt_with_outline(common::ObIArray<ObParentDMLStmt> &parent_stmts,
                                               ObDMLStmt *&stmt,
                                               bool &trans_happened) override;
@@ -139,8 +163,7 @@ private:
                                    ObSqlBitSet<> &left_unique_pos,
                                    ObSqlBitSet<> &right_flag_pos);
 
-  int create_row_number_window_function(const int32_t expr_level,
-                                        ObIArray<ObRawExpr *> &partition_exprs,
+  int create_row_number_window_function(ObIArray<ObRawExpr *> &partition_exprs,
                                         ObIArray<ObRawExpr *> &order_exprs,
                                         ObWinFunRawExpr *&win_expr);
 
@@ -238,7 +261,6 @@ private:
                                   bool &using_same_cols);
 
   int get_use_hint_expand_type(const ObRawExpr &expr,
-                               const bool is_topk,
                                const bool can_set_distinct,
                                OrExpandInfo &trans_info);
 
@@ -274,6 +296,7 @@ private:
   int transform_or_expansion(ObSelectStmt *stmt,
                              const uint64_t trans_id,
                              const int64_t expr_pos,
+                             bool is_topk,
                              ObCostBasedRewriteCtx &ctx,
                              ObSelectStmt *&trans_stmt);
   int adjust_or_expansion_stmt(ObIArray<ObRawExpr*> *conds_exprs,
@@ -300,7 +323,7 @@ private:
 
   int check_select_expr_has_lob(ObDMLStmt &stmt, bool &has_lob);
 
-  static int extract_columns(const ObRawExpr *expr, const int64_t stmt_level,
+  static int extract_columns(const ObRawExpr *expr,
                              int64_t &table_id, bool &from_same_table,
                              ColumnBitSet &col_bit_set);
 
@@ -332,9 +355,33 @@ private:
                                    bool &is_valid);
   int remove_filter_exprs(ObLogicalOperator* op,
                           ObIArray<ObRawExpr*> &candi_exprs);
+  int is_candi_match_index_exprs(ObRawExpr *expr, bool &result);
   int get_candi_match_index_exprs(ObRawExpr *expr,
                                   ObIArray<ObRawExpr*> &candi_exprs);
 
+  int classify_or_expr(const ObDMLStmt &stmt, ObRawExpr *&expr);
+  int merge_expr_class(ObRawExpr *&expr_class, ObRawExpr *expr);
+  int get_condition_related_tables(ObSelectStmt &stmt,
+                                   int64_t expr_pos,
+                                   const ObIArray<ObRawExpr*> &conds_exprs,
+                                   bool &create_view,
+                                   ObIArray<TableItem *> &or_expr_tables,
+                                   ObIArray<SemiInfo *> &or_semi_infos);
+  int get_condition_related_view(ObSelectStmt *stmt,
+                                 ObSelectStmt *&view_stmt,
+                                 TableItem *&view_table,
+                                 int64_t &expr_pos,
+                                 ObIArray<ObRawExpr*> *&conds_exprs,
+                                 bool &is_set_distinct);
+  int check_delay_expr(ObRawExpr* expr, bool &delay);
+  int check_valid_rel_table(ObSelectStmt &stmt,
+                            ObRelIds &rel_ids,
+                            TableItem *rel_table,
+                            bool &is_valid);
+  int check_left_bottom_table(ObSelectStmt &stmt,
+                              TableItem *rel_table,
+                              TableItem *table,
+                              bool &left_bottom);
   DISALLOW_COPY_AND_ASSIGN(ObTransformOrExpansion);
 private:
   int64_t try_times_;

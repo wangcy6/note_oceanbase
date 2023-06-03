@@ -25,6 +25,7 @@
 #include "observer/ob_req_time_service.h"
 #include "observer/omt/ob_tenant.h"
 #include "observer/mysql/obsm_utils.h"
+#include "sql/plan_cache/ob_ps_cache.h"
 
 namespace oceanbase
 {
@@ -179,7 +180,6 @@ int ObMPStmtSendPieceData::process_send_long_data_stmt(ObSQLSessionInfo &session
 {
   int ret = OB_SUCCESS;
   bool need_response_error = true;
-  bool use_sess_trace = false;
   int64_t tenant_version = 0;
   int64_t sys_version = 0;
   setup_wb(session);
@@ -198,7 +198,7 @@ int ObMPStmtSendPieceData::process_send_long_data_stmt(ObSQLSessionInfo &session
   //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
   int tmp_ret = OB_SUCCESS;
   //清空WARNING BUFFER
-  tmp_ret = do_after_process(session, use_sess_trace, ctx_, false);
+  tmp_ret = do_after_process(session, ctx_, false);
   UNUSED(tmp_ret);
   return ret;
 }
@@ -220,11 +220,12 @@ int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
     ObMaxWaitGuard max_wait_guard(enable_perf_event
                                     ? &audit_record.exec_record_.max_wait_event_ : NULL, di);
     ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
-    if (enable_sql_audit) {
+    if (enable_perf_event) {
       audit_record.exec_record_.record_start(di);
     }
     int64_t execution_id = 0;
     ObString sql = "send long data";
+    //监控项统计开始
     exec_start_timestamp_ = ObTimeUtility::current_time();
     if (FALSE_IT(execution_id = gctx_.sql_engine_->get_execution_id())) {
       //nothing to do
@@ -234,25 +235,24 @@ int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
     } else if (OB_FAIL(store_piece(session))) {
       exec_end_timestamp_ = ObTimeUtility::current_time();
     } else {
-      //监控项统计开始
-      if (enable_perf_event) {
-        exec_end_timestamp_ = ObTimeUtility::current_time();
-      }
+      //监控项统计结束
+      exec_end_timestamp_ = ObTimeUtility::current_time();
+
       session.set_current_execution_id(execution_id);
+
+      // some statistics must be recorded for plan stat, even though sql audit disabled
+      bool first_record = (1 == audit_record.try_cnt_);
+      ObExecStatUtils::record_exec_timestamp(*this, first_record, audit_record.exec_timestamp_);
+      audit_record.exec_timestamp_.update_stage_time();
+
       if (enable_perf_event) {
-        exec_end_timestamp_ = ObTimeUtility::current_time();
-        if (lib::is_diagnose_info_enabled()) {
-          const int64_t time_cost = exec_end_timestamp_ - get_receive_timestamp();
-          EVENT_INC(SQL_PS_PREPARE_COUNT);
-          EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
-        }
-      }
-      if (enable_sql_audit) {
         audit_record.exec_record_.record_end(di);
-        bool first_record = (1 == audit_record.try_cnt_);
-        ObExecStatUtils::record_exec_timestamp(*this,
-            first_record,
-            audit_record.exec_timestamp_);
+        audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
+        audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
+        audit_record.update_event_stage_state();
+        const int64_t time_cost = exec_end_timestamp_ - get_receive_timestamp();
+        EVENT_INC(SQL_PS_PREPARE_COUNT);
+        EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
       }
     }
   } // diagnose end
@@ -266,9 +266,7 @@ int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
   }
 
   //set read_only
-  if (OB_SUCC(ret)) {
-    session.set_has_exec_write_stmt(false);
-  } else {
+  if (OB_FAIL(ret)) {
     bool is_partition_hit = session.partition_hit().get_bool();
     int err = send_error_packet(ret, NULL, is_partition_hit);
     if (OB_SUCCESS != err) {  // 发送error包
@@ -280,11 +278,10 @@ int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
     audit_record.client_addr_ = session.get_peer_addr();
     audit_record.user_client_addr_ = session.get_user_client_addr();
     audit_record.user_group_ = THIS_WORKER.get_group_id();
-    audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
-    audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
-    audit_record.ps_stmt_id_ = stmt_id_;
     audit_record.plan_id_ = param_id_;
     audit_record.return_rows_ = buffer_len_;
+    audit_record.is_perf_event_closed_ = !lib::is_diagnose_info_enabled();
+    audit_record.ps_stmt_id_ = stmt_id_;
     if (OB_NOT_NULL(session.get_ps_cache())) {
       ObPsStmtInfoGuard guard;
       ObPsStmtInfo *ps_info = NULL;
@@ -292,15 +289,15 @@ int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
       if (OB_SUCC(session.get_inner_ps_stmt_id(stmt_id_, inner_stmt_id))
             && OB_SUCC(session.get_ps_cache()->get_stmt_info_guard(inner_stmt_id, guard))
             && OB_NOT_NULL(ps_info = guard.get_stmt_info())) {
+        audit_record.ps_inner_stmt_id_ = inner_stmt_id;
         audit_record.sql_ = const_cast<char *>(ps_info->get_ps_sql().ptr());
         audit_record.sql_len_ = min(ps_info->get_ps_sql().length(), OB_MAX_SQL_LENGTH);
       } else {
-        LOG_INFO("get sql fail in fetch", K(stmt_id_));
+        LOG_WARN("get sql fail in send piece data", K(stmt_id_));
       }
     }
-    audit_record.update_stage_stat();
-    ObSQLUtils::handle_audit_record(false, EXECUTE_PS_SEND_PIECE, session);
   }
+  ObSQLUtils::handle_audit_record(false, EXECUTE_PS_SEND_PIECE, session, ctx_.is_sensitive_);
 
   clear_wb_content(session);
   return ret;
@@ -332,13 +329,13 @@ int ObMPStmtSendPieceData::store_piece(ObSQLSessionInfo &session)
         LOG_WARN("add piece buffer fail.", K(ret), K(stmt_id_));
       } else {
         if (is_null_) {
-          piece->get_is_null_map().add_member(piece->get_position());
+          OZ (piece->get_is_null_map().add_member(piece->get_position()));
         }
         ObOKPParam ok_param;
         ok_param.affected_rows_ = 0;
         ok_param.is_partition_hit_ = session.partition_hit().get_bool();
         ok_param.has_more_result_ = false;
-        if (OB_FAIL(send_ok_packet(session, ok_param))) {
+        if (OB_SUCC(ret) && OB_FAIL(send_ok_packet(session, ok_param))) {
           LOG_WARN("send ok packet fail.", K(ret), K(stmt_id_));
         }
       }
@@ -496,9 +493,12 @@ int ObPieceCache::close_all(ObSQLSessionInfo &session)
         ++iter) {
       ObPiece *piece = iter->second;
       int64_t key = get_piece_key(piece->get_stmt_id(), piece->get_param_id());
-      if (OB_FAIL(remove_piece(key, session))) {
+      int64_t tmp_ret = remove_piece(key, session);
+      // only save first error ret
+      ret = ret == OB_SUCCESS ? tmp_ret : ret;
+      if (OB_SUCCESS != tmp_ret) {
         LOG_WARN("remove piece fail.", K(piece->get_stmt_id()), 
-                      K(piece->get_param_id()), K(ret));
+                      K(piece->get_param_id()), K(tmp_ret));
       }
     }
   }
@@ -607,8 +607,7 @@ int ObPieceCache::get_buffer(int32_t stmt_id,
                              uint64_t &length, 
                              common::ObFixedArray<ObSqlString, ObIAllocator> &str_buf,
                              char *is_null_map) {
-  int ret = OB_SUCCESS;
-  lib::is_oracle_mode() 
+  int ret = lib::is_oracle_mode()
     ? get_oracle_buffer(stmt_id, param_id, count, length, str_buf, is_null_map)
     : get_mysql_buffer(stmt_id, param_id, length, str_buf.at(0));
   return ret;
@@ -764,6 +763,41 @@ int ObPieceCache::add_piece_buffer(ObPiece *piece,
   return ret;
 }
 
+static int pre_extend_str(ObPiece *piece,
+                           ObSqlString &str,
+                           ObPieceBufferArray *buffer_array,
+                           const int32_t first_piece_size,
+                           const int64_t array_size,
+                           bool &is_enable)
+{
+  int ret = OB_SUCCESS;
+  // may need extend str before append if piece size more then 4M
+  const int32_t pre_extend_thres = 4194304;
+  if (!is_enable) {
+  } else if (first_piece_size < pre_extend_thres) {
+    // just disable pre extend
+    is_enable = false;
+  } else {
+    int64_t index_pre = piece->get_position() - 1;
+    int64_t total_len = 0;
+    do {
+      index_pre++;
+      if (index_pre < 0 || index_pre >= array_size) {
+        break;
+      }
+      ObPieceBuffer *piece_buffer = &buffer_array->at(index_pre);
+      if (NULL != piece_buffer->get_piece_buffer()) {
+        const ObString buffer = *(piece_buffer->get_piece_buffer());
+        total_len += buffer.length();
+      }
+    } while (ObLastPiece != buffer_array->at(index_pre).get_piece_mode()
+             && ObInvalidPiece != buffer_array->at(index_pre).get_piece_mode());
+    ret = str.extend(total_len + 1); // one more bytes for EOF
+    is_enable = false;
+  }
+  return ret;
+}
+
 // buf needs to allocate memory in the outer layer ！！！
 int ObPieceCache::merge_piece_buffer(ObPiece *piece,
                                      ObSqlString &str)
@@ -780,6 +814,7 @@ int ObPieceCache::merge_piece_buffer(ObPiece *piece,
     int64_t array_size = buffer_array->count();
     int64_t index = piece->get_position() - 1;
     int64_t len = 0;
+    bool enable_pre_extern = true;
     do {
       index++;
       if (index < 0 || index >= array_size) {
@@ -788,12 +823,17 @@ int ObPieceCache::merge_piece_buffer(ObPiece *piece,
       ObPieceBuffer *piece_buffer = &buffer_array->at(index);
       if (NULL != piece_buffer->get_piece_buffer()) {
         const ObString buffer = *(piece_buffer->get_piece_buffer());
-        str.append(buffer);
-        len += buffer.length();
+        // reduce alloc/free/memcpy for large buffers
+        OZ (pre_extend_str(piece, str, buffer_array, buffer.length(), array_size, enable_pre_extern));
+        OX (str.append(buffer));
+        OX (len += buffer.length());
       }
     } while (ObLastPiece != buffer_array->at(index).get_piece_mode()
-              && ObInvalidPiece != buffer_array->at(index).get_piece_mode());
-    if (index < 0) {
+              && ObInvalidPiece != buffer_array->at(index).get_piece_mode()
+              && OB_SUCC(ret));
+    if (OB_FAIL(ret)) {
+      // do nothing
+    } else if (index < 0) {
       piece->set_position(0);
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("error index.", K(array_size), K(index));

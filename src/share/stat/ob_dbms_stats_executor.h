@@ -45,6 +45,12 @@ public:
   static int delete_column_stats(ObExecContext &ctx,
                                  const ObTableStatParam &param,
                                  const bool only_histogram);
+
+  static int update_online_stat(ObExecContext &ctx,
+                                ObTableStatParam &param,
+                                share::schema::ObSchemaGetterGuard *schema_guard,
+                                const TabStatIndMap &online_table_stats,
+                                const ColStatIndMap &online_column_stats);
 private:
 
   static int do_gather_stats(ObExecContext &ctx,
@@ -70,17 +76,6 @@ private:
                            ObOptStat &stat);
 
   static int prepare_opt_stat(ObIArray<ObOptStat> &all_stats, ObOptStat *&opt_stat);
-
-  static int buffer_opt_stat(ObExecContext &ctx,
-                             const ObIArray<ObColumnStatParam> &column_params,
-                             ObIArray<ObOptTableStat *> &table_stats,
-                             ObIArray<ObOptColumnStat*> &column_stats,
-                             ObIArray<ObOptStat> &opt_stats);
-
-  static int try_drive_global_stat(ObExecContext &ctx,
-                                   const ObTableStatParam &param,
-                                   ObExtraParam &extra,
-                                   ObIArray<ObOptStat> &opt_stats);
 
   static int check_all_cols_range_skew(const ObTableStatParam &param,
                                        ObIArray<ObOptStat> &opt_stats);

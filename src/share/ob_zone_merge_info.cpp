@@ -208,7 +208,7 @@ const char *ObZoneMergeInfo::get_merge_status_str(const MergeStatus status)
   const char *str_array[] = { "IDLE", "MERGING", "CHECKSUM" };
   STATIC_ASSERT(MERGE_STATUS_MAX == ARRAYSIZEOF(str_array), "status count mismatch");
   if (status < 0 || status >= MERGE_STATUS_MAX) {
-    LOG_WARN("invalid merge status", K(status));
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "invalid merge status", K(status));
   } else {
     str = str_array[status];
   }
@@ -235,7 +235,12 @@ bool ObZoneMergeInfo::is_valid() const
      || (!last_merged_scn_.is_valid())
      || (last_merged_time_.get_value() < 0)
      || (merge_start_time_.get_value() < 0)
+<<<<<<< HEAD
      || (!all_merged_scn_.is_valid())) {
+=======
+     || (!all_merged_scn_.is_valid())
+     || (!frozen_scn_.is_valid())) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     is_valid = false;
   }
   return is_valid;
@@ -357,6 +362,16 @@ int64_t ObMergeProgress::get_merged_tablet_percentage() const
 int64_t ObMergeProgress::get_merged_data_percentage() const
 {
   return first_param_percnetage(merged_data_size_, unmerged_data_size_);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+ObTableCompactionInfo &ObTableCompactionInfo::operator=(const ObTableCompactionInfo &other)
+{
+  table_id_ = other.table_id_;
+  tablet_cnt_ = other.tablet_cnt_;
+  status_ = other.status_;
+  return *this;
 }
 
 } // end namespace share

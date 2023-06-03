@@ -39,7 +39,8 @@ public:
     random_id_(0), type_(type), op_type_(PHY_INVALID), op_id_(UINT64_MAX), exec_ctx_(nullptr),
     min_size_(0), row_count_(0), input_size_(0), bucket_size_(0),
     chunk_size_(0), cache_size_(-1), one_pass_size_(0), expect_size_(OB_INVALID_ID),
-    global_bound_size_(INT64_MAX), max_bound_(INT64_MAX), delta_size_(0), data_size_(0),
+    global_bound_size_(INT64_MAX), dop_(-1), plan_id_(-1), exec_id_(-1), sql_id_(),
+    session_id_(-1), max_bound_(INT64_MAX), delta_size_(0), data_size_(0),
     max_mem_used_(0), mem_used_(0),
     pre_mem_used_(0), dumped_size_(0), data_ratio_(0.5), active_time_(0), number_pass_(0),
     calc_count_(0)
@@ -66,6 +67,7 @@ public:
     bucket_size_ = bucket_size;
   }
 
+  int set_exec_info(ObExecContext &exec_ctx);
   OB_INLINE void set_operator_type(ObPhyOperatorType op_type) { op_type_ = op_type; }
   OB_INLINE void set_operator_id(uint64_t op_id) { op_id_ = op_id; }
   OB_INLINE void set_exec_ctx(ObExecContext *exec_ctx) { exec_ctx_ = exec_ctx; }
@@ -118,7 +120,7 @@ public:
       number_pass_ = num_pass;
     }
   }
-  OB_INLINE int32_t get_number_pass() const { return number_pass_; }
+  OB_INLINE int64_t get_number_pass() const { return number_pass_; }
 
   static bool auto_sql_memory_manager(ObSqlWorkAreaProfile &profile)
   {
@@ -173,6 +175,11 @@ private:
   int64_t one_pass_size_;
   int64_t expect_size_;
   int64_t global_bound_size_;
+  int64_t dop_;
+  int64_t plan_id_;
+  int64_t exec_id_;
+  ObString sql_id_;
+  int64_t session_id_;
   // 取 min(cache_size, global_bound_size)
   // sort场景，在global_bound_size比较大情况下，sort理论上有data和extra内存，data应该是one-pass size
   // 也就是expect_size
@@ -248,6 +255,11 @@ public:
       uint64_t val = common::murmurhash(&plan_id_, sizeof(plan_id_), 0);
       return common::murmurhash(&operator_id_, sizeof(operator_id_), val);
     }
+    int hash(uint64_t &hash_val) const
+    {
+      hash_val = hash();
+      return OB_SUCCESS;
+    }
 
     bool operator==(const WorkareaKey &other) const
     {
@@ -264,7 +276,6 @@ public:
   OB_INLINE void set_seqno(int64_t seqno) { seqno_ = seqno; }
   OB_INLINE int64_t get_seqno() { return seqno_; }
   OB_INLINE WorkareaKey get_workarea_key() const { return workarea_key_; }
-  OB_INLINE int32_t get_sql_id_len() const { return strlen(workarea_key_.sql_id_); }
   OB_INLINE const char* get_sql_id() const { return workarea_key_.sql_id_; }
   OB_INLINE uint64_t get_plan_id() const { return workarea_key_.plan_id_; }
   OB_INLINE uint64_t get_operator_id() const { return workarea_key_.operator_id_; }
@@ -471,7 +482,7 @@ class ObSqlMemoryList
 {
 public:
   ObSqlMemoryList(int64_t seqno) :
-    seqno_(seqno)
+    seqno_(seqno), lock_(common::ObLatchIds::SQL_WA_PROFILE_LIST_LOCK)
   {}
   ~ObSqlMemoryList() { reset(); }
 
@@ -563,11 +574,12 @@ private:
 public:
   ObTenantSqlMemoryManager(int64_t tenant_id) :
     wa_intervals_(nullptr), min_bound_size_(0), tenant_id_(tenant_id),
-    enable_auto_memory_mgr_(false), mutex_(), profile_lists_(nullptr),
+    enable_auto_memory_mgr_(false), mutex_(common::ObLatchIds::SQL_MEMORY_MGR_MUTEX_LOCK), profile_lists_(nullptr),
     drift_size_(0), profile_cnt_(0), pre_profile_cnt_(0), global_bound_size_(0),
     mem_target_(0), max_workarea_size_(0), workarea_hold_size_(0), max_auto_workarea_size_(0),
     max_tenant_memory_size_(0),
-    manual_calc_cnt_(0), wa_start_(0), wa_end_(0), wa_cnt_(0), lock_()
+    manual_calc_cnt_(0), wa_start_(0), wa_end_(0), wa_cnt_(0),
+    lock_()
   {}
   ~ObTenantSqlMemoryManager() {}
 public:

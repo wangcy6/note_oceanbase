@@ -203,7 +203,7 @@ public:
 
     if (need_checksum_ && true == is_reverse_) {
       is_valid = false;
-      TRANS_LOG(ERROR, "we cannot calc checksum when reverse remove", KPC(this));
+      TRANS_LOG_RET(ERROR, common::OB_INVALID_ERROR, "we cannot calc checksum when reverse remove", KPC(this));
     }
 
     return is_valid;
@@ -222,7 +222,11 @@ public:
     if (need_checksum_) {
       return checksum_last_scn_;
     } else {
+<<<<<<< HEAD
       TRANS_LOG(ERROR, "we donot go here if we donot checksum", KPC(this));
+=======
+      TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "we donot go here if we donot checksum", KPC(this));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       return share::SCN::min_scn();
     }
   }
@@ -316,7 +320,11 @@ public:
     if (NULL != checksumer_) {
       return checksum_last_scn_;
     } else {
+<<<<<<< HEAD
       TRANS_LOG(ERROR, "we donot go here if we donot checksum", KPC(this));
+=======
+      TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "we donot go here if we donot checksum", KPC(this));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       return share::SCN::min_scn();
     }
   }
@@ -412,7 +420,8 @@ class ObTxEndFunctor : public ObITxCallbackFunctor
 {
 public:
   ObTxEndFunctor(bool is_commit)
-    : is_commit_(is_commit) {}
+    : is_commit_(is_commit),
+      need_print_(false) {}
 
   virtual int operator()(ObITransCallback *callback) override
   {
@@ -434,15 +443,37 @@ public:
       TRANS_LOG(ERROR, "trans abort failed", KPC(callback));
     } else {
       need_remove_callback_ = true;
+      print_callback_if_logging_block_(callback);
     }
 
     return ret;
   }
 
-  VIRTUAL_TO_STRING_KV(K_(is_commit));
+  VIRTUAL_TO_STRING_KV(K_(is_commit), K_(need_print));
+
+private:
+  int print_callback_if_logging_block_(ObITransCallback *callback)
+  {
+    // print callback list
+    // if a callback has not been submitted log and
+    // the memtable linked to it is logging_blocked
+    int ret = OB_SUCCESS;
+    if (!is_commit_ &&
+        !need_print_ &&
+        callback->need_submit_log() &&
+        callback->need_fill_redo() &&
+        callback->is_logging_blocked()) {
+      need_print_ = true;
+    }
+    if (need_print_) {
+      callback->print_callback();
+    }
+    return ret;
+  }
 
 private:
   const bool is_commit_;
+  bool need_print_;
 };
 
 class ObCleanUnlogCallbackFunctor : public ObITxCallbackFunctor
@@ -472,6 +503,42 @@ public:
   }
 
   VIRTUAL_TO_STRING_KV("CleanUnlogCallback", "CleanUnlogCallback");
+};
+
+class ObSyncLogFailFunctor : public ObITxCallbackFunctor
+{
+public:
+  ObSyncLogFailFunctor() {}
+
+  virtual int operator()(ObITransCallback *callback) override
+  {
+    int ret = OB_SUCCESS;
+
+    if (NULL == callback) {
+      ret = OB_ERR_UNEXPECTED;
+      TRANS_LOG(ERROR, "unexpected callback", KP(callback));
+    } else if (callback->need_fill_redo() && callback->need_submit_log()) {
+      ret = OB_ERR_UNEXPECTED;
+      TRANS_LOG(ERROR, "sync log fail will only touch submitted log", KPC(callback));
+    } else if (!callback->need_fill_redo() && !callback->need_submit_log()) {
+      ret = OB_ERR_UNEXPECTED;
+      TRANS_LOG(ERROR, "sync log fail will only touch unsynced log", KPC(callback));
+    } else if (!callback->need_fill_redo() && callback->need_submit_log()) {
+      ret = OB_ERR_UNEXPECTED;
+      TRANS_LOG(ERROR, "It will never on success before submit log", KPC(callback));
+    } else if (callback->need_fill_redo() && !callback->need_submit_log()) {
+      if (OB_FAIL(callback->log_sync_fail_cb())) {
+        // log_sync_fail_cb will never report error
+        TRANS_LOG(ERROR, "log sync fail cb report error", K(ret));
+      } else {
+        need_remove_callback_ = true;
+      }
+    }
+
+    return ret;
+  }
+
+  VIRTUAL_TO_STRING_KV("ObSyncLogFailFunctor", "ObSyncLogFailFunctor");
 };
 
 class ObSearchCallbackWCondFunctor : public ObITxCallbackFunctor

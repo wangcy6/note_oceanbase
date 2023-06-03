@@ -18,6 +18,7 @@
 #include "sql/plan_cache/ob_ps_cache.h"
 #include "sql/plan_cache/ob_prepare_stmt_struct.h"
 #include "sql/session/ob_sql_session_info.h"
+#include "observer/mysql/obmp_utils.h"
 #include "observer/mysql/obmp_stmt_send_piece_data.h"
 
 namespace oceanbase
@@ -52,7 +53,10 @@ int ObMPStmtReset::deserialize()
 int ObMPStmtReset::process()
 {
   int ret = OB_SUCCESS;
+  bool need_disconnect = true;
+  bool need_response_error = true;
   sql::ObSQLSessionInfo *session = NULL;
+  const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
   if (OB_ISNULL(req_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid packet", K(ret), KP(req_));
@@ -64,10 +68,14 @@ int ObMPStmtReset::process()
   } else if (OB_ISNULL(session)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is NULL or invalid", K(ret), K(session));
+  } else if (FALSE_IT(session->set_txn_free_route(pkt.txn_free_route()))) {
+  } else if (OB_FAIL(process_extra_info(*session, pkt, need_response_error))) {
+    LOG_WARN("fail get process extra info", K(ret));
+  } else if (FALSE_IT(session->post_sync_session_info())) {
+  } else if (FALSE_IT(need_disconnect = false)) {
   } else if (OB_FAIL(update_transmission_checksum_flag(*session))) {
     LOG_WARN("update transmisson checksum flag failed", K(ret));
   } else {
-    const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
     ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session->get_piece_cache());
     int64_t param_num = 0;
     THIS_WORKER.set_session(session);
@@ -131,8 +139,10 @@ int ObMPStmtReset::process()
       LOG_WARN("send ok packet fail.", K(ret), K(stmt_id_));
     }
   } else {
-    send_error_packet(ret, NULL);
-    if (OB_ERR_PREPARE_STMT_CHECKSUM == ret) {
+    if (need_response_error) {
+      send_error_packet(ret, NULL);
+    }
+    if (OB_ERR_PREPARE_STMT_CHECKSUM == ret || need_disconnect) {
       force_disconnect();
       LOG_WARN("prepare stmt checksum error, disconnect connection", K(ret));
     }

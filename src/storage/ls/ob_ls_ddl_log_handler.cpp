@@ -46,6 +46,7 @@ int ObLSDDLLogHandler::init(ObLS *ls)
     TCWLockGuard guard(online_lock_);
     is_online_ = true;
     ls_ = ls;
+    last_rec_scn_ = ls_->get_clog_checkpoint_scn();
     is_inited_ = true;
   }
   return ret;
@@ -57,6 +58,7 @@ void ObLSDDLLogHandler::reset()
   is_online_ = false;
   is_inited_ = false;
   ls_ = nullptr;
+  last_rec_scn_.reset();
   ddl_log_replayer_.reset();
 }
 
@@ -69,27 +71,6 @@ int ObLSDDLLogHandler::offline()
   } else {
     TCWLockGuard guard(online_lock_);
     is_online_ = false;
-  }
-  ObLSTabletIterator tablet_iter(ObTabletCommon::NO_CHECK_GET_TABLET_TIMEOUT_US);
-  if (OB_FAIL(ls_->get_tablet_svr()->build_tablet_iter(tablet_iter))) {
-    LOG_WARN("failed to build ls tablet iter", K(ret), K(ls_));
-  } else {
-    while (OB_SUCC(ret)) {
-      ObDDLKvMgrHandle ddl_kv_mgr_handle;
-      if (OB_FAIL(tablet_iter.get_next_ddl_kv_mgr(ddl_kv_mgr_handle))) {
-        if (OB_ITER_END == ret) {
-          ret = OB_SUCCESS;
-          break;
-        } else {
-          LOG_WARN("failed to get ddl kv mgr", K(ret), K(ddl_kv_mgr_handle));
-        }
-      } else if (OB_UNLIKELY(!ddl_kv_mgr_handle.is_valid())) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("invalid tablet handle", K(ret), K(ddl_kv_mgr_handle));
-      } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->cleanup())) {
-        LOG_WARN("ddl kv mgr cleanup failed", K(ret), "ls_meta", ls_->get_ls_meta(), "tablet_id", ddl_kv_mgr_handle.get_obj()->get_tablet_id());
-      }
-    }
   }
   FLOG_INFO("ddl log hanlder offline", K(ret), "ls_meta", ls_->get_ls_meta());
   return OB_SUCCESS;
@@ -159,9 +140,14 @@ int ObLSDDLLogHandler::replay(const void *buffer,
         ret = replay_ddl_redo_log_(log_buf, buf_size, tmp_pos, log_scn);
         break;
       }
+<<<<<<< HEAD
       case ObDDLClogType::DDL_PREPARE_LOG: {
         ret = replay_ddl_prepare_log_(log_buf, buf_size, tmp_pos, log_scn);
         break;
+=======
+      case ObDDLClogType::OLD_DDL_COMMIT_LOG: {
+        break; // ignore the old ddl commit log
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       }
       case ObDDLClogType::DDL_COMMIT_LOG: {
         ret = replay_ddl_commit_log_(log_buf, buf_size, tmp_pos, log_scn);
@@ -261,6 +247,10 @@ int ObLSDDLLogHandler::flush(SCN &rec_scn)
           param.tablet_id_ = ddl_kv_mgr_handle.get_obj()->get_tablet_id();
           param.start_scn_ = ddl_kv_mgr_handle.get_obj()->get_start_scn();
           param.rec_scn_ = rec_scn;
+<<<<<<< HEAD
+=======
+          LOG_INFO("schedule ddl merge dag", K(param));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
           if (OB_FAIL(compaction::ObScheduleDagFunc::schedule_ddl_table_merge_dag(param))) {
             if (OB_EAGAIN != ret && OB_SIZE_OVERFLOW != ret) {
               LOG_WARN("failed to schedule ddl kv merge dag", K(ret));
@@ -286,7 +276,10 @@ SCN ObLSDDLLogHandler::get_rec_scn()
   } else {
     while (OB_SUCC(ret)) {
       ObDDLKvMgrHandle ddl_kv_mgr_handle;
+<<<<<<< HEAD
       SCN min_scn = SCN::max_scn();
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       if (OB_FAIL(tablet_iter.get_next_ddl_kv_mgr(ddl_kv_mgr_handle))) {
         if (OB_ITER_END == ret) {
           ret = OB_SUCCESS;
@@ -297,6 +290,7 @@ SCN ObLSDDLLogHandler::get_rec_scn()
       } else if (OB_UNLIKELY(!ddl_kv_mgr_handle.is_valid())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("invalid ddl kv mgr handle", K(ret), K(ddl_kv_mgr_handle));
+<<<<<<< HEAD
       } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->check_has_effective_ddl_kv(has_ddl_kv))) {
         LOG_WARN("failed to check ddl kv", K(ret));
       } else if (has_ddl_kv) {
@@ -309,6 +303,19 @@ SCN ObLSDDLLogHandler::get_rec_scn()
     }
   }
   return OB_SUCC(ret) ? rec_scn : SCN::max_scn();
+=======
+      } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->get_rec_scn(rec_scn))) {
+        LOG_WARN("failed to get rec scn", K(ret));
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+    rec_scn = SCN::max(last_rec_scn_, ls_->get_clog_checkpoint_scn());
+  } else if (!rec_scn.is_max()) {
+    last_rec_scn_ = SCN::max(last_rec_scn_, rec_scn);
+  }
+  return rec_scn;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 }
 
 int ObLSDDLLogHandler::replay_ddl_redo_log_(const char *log_buf,
@@ -329,10 +336,11 @@ int ObLSDDLLogHandler::replay_ddl_redo_log_(const char *log_buf,
   return ret;
 }
 
-int ObLSDDLLogHandler::replay_ddl_prepare_log_(const char *log_buf,
+int ObLSDDLLogHandler::replay_ddl_commit_log_(const char *log_buf,
                                                const int64_t buf_size,
                                                int64_t pos,
                                                const SCN &log_scn)
+<<<<<<< HEAD
 {
   int ret = OB_SUCCESS;
   ObDDLPrepareLog log;
@@ -351,6 +359,8 @@ int ObLSDDLLogHandler::replay_ddl_commit_log_(const char *log_buf,
                                               const int64_t buf_size,
                                               int64_t pos,
                                               const SCN &log_scn)
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   int ret = OB_SUCCESS;
   ObDDLCommitLog log;

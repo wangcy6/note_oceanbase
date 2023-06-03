@@ -68,6 +68,9 @@ int ObLSAdapter::replay(ObLogReplayTask *replay_task)
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     CLOG_LOG(ERROR, " log stream not exist", KPC(replay_task), K(ret));
+  } else if (ObLogBaseType::PADDING_LOG_BASE_TYPE == replay_task->log_type_) {
+    ret = OB_ERR_UNEXPECTED;
+    CLOG_LOG(ERROR, "padding log entry can't be replayed, unexpected error", KPC(replay_task));
   } else if (OB_FAIL(ls->replay(replay_task->log_type_,
                                 replay_task->log_buf_,
                                 replay_task->log_size_,
@@ -79,11 +82,18 @@ int ObLSAdapter::replay(ObLogReplayTask *replay_task)
     if (common::OB_INVALID_TIMESTAMP == replay_task->first_handle_ts_) {
       replay_task->first_handle_ts_ = start_ts;
       replay_task->print_error_ts_ = start_ts;
-    } else if ((start_ts - replay_task->print_error_ts_) > MAX_SINGLE_RETRY_WARNING_TIME_THRESOLD) {
+    } else {
       replay_task->retry_cost_ = start_ts - replay_task->first_handle_ts_;
-      CLOG_LOG(WARN, "single replay task retry cost too much time. replay may be delayed",
-                KPC(replay_task));
-      replay_task->print_error_ts_ = start_ts;
+      if ((start_ts - replay_task->print_error_ts_) > MAX_SINGLE_RETRY_WARNING_TIME_THRESOLD) {
+        if (replay_task->retry_cost_ > 100 * 1000 *1000 && REACH_TIME_INTERVAL(1 * 1000 * 1000)) {
+          CLOG_LOG(ERROR, "single replay task retry cost too much time. replay may be delayed",
+                   K(ret), KPC(replay_task));
+        } else {
+          CLOG_LOG(WARN, "single replay task retry cost too much time. replay may be delayed",
+                   K(ret), KPC(replay_task));
+        }
+        replay_task->print_error_ts_ = start_ts;
+      }
     }
   }
   replay_task->replay_cost_ = ObTimeUtility::fast_current_time() - start_ts;
@@ -91,9 +101,9 @@ int ObLSAdapter::replay(ObLogReplayTask *replay_task)
     if (replay_task->replay_cost_ > MAX_SINGLE_REPLAY_ERROR_TIME_THRESOLD
         && !get_replay_is_writing_throttling()
         && lib::is_mini_mode()) {
-      CLOG_LOG(ERROR, "single replay task cost too much time. replay may be delayed", KPC(replay_task));
+      CLOG_LOG_RET(ERROR, OB_ERR_TOO_MUCH_TIME, "single replay task cost too much time. replay may be delayed", KPC(replay_task));
     } else {
-      CLOG_LOG(WARN, "single replay task cost too much time", KPC(replay_task));
+      CLOG_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "single replay task cost too much time", KPC(replay_task));
     }
   }
   return ret;
@@ -106,7 +116,7 @@ int ObLSAdapter::wait_append_sync(const share::ObLSID &ls_id)
   ObLSHandle ls_handle;
   ObLogHandler *log_handler = NULL;
   if (OB_FAIL(ls_service_->get_ls(ls_id, ls_handle, ObLSGetMod::ADAPTER_MOD))) {
-    CLOG_LOG(ERROR, "get log stream failed", K(ret), K(ls_id));
+    CLOG_LOG(WARN, "get log stream failed", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     CLOG_LOG(ERROR, "log stream not exist", K(ret), K(ls_id));

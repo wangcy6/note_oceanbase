@@ -39,7 +39,12 @@ OB_DEF_SERIALIZE(obrpc::ObInnerSQLTransmitArg)
     ddl_info_,
     is_load_data_exec_,
     nls_formats_,
+<<<<<<< HEAD
     use_external_session_);
+=======
+    use_external_session_,
+    consumer_group_id_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   return ret;
 }
 
@@ -63,7 +68,12 @@ OB_DEF_DESERIALIZE(obrpc::ObInnerSQLTransmitArg)
     ddl_info_,
     is_load_data_exec_,
     nls_formats_,
+<<<<<<< HEAD
     use_external_session_);
+=======
+    use_external_session_,
+    consumer_group_id_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   if (OB_SUCC(ret)) {
     (void)sql::ObSQLUtils::adjust_time_by_ntp_offset(worker_timeout_);
   }
@@ -90,10 +100,15 @@ OB_DEF_SERIALIZE_SIZE(obrpc::ObInnerSQLTransmitArg)
     ddl_info_,
     is_load_data_exec_,
     nls_formats_,
+<<<<<<< HEAD
     use_external_session_);
+=======
+    use_external_session_,
+    consumer_group_id_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   return len;
 }
-// https://work.aone.alibaba-inc.com/issue/40701293
+//
 // OB_SERIALIZE_MEMBER(obrpc::ObInnerSQLTransmitResult, res_code_, conn_id_, affected_rows_, stmt_type_, scanner_, field_columns_);
 OB_DEF_SERIALIZE(obrpc::ObInnerSQLTransmitResult)
 {

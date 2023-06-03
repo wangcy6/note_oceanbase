@@ -134,7 +134,9 @@ bool ObExprOracleNullif::is_same_type(const ObExprResType &type1,
   if (oracleType1 == oracleType2 ||
       is_numberic_type(oracleType1, oracleType2) ||
       is_string_type(oracleType1, oracleType2) ||
-      is_time_type(oracleType1, oracleType2)) {
+      is_time_type(oracleType1, oracleType2) ||
+      ((oracleType1 == ObOExtendType || oracleType1 == ObOUDTSqlType)
+       && (oracleType2 == ObOExtendType || oracleType2 == ObOUDTSqlType))) {
     ret = true;
   }
 
@@ -238,12 +240,17 @@ int ObExprOracleNullif::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_e
     const ObDatumMeta &left_meta = rt_expr.args_[0]->datum_meta_;
     const ObDatumMeta &right_meta = rt_expr.args_[1]->datum_meta_;
     const ObCollationType cmp_cs_type = left_meta.cs_type_;
+    const bool has_lob_header = rt_expr.args_[0]->obj_meta_.has_lob_header() ||
+                                rt_expr.args_[1]->obj_meta_.has_lob_header();
     CK(left_meta.cs_type_ == right_meta.cs_type_);
     CK(OB_NOT_NULL(cmp_func = ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
                                                       left_meta.type_,
                                                       right_meta.type_,
+                                                      left_meta.scale_,
+                                                      right_meta.scale_,
                                                       lib::is_oracle_mode(),
-                                                      cmp_cs_type)));
+                                                      cmp_cs_type,
+                                                      has_lob_header)));
     OX(rt_expr.inner_func_cnt_ = 1);
     OX(rt_expr.inner_functions_[0] = reinterpret_cast<void*>(cmp_func));
     OX(rt_expr.eval_func_ = first_param_can_be_null_ ? eval_nullif : eval_nullif_not_null);
@@ -264,8 +271,10 @@ int ObExprOracleNullif::eval_nullif(const ObExpr &expr, ObEvalCtx &ctx, ObDatum 
     // left is not null, right is null, not equal
     res.set_datum(*l);
   } else {
-    bool equal = (0 == reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[0])(*l, *r));
-    if (equal) {
+    int cmp_ret = 0;
+    if (OB_FAIL(reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[0])(*l, *r, cmp_ret))) {
+      LOG_WARN("cmp failed", K(ret));
+    } else if (0 == cmp_ret) {
       res.set_null();
     } else {
       res.set_datum(*l);
@@ -290,8 +299,10 @@ int ObExprOracleNullif::eval_nullif_not_null(const ObExpr &expr, ObEvalCtx &ctx,
     // left is not null, right is null, not equal
     res.set_datum(*l);
   } else {
-    bool equal = (0 == reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[0])(*l, *r));
-    if (equal) {
+    int cmp_ret = 0;
+    if (OB_FAIL(reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[0])(*l, *r, cmp_ret))) {
+      LOG_WARN("cmp failed", K(ret));
+    } else if (cmp_ret == 0) {
       res.set_null();
     } else {
       res.set_datum(*l);

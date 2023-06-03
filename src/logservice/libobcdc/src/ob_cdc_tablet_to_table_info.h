@@ -22,7 +22,7 @@
 #include "rootserver/ob_tablet_creator.h"         // ObBatchCreateTabletArg
 #include "rootserver/ob_tablet_drop.h"            // ObBatchRemoveTabletArg
 
-#include "ob_log_ls_define.h"
+#include "logservice/common_util/ob_log_ls_define.h"
 
 namespace oceanbase
 {
@@ -66,6 +66,14 @@ struct ObCDCTableInfo
   inline uint64_t get_table_id() const { return table_id_; }
   inline const share::schema::ObTableType &get_table_type() const { return table_type_; }
   inline bool is_index_table() const { return share::schema::ObSimpleTableSchemaV2::is_index_table(table_type_); }
+
+  bool operator==(const ObCDCTableInfo &that) const {
+    return table_id_ == that.table_id_ && table_type_ == that.table_type_;
+  }
+
+  bool operator!=(const ObCDCTableInfo &that) const {
+    return !(*this == that);
+  }
 
   TO_STRING_KV(K_(table_id), K_(table_type), "table_type", ob_table_type_str(table_type_));
 
@@ -120,7 +128,7 @@ public:
   void reset(const TabletChangeCmd cmd);
   // deserialize from LS_MEMBER_TABLE multi_data_source_node
   int parse_from_multi_data_source_buf(
-      const TenantLSID &tls_id,
+      const logservice::TenantLSID &tls_id,
       const transaction::ObTxBufferNode &multi_data_source_node);
 public:
   inline bool is_valid() const
@@ -139,10 +147,10 @@ public:
       "delete_tablet_cnt", delete_tablet_op_arr_.count());
 private:
   int parse_create_tablet_op_(
-      const TenantLSID &tls_id,
+      const logservice::TenantLSID &tls_id,
       const obrpc::ObBatchCreateTabletArg &create_tablet_arg);
   int parse_remove_tablet_op_(
-      const TenantLSID &tls_id,
+      const logservice::TenantLSID &tls_id,
       const obrpc::ObBatchRemoveTabletArg &remove_tablet_arg);
   int push_create_tablet_op_(const CreateTabletOp &create_tablet_op);
   int push_delete_tablet_op_(const DeleteTabletOp &delete_tablet_op);

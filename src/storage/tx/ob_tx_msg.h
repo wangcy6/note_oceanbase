@@ -53,7 +53,16 @@ namespace transaction
       /* for others */
       ROLLBACK_SAVEPOINT       = 60,
       KEEPALIVE                = 61,
-      KEEPALIVE_RESP           = 62
+      KEEPALIVE_RESP           = 62,
+      /* for standby read */
+      ASK_STATE                = 63,
+      ASK_STATE_RESP           = 64,
+      COLLECT_STATE            = 65,
+      COLLECT_STATE_RESP       = 66,
+      /* for txn free route  */
+      TX_FREE_ROUTE_PUSH_STATE       = 80,
+      TX_FREE_ROUTE_CHECK_ALIVE      = 81,
+      TX_FREE_ROUTE_CHECK_ALIVE_RESP = 82,
     };
 
     struct ObTxMsg : public obrpc::ObIFill
@@ -349,6 +358,7 @@ namespace transaction
     struct Ob2pcCommitRespMsg : public ObTxMsg
     {
     public:
+<<<<<<< HEAD
       Ob2pcCommitRespMsg() :
           ObTxMsg(TX_2PC_COMMIT_RESP)
       {}
@@ -356,6 +366,15 @@ namespace transaction
       bool is_valid() const;
       share::SCN commit_version_;
       INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(commit_version));
+=======
+      Ob2pcCommitRespMsg() : ObTxMsg(TX_2PC_COMMIT_RESP) {}
+
+    public:
+      bool is_valid() const;
+      share::SCN commit_version_;
+      share::SCN commit_log_scn_;
+      INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(commit_version), K_(commit_log_scn));
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       OB_UNIS_VERSION(1);
     };
 
@@ -363,11 +382,13 @@ namespace transaction
     {
     public:
       Ob2pcAbortReqMsg() :
-          ObTxMsg(TX_2PC_ABORT_REQ)
+        ObTxMsg(TX_2PC_ABORT_REQ),
+        upstream_(share::ObLSID::INVALID_LS_ID)
       {}
     public:
       bool is_valid() const;
-      // INHERIT_TO_STRING_KV("txMsg", ObTxMsg);
+      share::ObLSID upstream_;
+      INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(upstream));
       OB_UNIS_VERSION(1);
     };
 
@@ -390,6 +411,8 @@ namespace transaction
       {}
     public:
       bool is_valid() const;
+      share::SCN max_commit_log_scn_;
+      INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(max_commit_log_scn));
       OB_UNIS_VERSION(1);
     };
 
@@ -458,6 +481,63 @@ namespace transaction
       OB_UNIS_VERSION(1);
     };
 
+    struct ObAskStateMsg : public ObTxMsg
+    {
+    public:
+      ObAskStateMsg() :
+          ObTxMsg(ASK_STATE),
+          snapshot_()
+      {}
+    public:
+      share::SCN snapshot_;
+
+      bool is_valid() const;
+      INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(snapshot));
+      OB_UNIS_VERSION(1);
+    };
+
+    struct ObAskStateRespMsg : public ObTxMsg
+    {
+    public:
+      ObAskStateRespMsg() :
+          ObTxMsg(ASK_STATE_RESP),
+          state_info_array_()
+      {}
+    public:
+      ObStateInfoArray state_info_array_;
+      bool is_valid() const;
+      INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(state_info_array));
+      OB_UNIS_VERSION(1);
+    };
+
+    struct ObCollectStateMsg : public ObTxMsg
+    {
+    public:
+      ObCollectStateMsg() :
+          ObTxMsg(COLLECT_STATE),
+          snapshot_()
+      {}
+    public:
+      share::SCN snapshot_;
+      bool is_valid() const;
+      INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(snapshot));
+      OB_UNIS_VERSION(1);
+    };
+
+    struct ObCollectStateRespMsg : public ObTxMsg
+    {
+    public:
+      ObCollectStateRespMsg() :
+          ObTxMsg(COLLECT_STATE_RESP),
+          state_info_()
+      {}
+    public:
+      ObStateInfo state_info_;
+      bool is_valid() const;
+      INHERIT_TO_STRING_KV("txMsg", ObTxMsg, K_(state_info));
+      OB_UNIS_VERSION(1);
+    };
+
     class ObTxMsgTypeChecker
     {
     public:
@@ -467,7 +547,7 @@ namespace transaction
             || (20 <= msg_type && 22 >= msg_type)
             || (40 <= msg_type && 49 >= msg_type)
             || (50 <= msg_type && 53 >= msg_type)
-            || (60 <= msg_type && 62 >= msg_type));
+            || (60 <= msg_type && 66 >= msg_type));
       }
 
       static bool is_2pc_msg_type(const int16_t msg_type)

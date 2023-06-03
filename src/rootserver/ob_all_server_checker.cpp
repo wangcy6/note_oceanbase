@@ -16,6 +16,7 @@
 
 #include "share/config/ob_server_config.h"
 #include "rootserver/ob_server_manager.h"
+#include "rootserver/ob_heartbeat_service.h"
 
 namespace oceanbase
 {
@@ -149,8 +150,12 @@ ObCheckServerTask::ObCheckServerTask(common::ObWorkQueue &work_queue,
 int ObCheckServerTask::process()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(checker_.check_all_server())) {
-    LOG_WARN("checker all server failed", K(ret));
+  if (!ObHeartbeatService::is_service_enabled()) {
+    if (OB_FAIL(checker_.check_all_server())) {
+      LOG_WARN("checker all server failed", K(ret));
+    }
+  } else {
+    LOG_TRACE("no need to do ObCheckServerTask in version >= 4.2");
   }
   return ret;
 }
@@ -159,7 +164,7 @@ ObAsyncTask *ObCheckServerTask::deep_copy(char *buf, const int64_t buf_size) con
 {
   ObCheckServerTask *task = NULL;
   if (NULL == buf || buf_size < static_cast<int64_t>(sizeof(*this))) {
-    LOG_WARN("buffer not large enough", K(buf_size));
+    LOG_WARN_RET(common::OB_BUF_NOT_ENOUGH, "buffer not large enough", K(buf_size));
   } else {
     task = new(buf) ObCheckServerTask(work_queue_, checker_);
   }

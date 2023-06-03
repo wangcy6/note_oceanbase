@@ -16,6 +16,7 @@
 #include "share/schema/ob_schema_macro_define.h"
 #include "share/schema/ob_schema_service_sql_impl.h"
 #include "share/schema/ob_table_schema.h"
+#include "share/scn.h"
 
 namespace oceanbase
 {
@@ -144,7 +145,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_schema(ObTableSchema &t
       0, //column_length
       -1, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -159,7 +160,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_schema(ObTableSchema &t
       0, //column_length
       -1, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -174,7 +175,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_schema(ObTableSchema &t
       0, //column_length
       -1, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -189,7 +190,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_schema(ObTableSchema &t
       0, //column_length
       -1, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -683,7 +684,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
   table_schema.set_def_type(TABLE_DEF_TYPE_INTERNAL);
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_table_name(OB_ALL_VIRTUAL_SQL_PLAN_MONITOR_ALL_VIRTUAL_SQL_PLAN_MONITOR_I1_TNAME))) {
+    if (OB_FAIL(table_schema.set_table_name(OB_ALL_VIRTUAL_SQL_PLAN_MONITOR_ORA_ALL_VIRTUAL_SQL_PLAN_MONITOR_I1_TNAME))) {
       LOG_ERROR("fail to set table_name", K(ret));
     }
   }
@@ -778,7 +779,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("TRACE_ID", //column_name
-      column_id + 6, //column_id
+      column_id + 5, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -795,6 +796,23 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("FIRST_REFRESH_TIME", //column_name
+      column_id + 6, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObTimestampLTZType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      0, //column_length
+      -1, //column_precision
+      -1, //column_scale
+      true,//is_nullable
+      false,//is_autoincrement
+      false,//is_hidden
+      true);//is_storing_column
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("LAST_REFRESH_TIME", //column_name
       column_id + 7, //column_id
       0, //rowkey_id
       0, //index_id
@@ -804,14 +822,14 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
       0, //column_length
       -1, //column_precision
       -1, //column_scale
-      false,//is_nullable
+      true,//is_nullable
       false,//is_autoincrement
       false,//is_hidden
       true);//is_storing_column
   }
 
   if (OB_SUCC(ret)) {
-    ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("LAST_REFRESH_TIME", //column_name
+    ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("FIRST_CHANGE_TIME", //column_name
       column_id + 8, //column_id
       0, //rowkey_id
       0, //index_id
@@ -821,14 +839,14 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
       0, //column_length
       -1, //column_precision
       -1, //column_scale
-      false,//is_nullable
+      true,//is_nullable
       false,//is_autoincrement
       false,//is_hidden
       true);//is_storing_column
   }
 
   if (OB_SUCC(ret)) {
-    ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("FIRST_CHANGE_TIME", //column_name
+    ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("LAST_CHANGE_TIME", //column_name
       column_id + 9, //column_id
       0, //rowkey_id
       0, //index_id
@@ -838,24 +856,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
       0, //column_length
       -1, //column_precision
       -1, //column_scale
-      false,//is_nullable
-      false,//is_autoincrement
-      false,//is_hidden
-      true);//is_storing_column
-  }
-
-  if (OB_SUCC(ret)) {
-    ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("LAST_CHANGE_TIME", //column_name
-      column_id + 10, //column_id
-      0, //rowkey_id
-      0, //index_id
-      0, //part_key_pos
-      ObTimestampLTZType, //column_type
-      CS_TYPE_INVALID, //column_collation_type
-      0, //column_length
-      -1, //column_precision
-      -1, //column_scale
-      false,//is_nullable
+      true,//is_nullable
       false,//is_autoincrement
       false,//is_hidden
       true);//is_storing_column
@@ -863,7 +864,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_1_ID", //column_name
-      column_id + 11, //column_id
+      column_id + 10, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -880,7 +881,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_1_VALUE", //column_name
-      column_id + 12, //column_id
+      column_id + 11, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -897,7 +898,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_2_ID", //column_name
-      column_id + 13, //column_id
+      column_id + 12, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -914,7 +915,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_2_VALUE", //column_name
-      column_id + 14, //column_id
+      column_id + 13, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -931,7 +932,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_3_ID", //column_name
-      column_id + 15, //column_id
+      column_id + 14, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -948,7 +949,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_3_VALUE", //column_name
-      column_id + 16, //column_id
+      column_id + 15, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -965,7 +966,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_4_ID", //column_name
-      column_id + 17, //column_id
+      column_id + 16, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -982,7 +983,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_4_VALUE", //column_name
-      column_id + 18, //column_id
+      column_id + 17, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -999,7 +1000,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_5_ID", //column_name
-      column_id + 19, //column_id
+      column_id + 18, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1016,7 +1017,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_5_VALUE", //column_name
-      column_id + 20, //column_id
+      column_id + 19, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1033,7 +1034,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_6_ID", //column_name
-      column_id + 21, //column_id
+      column_id + 20, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1050,7 +1051,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_6_VALUE", //column_name
-      column_id + 22, //column_id
+      column_id + 21, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1067,7 +1068,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_7_ID", //column_name
-      column_id + 23, //column_id
+      column_id + 22, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1084,7 +1085,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_7_VALUE", //column_name
-      column_id + 24, //column_id
+      column_id + 23, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1101,7 +1102,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_8_ID", //column_name
-      column_id + 25, //column_id
+      column_id + 24, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1118,7 +1119,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_8_VALUE", //column_name
-      column_id + 26, //column_id
+      column_id + 25, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1135,7 +1136,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_9_ID", //column_name
-      column_id + 27, //column_id
+      column_id + 26, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1152,7 +1153,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_9_VALUE", //column_name
-      column_id + 28, //column_id
+      column_id + 27, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1169,7 +1170,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_10_ID", //column_name
-      column_id + 29, //column_id
+      column_id + 28, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1186,7 +1187,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OTHERSTAT_10_VALUE", //column_name
-      column_id + 30, //column_id
+      column_id + 29, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1203,7 +1204,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("THREAD_ID", //column_name
-      column_id + 31, //column_id
+      column_id + 30, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1220,7 +1221,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("PLAN_OPERATION", //column_name
-      column_id + 32, //column_id
+      column_id + 31, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1237,7 +1238,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("STARTS", //column_name
-      column_id + 33, //column_id
+      column_id + 32, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1254,7 +1255,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OUTPUT_ROWS", //column_name
-      column_id + 34, //column_id
+      column_id + 33, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1271,7 +1272,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("PLAN_LINE_ID", //column_name
-      column_id + 35, //column_id
+      column_id + 34, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1288,7 +1289,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("PLAN_DEPTH", //column_name
-      column_id + 36, //column_id
+      column_id + 35, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1305,7 +1306,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("OUTPUT_BATCHES", //column_name
-      column_id + 37, //column_id
+      column_id + 36, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1322,7 +1323,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("SKIPPED_ROWS_COUNT", //column_name
-      column_id + 38, //column_id
+      column_id + 37, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1339,7 +1340,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("DB_TIME", //column_name
-      column_id + 39, //column_id
+      column_id + 38, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1356,7 +1357,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA_WITH_COLUMN_FLAGS("USER_IO_WAIT_TIME", //column_name
-      column_id + 40, //column_id
+      column_id + 39, //column_id
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
@@ -1371,7 +1372,7 @@ int ObInnerTableSchema::all_virtual_sql_plan_monitor_ora_all_virtual_sql_plan_mo
       true);//is_storing_column
   }
 
-  table_schema.set_max_used_column_id(column_id + 4);
+  table_schema.set_max_used_column_id(column_id + 39);
   return ret;
 }
 
@@ -1596,7 +1597,7 @@ int ObInnerTableSchema::all_virtual_lock_wait_stat_ora_schema(ObTableSchema &tab
       0, //part_key_pos
       ObVarcharType, //column_type
       CS_TYPE_UTF8MB4_BIN, //column_collation_type
-      512, //column_length
+      MAX_LOCK_ROWKEY_BUF_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
       false, //is_nullable
@@ -1759,11 +1760,11 @@ int ObInnerTableSchema::all_virtual_lock_wait_stat_ora_schema(ObTableSchema &tab
       0, //rowkey_id
       0, //index_id
       0, //part_key_pos
-      ObNumberType, //column_type
-      CS_TYPE_INVALID, //column_collation_type
-      38, //column_length
-      38, //column_precision
-      0, //column_scale
+      ObVarcharType, //column_type
+      CS_TYPE_UTF8MB4_BIN, //column_collation_type
+      MAX_LOCK_MODE_BUF_LENGTH, //column_length
+      2, //column_precision
+      -1, //column_scale
       false, //is_nullable
       false); //is_autoincrement
   }
@@ -1785,6 +1786,36 @@ int ObInnerTableSchema::all_virtual_lock_wait_stat_ora_schema(ObTableSchema &tab
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA("TOTAL_UPDATE_CNT", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("TRANS_ID", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("HOLDER_TRANS_ID", //column_name
       ++column_id, //column_id
       0, //rowkey_id
       0, //index_id
@@ -3832,7 +3863,7 @@ int ObInnerTableSchema::all_virtual_package_sys_agent_schema(ObTableSchema &tabl
       OB_MAX_PACKAGE_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -4417,6 +4448,81 @@ int ObInnerTableSchema::all_virtual_tenant_trigger_sys_agent_schema(ObTableSchem
       2, //column_precision
       -1, //column_scale
       true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("ORDER_TYPE", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("REF_TRG_DB_NAME", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObVarcharType, //column_type
+      CS_TYPE_UTF8MB4_BIN, //column_collation_type
+      OB_MAX_TRIGGER_NAME_LENGTH, //column_length
+      2, //column_precision
+      -1, //column_scale
+      true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("REF_TRG_NAME", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObVarcharType, //column_type
+      CS_TYPE_UTF8MB4_BIN, //column_collation_type
+      OB_MAX_TRIGGER_NAME_LENGTH, //column_length
+      2, //column_precision
+      -1, //column_scale
+      true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("ACTION_ORDER", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("ANALYZE_FLAG", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
       false); //is_autoincrement
   }
 
@@ -5118,7 +5224,7 @@ int ObInnerTableSchema::all_virtual_table_real_agent_ora_schema(ObTableSchema &t
       OB_MAX_TABLE_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -5343,7 +5449,7 @@ int ObInnerTableSchema::all_virtual_table_real_agent_ora_schema(ObTableSchema &t
       MAX_TABLE_COMMENT_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -5748,7 +5854,7 @@ int ObInnerTableSchema::all_virtual_table_real_agent_ora_schema(ObTableSchema &t
       MAX_TABLE_COMMENT_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -6098,6 +6204,111 @@ int ObInnerTableSchema::all_virtual_table_real_agent_ora_schema(ObTableSchema &t
   }
 
   if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("OBJECT_STATUS", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("TABLE_FLAGS", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("TRUNCATE_VERSION", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("EXTERNAL_FILE_LOCATION", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObVarcharType, //column_type
+      CS_TYPE_BINARY, //column_collation_type
+      OB_MAX_VARCHAR_LENGTH, //column_length
+      -1, //column_precision
+      -1, //column_scale
+      true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("EXTERNAL_FILE_LOCATION_ACCESS_INFO", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObVarcharType, //column_type
+      CS_TYPE_BINARY, //column_collation_type
+      OB_MAX_VARCHAR_LENGTH, //column_length
+      -1, //column_precision
+      -1, //column_scale
+      true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("EXTERNAL_FILE_FORMAT", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObVarcharType, //column_type
+      CS_TYPE_BINARY, //column_collation_type
+      OB_MAX_VARCHAR_LENGTH, //column_length
+      -1, //column_precision
+      -1, //column_scale
+      true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("EXTERNAL_FILE_PATTERN", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObVarcharType, //column_type
+      CS_TYPE_BINARY, //column_collation_type
+      OB_MAX_VARCHAR_LENGTH, //column_length
+      -1, //column_precision
+      -1, //column_scale
+      true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA("GMT_CREATE", //column_name
       ++column_id, //column_id
       0, //rowkey_id
@@ -6227,7 +6438,7 @@ int ObInnerTableSchema::all_virtual_column_real_agent_ora_schema(ObTableSchema &
       OB_MAX_COLUMN_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -6577,6 +6788,51 @@ int ObInnerTableSchema::all_virtual_column_real_agent_ora_schema(ObTableSchema &
   }
 
   if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("SRS_ID", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("UDT_SET_ID", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("SUB_DATA_TYPE", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA("GMT_CREATE", //column_name
       ++column_id, //column_id
       0, //rowkey_id
@@ -6691,7 +6947,7 @@ int ObInnerTableSchema::all_virtual_database_real_agent_ora_schema(ObTableSchema
       OB_MAX_DATABASE_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -6935,6 +7191,21 @@ int ObInnerTableSchema::all_virtual_auto_increment_real_agent_ora_schema(ObTable
   }
 
   if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("TRUNCATE_VERSION", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA("GMT_CREATE", //column_name
       ++column_id, //column_id
       0, //rowkey_id
@@ -7064,7 +7335,7 @@ int ObInnerTableSchema::all_virtual_part_real_agent_ora_schema(ObTableSchema &ta
       OB_MAX_PARTITION_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -7573,7 +7844,7 @@ int ObInnerTableSchema::all_virtual_sub_part_real_agent_ora_schema(ObTableSchema
       OB_MAX_PARTITION_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -7798,7 +8069,7 @@ int ObInnerTableSchema::all_virtual_sub_part_real_agent_ora_schema(ObTableSchema
       MAX_VALUE_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -7962,7 +8233,7 @@ int ObInnerTableSchema::all_virtual_package_real_agent_ora_schema(ObTableSchema 
       OB_MAX_PACKAGE_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -8919,7 +9190,7 @@ int ObInnerTableSchema::all_virtual_user_real_agent_ora_schema(ObTableSchema &ta
       1024, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -8934,7 +9205,7 @@ int ObInnerTableSchema::all_virtual_user_real_agent_ora_schema(ObTableSchema &ta
       1024, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -8949,7 +9220,7 @@ int ObInnerTableSchema::all_virtual_user_real_agent_ora_schema(ObTableSchema &ta
       1024, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -9134,6 +9405,36 @@ int ObInnerTableSchema::all_virtual_user_real_agent_ora_schema(ObTableSchema &ta
   }
 
   if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("PRIV_DROP_DATABASE_LINK", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("PRIV_CREATE_DATABASE_LINK", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA("GMT_CREATE", //column_name
       ++column_id, //column_id
       0, //rowkey_id
@@ -9278,7 +9579,7 @@ int ObInnerTableSchema::all_virtual_synonym_real_agent_ora_schema(ObTableSchema 
       OB_MAX_SYNONYM_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -9293,12 +9594,27 @@ int ObInnerTableSchema::all_virtual_synonym_real_agent_ora_schema(ObTableSchema 
       OB_MAX_SYNONYM_NAME_LENGTH, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA("OBJECT_DATABASE_ID", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("STATUS", //column_name
       ++column_id, //column_id
       0, //rowkey_id
       0, //index_id
@@ -9427,7 +9743,7 @@ int ObInnerTableSchema::all_virtual_foreign_key_real_agent_ora_schema(ObTableSch
       OB_MAX_CONSTRAINT_NAME_LENGTH_ORACLE, //column_length
       2, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 
@@ -12357,7 +12673,7 @@ int ObInnerTableSchema::all_virtual_tenant_keystore_real_agent_ora_schema(ObTabl
       OB_MAX_ENCRYPTED_KEY_LENGTH, //column_length
       -1, //column_precision
       -1, //column_scale
-      false, //is_nullable
+      true, //is_nullable
       false); //is_autoincrement
   }
 

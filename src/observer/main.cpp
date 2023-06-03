@@ -25,6 +25,7 @@
 #include "lib/utility/ob_defer.h"
 #include "observer/ob_server.h"
 #include "observer/ob_server_struct.h"
+#include "observer/ob_server_utils.h"
 #include "share/config/ob_server_config.h"
 #include "share/ob_tenant_mgr.h"
 #include "share/ob_version.h"
@@ -67,6 +68,7 @@ static void print_help()
   MPRINT("  -c,--cluster_id ID       cluster id");
   MPRINT("  -d,--data_dir DIR        OceanBase data directory");
   MPRINT("  -i,--devname DEV         net dev interface");
+  MPRINT("  -I,--local_ip            ip of the current machine");
   MPRINT("  -o,--optstr OPTSTR       extra options string");
   MPRINT("  -r,--rs_list RS_LIST     root service list");
   MPRINT("  -l,--log_level LOG_LEVEL server log level");
@@ -162,6 +164,7 @@ static void get_opts_setting(
       {"scn", 'f', 1},
       {"version", 'V', 0},
       {"ipv6", '6', 0},
+      {"local_ip", 'I', 1},
   };
 
   size_t opts_cnt = sizeof(ob_opts) / sizeof(ob_opts[0]);
@@ -254,14 +257,14 @@ parse_short_opt(const int c, const char *value, ObServerOptions &opts)
       MPRINT("malformed log level, candicates are: "
              "    ERROR,USER_ERR,WARN,INFO,TRACE,DEBUG");
       MPRINT("!! Back to INFO log level.");
-      opts.log_level_ = 3;
+      opts.log_level_ = OB_LOG_LEVEL_WARN;
     }
     break;
 
   case 'm':
     // set mode
-    MPRINT("server mode: %s", value);
-    opts.mode_ = value;
+    MPRINT("server startup mode: %s", value);
+    opts.startup_mode_ = value;
     break;
 
   case 'f':
@@ -277,6 +280,12 @@ parse_short_opt(const int c, const char *value, ObServerOptions &opts)
   case '6':
     opts.use_ipv6_ = true;
     break;
+
+  case 'I':
+    MPRINT("local_ip: %s", value);
+    opts.local_ip_ = value;
+    break;
+
   case 'h':
   default:
     print_help();
@@ -299,7 +308,7 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
   UNUSED(size);
   UNUSED(data);
   if (OB_ISNULL(info)) {
-    LOG_ERROR("invalid argument", K(info));
+    LOG_ERROR_RET(OB_INVALID_ARGUMENT, "invalid argument", K(info));
   } else {
     MPRINT("name=%s (%d segments)", info->dlpi_name, info->dlpi_phnum);
     for (int j = 0; j < info->dlpi_phnum; j++) {
@@ -387,12 +396,50 @@ static int check_uid_before_start(const char *dir_path)
 
   return ret;
 }
+
+static void print_all_thread(const char* desc)
+{
+  MPRINT("============= [%s]begin to show unstopped thread =============", desc);
+  DIR *dir = opendir("/proc/self/task");
+  if (dir == NULL) {
+    MPRINT("fail to print all thread");
+  } else {
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+      char *tid = entry->d_name;
+      if (tid[0] == '.')
+        continue;  // pass . and ..
+      char path[256];
+      sprintf(path, "/proc/self/task/%s/comm", tid);
+      FILE *file = fopen(path, "r");
+      if (file == NULL) {
+        MPRINT("fail to print thread tid: %s", tid);
+      }
+      char name[256];
+      fgets(name, 256, file);
+      size_t len = strlen(name);
+      if (len > 0 && name[len - 1] == '\n') {
+        name[len - 1] = '\0';
+      }
+      MPRINT("tid: %s, name: %s", tid, name);
+      fclose(file);
+    }
+  }
+  closedir(dir);
+  MPRINT("============= [%s]finish to show unstopped thread =============", desc);
+}
+
 extern "C" {
 typedef void *(*reasy_pool_realloc_pt)(void *ptr, size_t size);
 void reasy_pool_set_allocator(reasy_pool_realloc_pt alloc);
 }
 int main(int argc, char *argv[])
 {
+  if (0 != pthread_getname_np(pthread_self(), ob_get_tname(), OB_THREAD_NAME_BUF_LEN)) {
+    snprintf(ob_get_tname(), OB_THREAD_NAME_BUF_LEN, "observer");
+  }
+  ObStackHeaderGuard stack_header_guard;
+  // just take effect in observer
 #ifndef OB_USE_ASAN
   init_malloc_hook();
 #endif
@@ -457,7 +504,7 @@ int main(int argc, char *argv[])
   setlocale(LC_TIME, "en_US.UTF-8");
   setlocale(LC_NUMERIC, "en_US.UTF-8");
   // memset(&opts, 0, sizeof (opts));
-  opts.log_level_ = 3;
+  opts.log_level_ = OB_LOG_LEVEL_WARN;
   parse_opts(argc, argv, opts);
 
   if (OB_FAIL(check_uid_before_start(CONF_DIR))) {
@@ -480,9 +527,11 @@ int main(int argc, char *argv[])
     CURLcode curl_code = curl_global_init(CURL_GLOBAL_ALL);
     OB_ASSERT(CURLE_OK == curl_code);
 
+    const char *syslog_file_info = ObServerUtils::build_syslog_file_info(ObAddr());
     easy_log_level = EASY_LOG_INFO;
     OB_LOGGER.set_log_level(opts.log_level_);
     OB_LOGGER.set_max_file_size(LOG_FILE_SIZE);
+    OB_LOGGER.set_new_file_info(syslog_file_info);
     OB_LOGGER.set_file_name(LOG_FILE_NAME, false, true, RS_LOG_FILE_NAME, ELECT_ASYNC_LOG_FILE_NAME, TRACE_LOG_FILE_NAME, audit_file);
     ObPLogWriterCfg log_cfg;
     // if (OB_SUCCESS != (ret = ASYNC_LOG_INIT(ELECT_ASYNC_LOG_FILE_NAME, opts.log_level_, true))) {
@@ -503,6 +552,7 @@ int main(int argc, char *argv[])
       _LOG_INFO("Virtual memory : %'15ld byte", memory_used);
     }
     // print in log file.
+    LOG_INFO("Build basic information for each syslog file", "info", syslog_file_info);
     print_args(argc, argv);
     print_version();
     print_all_limits();
@@ -522,7 +572,7 @@ int main(int argc, char *argv[])
       // thread has already had a worker, which can prevent binding
       // new worker with it.
       lib::Worker worker;
-
+      lib::Worker::set_worker_to_thread_local(&worker);
       ObServer &observer = ObServer::get_instance();
       LOG_INFO("observer starts", "observer_version", PACKAGE_STRING);
       // to speed up bootstrap phase, need set election INIT TS
@@ -535,6 +585,7 @@ int main(int argc, char *argv[])
       } else if (OB_FAIL(observer.wait())) {
         LOG_ERROR("observer wait fail", K(ret));
       }
+      print_all_thread("BEFORE_DESTORY");
       observer.destroy();
       ObKVGlobalCache::get_instance().destroy();
       ObVirtualTenantManager::get_instance().destroy();
@@ -547,5 +598,6 @@ int main(int argc, char *argv[])
   OB_LOGGER.set_stop_append_log();
   OB_LOGGER.set_enable_async_log(false);
   OB_LOGGER.set_enable_log_limit(false);
+  print_all_thread("AFTER_DESTORY");
   return ret;
 }

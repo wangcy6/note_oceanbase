@@ -80,17 +80,32 @@ int PriorityV1::compare(const AbstractPriority &rhs, int &result, ObStringHolder
   #undef PRINT_WRAPPER
 }
 
+<<<<<<< HEAD
+=======
+//           |           Leader             | Follower
+// ----------|------------------------------|-----------------
+//  APPEND   |           max_scn            | max_replayed_scn
+// ----------|------------------------------|-----------------
+// RAW_WRITE | min(replayable_scn, max_scn) | max_replayed_scn
+// ----------|------------------------------|-----------------
+// OTHER     |          like RAW_WRITE
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 int PriorityV1::get_scn_(const share::ObLSID &ls_id, SCN &scn)
 {
   LC_TIME_GUARD(100_ms);
   #define PRINT_WRAPPER KR(ret), K(MTL_ID()), K(ls_id), K(*this)
   int ret = OB_SUCCESS;
   palf::PalfHandleGuard palf_handle_guard;
-//  palf::AccessMode access_mode = palf::AccessMode::INVALID_ACCESS_MODE;
-  if (OB_ISNULL(MTL(ObLogService*))) {
+  palf::AccessMode access_mode = palf::AccessMode::INVALID_ACCESS_MODE;
+  ObLogService* log_service = MTL(ObLogService*);
+  common::ObRole role;
+  SCN replayable_scn, max_scn;
+  int64_t unused_pid = -1;
+  if (OB_ISNULL(log_service)) {
     COORDINATOR_LOG_(ERROR, "ObLogService is nullptr");
-  } else if (CLICK_FAIL(MTL(ObLogService*)->open_palf(ls_id, palf_handle_guard))) {
+  } else if (CLICK_FAIL(log_service->open_palf(ls_id, palf_handle_guard))) {
     COORDINATOR_LOG_(WARN, "open_palf failed");
+<<<<<<< HEAD
 //  } else if (CLICK_FAIL(palf_handle_guard.get_palf_handle()->get_access_mode(access_mode))) {
 //    COORDINATOR_LOG_(WARN, "get_access_mode failed");
 //  } else if (palf::AccessMode::APPEND != access_mode) {
@@ -125,6 +140,43 @@ int PriorityV1::get_scn_(const share::ObLSID &ls_id, SCN &scn)
     if (OB_SUCC(ret) && !scn.is_valid()) {
       scn.set_min();
     }
+=======
+  } else if (CLICK_FAIL(palf_handle_guard.get_role(role, unused_pid))) {
+    COORDINATOR_LOG_(WARN, "get_role failed");
+  } else if (FOLLOWER == role) {
+    if (CLICK_FAIL(log_service->get_log_replay_service()->get_max_replayed_scn(ls_id, scn))) {
+      COORDINATOR_LOG_(WARN, "failed to get_max_replayed_scn");
+      ret = OB_SUCCESS;
+    }
+  } else if (CLICK_FAIL(palf_handle_guard.get_palf_handle()->get_access_mode(access_mode))) {
+    COORDINATOR_LOG_(WARN, "get_access_mode failed");
+  } else if (palf::AccessMode::APPEND == access_mode) {
+    if (CLICK_FAIL(palf_handle_guard.get_max_scn(scn))) {
+      COORDINATOR_LOG_(WARN, "get_max_scn failed");
+    }
+  } else if (CLICK_FAIL(log_service->get_log_replay_service()->get_replayable_point(replayable_scn))) {
+    COORDINATOR_LOG_(WARN, "failed to get_replayable_point");
+    ret = OB_SUCCESS;
+  } else if (CLICK_FAIL(palf_handle_guard.get_max_scn(max_scn))) {
+    COORDINATOR_LOG_(WARN, "get_max_scn failed");
+  } else {
+    // For LEADER in RAW_WRITE mode, scn = min(replayable_scn, max_scn)
+    if (max_scn < replayable_scn) {
+      scn = max_scn;
+    } else {
+      scn = replayable_scn;
+    }
+  }
+  // scn may fallback because palf's role may be different with apply_service.
+  // So we need check it here to keep inc update semantic.
+  if (scn < scn_) {
+    COORDINATOR_LOG_(TRACE, "new scn is smaller than current, no need update", K(role), K(access_mode), K(scn));
+    scn = scn_;
+  }
+  COORDINATOR_LOG_(TRACE, "get_scn_ finished", K(role), K(access_mode), K(scn));
+  if (OB_SUCC(ret) && !scn.is_valid()) {
+    scn.set_min();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
   return ret;
   #undef PRINT_WRAPPER
@@ -342,6 +394,11 @@ int PriorityV1::compare_scn_(int &ret, const PriorityV1&rhs) const
     }
   }
   return compare_result;
+}
+
+bool PriorityV1::has_fatal_failure_() const
+{
+  return !fatal_failures_.empty();
 }
 
 }

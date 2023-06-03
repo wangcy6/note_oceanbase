@@ -13,6 +13,7 @@
 #ifndef OCEANBASE_STORAGE_OB_DDL_STRUCT_H_
 #define OCEANBASE_STORAGE_OB_DDL_STRUCT_H_
 
+<<<<<<< HEAD
 #include "lib/hash/ob_hashmap.h"
 #include "lib/lock/ob_mutex.h"
 #include "share/scn.h"
@@ -22,13 +23,14 @@
 #include "storage/blocksstable/ob_index_block_builder.h"
 #include "storage/checkpoint/ob_freeze_checkpoint.h"
 #include "storage/blocksstable/ob_logic_macro_id.h"
+=======
+#include "lib/container/ob_array.h"
+#include "share/scn.h"
+#include "storage/blocksstable/ob_block_sstable_struct.h"
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 namespace oceanbase
 {
-namespace blocksstable
-{
-struct ObSSTableMergeRes;
-}
 namespace storage
 {
 
@@ -41,6 +43,7 @@ public:
   ObDDLMacroHandle(const ObDDLMacroHandle &other);
   ObDDLMacroHandle &operator=(const ObDDLMacroHandle &other);
   ~ObDDLMacroHandle();
+  bool is_valid() const { return block_id_.is_valid(); }
   int set_block_id(const blocksstable::MacroBlockId &block_id);
   int reset_macro_block_ref();
   const blocksstable::MacroBlockId &get_block_id() const { return block_id_; }
@@ -69,6 +72,7 @@ public:
 };
 
 
+<<<<<<< HEAD
 class ObDDLKV
 {
 public:
@@ -155,20 +159,37 @@ public:
 private:
   ObArray<ObDDLKV *> kv_array_;
 };
+=======
+class ObDDLKV;
+
+
+class ObTablet;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 class ObDDLKVPendingGuard final
 {
 public:
   static int set_macro_block(ObTablet *tablet, const ObDDLMacroBlock &macro_block);
 public:
+<<<<<<< HEAD
   ObDDLKVPendingGuard(ObTablet *tablet, const share::SCN &scn);
+=======
+  ObDDLKVPendingGuard(ObTablet *tablet, const share::SCN &start_scn, const share::SCN &scn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   ~ObDDLKVPendingGuard();
   int get_ret() const { return ret_; }
   int get_ddl_kv(ObDDLKV *&kv);
+  TO_STRING_KV(KP(tablet_), K(scn_), K(kv_handle_), K(ret_));
 private:
   ObTablet *tablet_;
+<<<<<<< HEAD
   share::SCN scn_;
   ObDDLKVHandle kv_handle_;
+=======
+  share::SCN start_scn_;
+  share::SCN scn_;
+  ObTableHandleV2 kv_handle_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int ret_;
 };
 

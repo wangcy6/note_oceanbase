@@ -121,7 +121,7 @@ public:
   {
     _value_type *p = NULL;
     if (OB_ISNULL(node_)) {
-      HASH_WRITE_LOG(HASH_FATAL, "node is null, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "node is null, backtrace=%s", lbt());
     } else {
       p = &(node_->data);
     }
@@ -201,7 +201,7 @@ public:
   {
     _value_type *p = NULL;
     if (OB_ISNULL(node_)) {
-      HASH_WRITE_LOG(HASH_FATAL, "node is null, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "node is null, backtrace=%s", lbt());
     } else {
       p = &(node_->data);
     }
@@ -389,7 +389,7 @@ public:
   iterator &operator ++()
   {
     if (OB_ISNULL(ht_)) {
-      HASH_WRITE_LOG(HASH_FATAL, "node is null, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "node is null, backtrace=%s", lbt());
     } else if (++bucket_pos_ >= ht_->bucket_num_) {
       bucket_ = nullptr;
     } else {
@@ -492,7 +492,7 @@ public:
   {
     _value_type *p = NULL;
     if (OB_ISNULL(node_)) {
-      HASH_WRITE_LOG(HASH_FATAL, "node is null, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "node is null, backtrace=%s", lbt());
     } else {
       p = &(node_->data);
     }
@@ -512,7 +512,7 @@ public:
   iterator &operator ++()
   {
     if (OB_ISNULL(ht_)) {
-      HASH_WRITE_LOG(HASH_FATAL, "node is null, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "node is null, backtrace=%s", lbt());
     } else if (NULL != node_ && NULL != (node_ = node_->next)) {
       // do nothing
     } else {
@@ -643,7 +643,7 @@ public:
   const_iterator &operator ++()
   {
     if (OB_ISNULL(ht_)) {
-      HASH_WRITE_LOG(HASH_FATAL, "ht_ is null, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_FATAL, OB_ERR_UNEXPECTED, "ht_ is null, backtrace=%s", lbt());
     } else if (NULL != node_ && NULL != (node_ = node_->next)) {
       // do nothing
     } else {
@@ -783,7 +783,8 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObHashTable);
 
 public:
-  ObHashTable() : allocer_(NULL),
+  ObHashTable() : default_bucket_allocer_(ObModIds::OB_HASH_BUCKET),
+                  allocer_(NULL),
                   bucket_allocer_(&default_bucket_allocer_),
                   bucket_num_(0),
                   size_(0)
@@ -823,7 +824,6 @@ public:
       //memset(buckets_, 0, sizeof(hashbucket) * bucket_num);
       bucket_num_ = bucket_num;
       allocer_ = allocer;
-      allocer_->inc_ref();
       bucket_allocer_ = bucket_allocer;
     }
     return ret;
@@ -847,7 +847,6 @@ public:
           buckets_[i].node = NULL;
         }
       }
-      allocer_->dec_ref();
       allocer_ = NULL;
       //delete[] buckets_;
       //buckets_ = NULL;
@@ -894,7 +893,7 @@ public:
     int64_t bucket_pos = 0;
     //if (NULL == buckets_ || NULL == allocer_)
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
-      HASH_WRITE_LOG(HASH_WARNING, "hashtable not init, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_NOT_INIT, "hashtable not init, backtrace=%s", lbt());
     } else {
       bucket = &buckets_[bucket_pos];
     }
@@ -912,7 +911,7 @@ public:
     int64_t bucket_pos = 0;
     //if (NULL == buckets_ || NULL == allocer_)
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
-      HASH_WRITE_LOG(HASH_WARNING, "hashtable not init, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_NOT_INIT, "hashtable not init, backtrace=%s", lbt());
     } else {
       while (NULL == node && bucket_pos < bucket_num_) {
         node = buckets_[bucket_pos].node;
@@ -934,7 +933,7 @@ public:
     hashnode *node = NULL;
     int64_t bucket_pos = 0;
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
-      HASH_WRITE_LOG(HASH_WARNING, "hashtable not init, backtrace=%s", lbt());
+      HASH_WRITE_LOG_RET(HASH_WARNING, OB_NOT_INIT, "hashtable not init, backtrace=%s", lbt());
     } else {
       while (NULL == node && bucket_pos < bucket_num_) {
         node = buckets_[bucket_pos].node;
@@ -1070,11 +1069,13 @@ public:
           const int64_t timeout_us = 0)
   {
     int ret = OB_HASH_NOT_EXIST;
+    uint64_t hash_value = 0;
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
       HASH_WRITE_LOG(HASH_WARNING, "hashtable not init");
       ret = OB_NOT_INIT;
+    } else if (OB_FAIL(hashfunc_(key, hash_value))) {
+      HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
     } else {
-      uint64_t hash_value = hashfunc_(key);
       int64_t bucket_pos = hash_value % bucket_num_;
       hashbucket &bucket = buckets_[bucket_pos];
       MProtectGuard guard(bucket);
@@ -1102,12 +1103,14 @@ public:
           const _value_type *&value,
           const int64_t timeout_us = 0)
   {
-    int ret = OB_SUCCESS;;
+    int ret = OB_SUCCESS;
+    uint64_t hash_value = 0;
     if (!inited(buckets_) || NULL == allocer_) {
       HASH_WRITE_LOG(HASH_WARNING, "hashtable not init");
       ret = OB_NOT_INIT;
+    } else if (OB_FAIL(hashfunc_(key, hash_value))) {
+        HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
     } else {
-      uint64_t hash_value = hashfunc_(key);
       int64_t bucket_pos = hash_value % bucket_num_;
       hashbucket &bucket = buckets_[bucket_pos];
       bucket_lock_cond blc(bucket);
@@ -1125,10 +1128,13 @@ public:
           int broadcast = 0, int overwrite_key = 0)
   {
     int ret = OB_SUCCESS;
+    uint64_t hash_value = 0;
     UNUSED(overwrite_key);
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
       HASH_WRITE_LOG(HASH_WARNING, "hashtable not init");
       ret = OB_NOT_INIT;
+    } else if (OB_FAIL(hashfunc_(key, hash_value))) {
+      HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
     } else if (1 < EXTEND_RATIO && size_ >= bucket_num_) {
       if (OB_FAIL(extend())) {
         HASH_WRITE_LOG(HASH_WARNING, "failed to extend, ret = %d, bucket_num = %ld, size = %ld",
@@ -1136,7 +1142,6 @@ public:
       }
     }
     if (OB_SUCC(ret)) {
-      uint64_t hash_value = hashfunc_(key);
       int64_t bucket_pos = hash_value % bucket_num_;
       hashbucket &bucket = buckets_[bucket_pos];
       MProtectGuard guard(bucket);
@@ -1207,22 +1212,26 @@ public:
       HASH_WRITE_LOG(HASH_WARNING, "create buckets fail, ret=%d", ret);
       ret = OB_ERR_UNEXPECTED;
     } else {
-      for (int64_t i = 0; i < old_bucket_num; i++) {
+      for (int64_t i = 0; i < old_bucket_num && OB_SUCC(ret); i++) {
         hashbucket &old_bucket = old_buckets[i];
         hashnode *cur_node = old_bucket.node;
         hashnode *next_node = NULL;
-        while (NULL != cur_node) {
+        while (NULL != cur_node && OB_SUCC(ret)) {
           abort_unless(cur_node->check_magic_code());
-          uint64_t hash_value = hashfunc_(getkey_(cur_node->data));
-          int64_t bucket_pos = hash_value % bucket_num_;
-          hashbucket &new_bucket = buckets_[bucket_pos];
-          // record next node
-          next_node = cur_node->next;
-          // insert into new bucket
-          cur_node->next = new_bucket.node;
-          new_bucket.node = cur_node;
-          //set cur node
-          cur_node = next_node;
+          uint64_t hash_value = 0;
+          if (OB_FAIL(hashfunc_(getkey_(cur_node->data), hash_value))) {
+            HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
+          } else {
+            int64_t bucket_pos = hash_value % bucket_num_;
+            hashbucket &new_bucket = buckets_[bucket_pos];
+            // record next node
+            next_node = cur_node->next;
+            // insert into new bucket
+            cur_node->next = new_bucket.node;
+            new_bucket.node = cur_node;
+            //set cur node
+            cur_node = next_node;
+          }
         }
       }
       hash::destroy(old_buckets, *bucket_allocer_);
@@ -1248,12 +1257,14 @@ public:
   int erase_refactored(const _key_type &key, _value_type *value = NULL)
   {
     int ret = OB_SUCCESS;
+    uint64_t hash_value = 0;
     //if (NULL == buckets_ || NULL == allocer_)
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
       HASH_WRITE_LOG(HASH_WARNING, "hashtable not init");
       ret = OB_NOT_INIT;
+    } else if (OB_FAIL(hashfunc_(key, hash_value))) {
+      HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
     } else {
-      uint64_t hash_value = hashfunc_(key);
       int64_t bucket_pos = hash_value % bucket_num_;
       hashbucket &bucket = buckets_[bucket_pos];
       bucket_lock_cond blc(bucket);
@@ -1282,6 +1293,73 @@ public:
             ATOMIC_DEC((uint64_t *) &size_);
             bucket_lock_cond blc(bucket);
             cond_broadcaster()(blc.cond());
+          }
+          break;
+        } else {
+          prev = node;
+          node = node->next;
+        }
+      }
+    }
+    return ret;
+  }
+
+  // erase key value pair if pred is met
+  // thread safe erase, will add write lock to the bucket
+  // return value:
+  //   OB_SUCCESS for success
+  //   OB_HASH_NOT_EXIST for node not exists
+  //   others for error
+  template<class _pred>
+  int erase_if(const _key_type &key, _pred &pred, bool &is_erased, _value_type *value = NULL)
+  {
+    return erase_if(key, pred, preproc_, is_erased, value);
+  }
+
+  // erase key value pair if pred is met
+  // thread safe erase, will add write lock to the bucket
+  template<class _pred, class _preproc>
+  int erase_if(const _key_type &key, _pred &pred, _preproc &preproc,
+               bool &is_erased, _value_type *value = NULL)
+  {
+    int ret = OB_SUCCESS;
+    uint64_t hash_value = 0;
+    is_erased = false;
+    if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
+      HASH_WRITE_LOG(HASH_WARNING, "hashtable not init");
+      ret = OB_NOT_INIT;
+    } else if (OB_FAIL(hashfunc_(key, hash_value))) {
+      HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
+    } else {
+      int64_t bucket_pos = hash_value % bucket_num_;
+      hashbucket &bucket = buckets_[bucket_pos];
+      bucket_lock_cond blc(bucket);
+      writelocker locker(blc.lock());
+      hashnode *node = bucket.node;
+      hashnode *prev = NULL;
+      ret = OB_HASH_NOT_EXIST;
+      while (NULL != node) {
+        if (equal_(getkey_(node->data), key)) {
+          ret = OB_SUCCESS;
+          if (pred(preproc(node->data))) {
+            if (NULL != value) {
+              if (OB_FAIL(copy_assign(*value, node->data))) {
+                HASH_WRITE_LOG(HASH_FATAL, "failed to copy data, ret = %d", ret);
+              }
+            }
+            if (OB_SUCC(ret)) {
+              if (NULL == prev) {
+                bucket.node = node->next;
+              } else {
+                prev->next = node->next;
+              }
+              allocer_->free(node);
+              node = NULL;
+              ATOMIC_DEC((uint64_t *) &size_);
+              bucket_lock_cond blc(bucket);
+              cond_broadcaster()(blc.cond());
+              is_erased = true;
+            }
           }
           break;
         } else {
@@ -1402,11 +1480,13 @@ public:
              _preproc &preproc)
   {
     int ret = OB_SUCCESS;
+    uint64_t hash_value = 0;
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
       HASH_WRITE_LOG(HASH_WARNING, "hashtable not init");
       ret = OB_NOT_INIT;
+    } else if (OB_FAIL(hashfunc_(key, hash_value))) {
+      HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
     } else {
-      uint64_t hash_value = hashfunc_(key);
       int64_t bucket_pos = hash_value % bucket_num_;
       hashbucket &bucket = buckets_[bucket_pos];
       bucket_lock_cond blc(bucket);
@@ -1433,11 +1513,13 @@ public:
              _preproc &preproc)
   {
     int ret = OB_SUCCESS;
+    uint64_t hash_value = 0;
     if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
       HASH_WRITE_LOG(HASH_WARNING, "hashtable not init");
       ret = OB_NOT_INIT;
+    } else if (OB_FAIL(hashfunc_(key, hash_value))) {
+        HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
     } else {
-      uint64_t hash_value = hashfunc_(key);
       int64_t bucket_pos = hash_value % bucket_num_;
       hashbucket &bucket = buckets_[bucket_pos];
       bucket_lock_cond blc(bucket);

@@ -14,7 +14,7 @@
 #define OB_SESSION_STAT_H_
 
 #include "lib/stat/ob_di_cache.h"
-#include "lib/stat/ob_di_tls.h"
+#include "lib/thread_local/ob_tsi_factory.h"
 
 namespace oceanbase
 {
@@ -77,11 +77,13 @@ public:
       : prev_tenant_id_(OB_SYS_TENANT_ID)
   {
     if (oceanbase::lib::is_diagnose_info_enabled()) {
-      buffer_ = ObDITls<ObSessionDIBuffer>::get_instance();
+      buffer_ = GET_TSI(ObSessionDIBuffer);
       if (NULL != buffer_) {
         prev_tenant_id_ = buffer_->get_tenant_id();
         if (0 < tenant_id) {
-          buffer_->switch_tenant(tenant_id);
+          if (OB_UNLIKELY(OB_SUCCESS != buffer_->switch_tenant(tenant_id))) {
+            buffer_ = nullptr;
+          }
         }
       }
     } else {
@@ -138,7 +140,8 @@ inline int ObSessionDIBuffer::switch_tenant(const uint64_t tenant_id)
   if (OB_SYS_TENANT_ID == tenant_id) {
     curr_tenant_collect_ = sys_tenant_collect_;
   } else {
-    if (tenant_id == not_sys_tenant_collect_->tenant_id_) {
+    if (OB_NOT_NULL(not_sys_tenant_collect_)
+        && tenant_id == not_sys_tenant_collect_->tenant_id_) {
     } else {
       ret = tenant_cache_.get_node(tenant_id, not_sys_tenant_collect_);
     }

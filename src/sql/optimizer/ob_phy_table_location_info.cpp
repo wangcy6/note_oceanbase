@@ -15,8 +15,10 @@
 #include "ob_phy_table_location_info.h"
 #include "observer/ob_server_struct.h"
 #include "sql/das/ob_das_location_router.h"
+#include "storage/tx/wrs/ob_black_list.h"
 using namespace oceanbase::common;
 using namespace oceanbase::share;
+using namespace oceanbase::transaction;
 namespace oceanbase
 {
 namespace sql
@@ -24,7 +26,8 @@ namespace sql
 
 ObOptTabletLoc::ObOptTabletLoc()
     : partition_id_(OB_INVALID_INDEX),
-      replica_locations_(ObModIds::OB_SQL_OPTIMIZER_LOCATION_CACHE, OB_MALLOC_NORMAL_BLOCK_SIZE),
+      first_level_part_id_(OB_INVALID_INDEX),
+      replica_locations_("SqlOptimLocaCac", OB_MALLOC_NORMAL_BLOCK_SIZE),
       renew_time_(0)
 {
 }
@@ -36,6 +39,7 @@ ObOptTabletLoc::~ObOptTabletLoc()
 void ObOptTabletLoc::reset()
 {
   partition_id_ = OB_INVALID_INDEX;
+  first_level_part_id_ = OB_INVALID_INDEX;
   tablet_id_.reset();
   ls_id_.reset();
   replica_locations_.reset();
@@ -48,6 +52,7 @@ int ObOptTabletLoc::assign(const ObOptTabletLoc &other)
   tablet_id_ = other.tablet_id_;
   ls_id_ = other.ls_id_;
   partition_id_ = other.partition_id_;
+  first_level_part_id_ = other.first_level_part_id_;
   renew_time_ = other.renew_time_;
   if (OB_FAIL(replica_locations_.assign(other.replica_locations_))) {
     LOG_WARN("Failed to assign replica locations", K(ret));
@@ -55,42 +60,41 @@ int ObOptTabletLoc::assign(const ObOptTabletLoc &other)
   return ret;
 }
 
-int ObOptTabletLoc::assign_with_only_readable_replica(
-                                                      const ObObjectID &partition_id,
+int ObOptTabletLoc::assign_with_only_readable_replica(const ObObjectID &partition_id,
+                                                      const ObObjectID &first_level_part_id,
                                                       const common::ObTabletID &tablet_id,
-                                                      const ObLSLocation &ls_location,
-                                                      const ObIArray<ObAddr> &invalid_servers)
+                                                      const ObLSLocation &ls_location)
 {
   int ret = OB_SUCCESS;
   reset();
   partition_id_ = partition_id;
+  first_level_part_id_ = first_level_part_id;
   tablet_id_ = tablet_id;
   ls_id_ = ls_location.get_ls_id();
   renew_time_ = ls_location.get_renew_time();
   for (int64_t i = 0; OB_SUCC(ret) && i < ls_location.get_replica_locations().count(); ++i) {
     const ObLSReplicaLocation &replica_loc = ls_location.get_replica_locations().at(i);
     if (ObReplicaTypeCheck::is_readable_replica(replica_loc.get_replica_type())) {
-      bool is_in_invalid_servers = false;
-      for (int64_t j = 0; OB_SUCC(ret)
-           && !is_in_invalid_servers && j < invalid_servers.count(); ++j) {
-        if (replica_loc.get_server() == invalid_servers.at(j)) {
-          is_in_invalid_servers = true;
-        }
-      }
-      if (OB_SUCC(ret) && !is_in_invalid_servers) {
-        //此处依赖了构造函数隐藏转换
+      transaction::ObBLKey bl_key;
+      bool in_black_list = false;
+      if (OB_FAIL(bl_key.init(replica_loc.get_server(), ls_location.get_tenant_id(), ls_location.get_ls_id()))) {
+        LOG_WARN("init black list key failed", K(ret));
+      } else if (OB_FAIL(ObBLService::get_instance().check_in_black_list(bl_key, in_black_list))) {
+        LOG_WARN("check in black list failed", K(ret));
+      } else if (!in_black_list || replica_loc.is_strong_leader()) {
         if (OB_FAIL(replica_locations_.push_back(replica_loc))) {
           LOG_WARN("Failed to push back replica locations",
                    K(ret), K(i), K(replica_loc), K(replica_locations_));
         }
+      } else {
+        LOG_INFO("the replica location is invalid", K(bl_key), K(replica_loc));
       }
     }
   }
   if (OB_SUCC(ret)) {
     if (OB_UNLIKELY(0 == replica_locations_.count())) {
       ret = OB_NO_READABLE_REPLICA;
-      LOG_WARN("there has no readable replica", K(ret),
-               K(invalid_servers), K(ls_location.get_replica_locations()));
+      LOG_WARN("there has no readable replica", K(ret), K(ls_location.get_replica_locations()));
     }
   }
   return ret;
@@ -328,22 +332,22 @@ int ObCandiTabletLoc::get_selected_replica(ObRoutePolicy::CandidateReplica &repl
   return ret;
 }
 
-int ObCandiTabletLoc::set_part_loc_with_only_readable_replica(
-    const ObObjectID &partition_id,
-    const common::ObTabletID &tablet_id,
-    const ObLSLocation &partition_location,
-    const ObIArray<ObAddr> &invalid_servers)
+int ObCandiTabletLoc::set_part_loc_with_only_readable_replica(const ObObjectID &partition_id,
+							      const ObObjectID &first_level_part_id,
+                                                              const common::ObTabletID &tablet_id,
+                                                              const ObLSLocation &partition_location)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(has_selected_replica())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("partition location has not been set yet, but replica idx has been selected",
               K(ret), K(*this), K(partition_location));
-  } else if (OB_FAIL(opt_tablet_loc_.assign_with_only_readable_replica(
-                                   partition_id, tablet_id,
-                                   partition_location, invalid_servers))) {
+  } else if (OB_FAIL(opt_tablet_loc_.assign_with_only_readable_replica(partition_id,
+								       first_level_part_id,
+                                                                       tablet_id,
+                                                                       partition_location))) {
     LOG_WARN("fail to assign partition location with only readable replica",
-             K(ret), K(partition_location), K(invalid_servers));
+             K(ret), K(partition_location));
   }
   return ret;
 }
@@ -510,6 +514,24 @@ int ObCandiTableLoc::all_select_fixed_server(const ObAddr &fixed_server)
   return ret;
 }
 
+int ObCandiTableLoc::get_all_servers(common::ObIArray<common::ObAddr> &servers) const
+{
+  int ret = OB_SUCCESS;
+  const ObCandiTabletLocIArray &phy_part_loc_info_list = get_phy_part_loc_info_list();
+  FOREACH_CNT_X(it, phy_part_loc_info_list, OB_SUCC(ret)) {
+    share::ObLSReplicaLocation replica_location;
+    if (OB_FAIL((*it).get_selected_replica(replica_location))) {
+      LOG_WARN("fail to get selected replica", K(*it));
+    } else if (!replica_location.is_valid()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("replica location is invalid", K(ret), K(replica_location));
+    } else if (OB_FAIL(add_var_to_array_no_dup(servers, replica_location.get_server()))) {
+      LOG_WARN("failed to push back server", K(ret));
+    }
+  }
+  return ret;
+}
+
 //给定ObCandiTableLoc 和ObCandiTabletLoc(来自复制表)
 //判断是否前者的每个分区leader都在同一个server, 且上面都存在复制表的副本, 如果是则返回TRUE
 int ObCandiTableLoc::is_server_in_replica(const ObCandiTableLoc &l_phy_loc,
@@ -571,11 +593,13 @@ int ObCandiTableLoc::replace_local_index_loc(DASRelatedTabletMap &map, ObTableID
   ref_table_id_ = ref_table_id;
   for (int64_t i = 0; i < candi_tablet_locs_.count(); ++i) {
     ObOptTabletLoc &tablet_loc = candi_tablet_locs_.at(i).get_partition_location();
-    DASRelatedTabletMap::Value rv;
-    if (OB_FAIL(map.get_related_tablet_id(tablet_loc.get_tablet_id(), ref_table_id, rv))) {
-      LOG_WARN("related tablet info is invalid", K(ret));
+    const DASRelatedTabletMap::Value *rv = nullptr;
+    if (OB_ISNULL(rv = map.get_related_tablet_id(tablet_loc.get_tablet_id(), ref_table_id))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("related tablet info is invalid", K(ret),
+               K(tablet_loc.get_tablet_id()), K(ref_table_id), K(map));
     } else {
-      tablet_loc.set_tablet_info(rv.first, rv.second);
+      tablet_loc.set_tablet_info(rv->tablet_id_, rv->part_id_, rv->first_level_part_id_);
     }
   }
   return ret;

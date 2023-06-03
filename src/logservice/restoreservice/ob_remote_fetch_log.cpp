@@ -10,34 +10,27 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#define USING_LOG_PREFIX CLOG
-
 #include "ob_remote_fetch_log.h"
-#include "lib/allocator/ob_allocator.h"       // ObMemAttr
-#include "share/ob_ls_id.h"                   // ObLSID
-#include "share/ls/ob_ls_recovery_stat_operator.h"
-#include "storage/tx_storage/ob_ls_map.h"     // ObLSIterator
-#include "storage/tx_storage/ob_ls_service.h" // ObLSService
-#include "logservice/palf/lsn.h"              // LSN
-#include "logservice/ob_log_service.h"        // ObLogService
-#include "logservice/palf_handle_guard.h"     // PalfHandleGuard
-#include "ob_log_restore_handler.h"           // ObTenantRole
-#include "ob_remote_fetch_log_worker.h"       // ObRemoteFetchWorker
-#include "ob_fetch_log_task.h"                // ObFetchLogTask
+#include "lib/net/ob_addr.h"
+#include "lib/ob_errno.h"
+#include "lib/oblog/ob_log_module.h"
+#include "lib/utility/ob_macro_utils.h"
+#include "logservice/restoreservice/ob_log_restore_define.h"
+#include "ob_log_restore_archive_driver.h"    // ObLogRestoreArchiveDriver
+#include "ob_log_restore_net_driver.h"        // ObLogRestoreNetDriver
+#include "share/restore/ob_log_restore_source.h"
 
 namespace oceanbase
 {
 namespace logservice
 {
+using namespace oceanbase::common;
 using namespace oceanbase::share;
-using namespace oceanbase::palf;
-
 ObRemoteFetchLogImpl::ObRemoteFetchLogImpl() :
   inited_(false),
   tenant_id_(OB_INVALID_TENANT_ID),
-  ls_svr_(NULL),
-  log_service_(NULL),
-  worker_(NULL)
+  archive_driver_(NULL),
+  net_driver_(NULL)
 {}
 
 ObRemoteFetchLogImpl::~ObRemoteFetchLogImpl()
@@ -46,25 +39,22 @@ ObRemoteFetchLogImpl::~ObRemoteFetchLogImpl()
 }
 
 int ObRemoteFetchLogImpl::init(const uint64_t tenant_id,
-    ObLSService *ls_svr,
-    ObLogService *log_service,
-    ObRemoteFetchWorker *worker)
+    ObLogRestoreArchiveDriver *archive_driver,
+    ObLogRestoreNetDriver *net_driver)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(inited_)) {
     ret = OB_INIT_TWICE;
-    LOG_WARN("ObRemoteFetchLogImpl init twice", K(ret), K(inited_));
+    CLOG_LOG(WARN, "ObRemoteFetchLogImpl init twice", K(inited_));
   } else if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)
-      || OB_ISNULL(ls_svr)
-      || OB_ISNULL(log_service)
-      || OB_ISNULL(worker)) {
+      || OB_ISNULL(archive_driver)
+      || OB_ISNULL(net_driver)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), K(tenant_id), K(ls_svr), K(log_service), K(worker));
+    CLOG_LOG(WARN, "invalid argument", K(tenant_id), K(archive_driver), K(net_driver));
   } else {
     tenant_id_ = tenant_id;
-    ls_svr_ = ls_svr;
-    log_service_ = log_service;
-    worker_ = worker;
+    archive_driver_ = archive_driver;
+    net_driver_ = net_driver;
     inited_ = true;
   }
   return ret;
@@ -74,45 +64,27 @@ void ObRemoteFetchLogImpl::destroy()
 {
   inited_ = false;
   tenant_id_ = OB_INVALID_TENANT_ID;
-  ls_svr_ = NULL;
-  log_service_ = NULL;
-  worker_ = NULL;
+  archive_driver_ = NULL;
+  net_driver_ = NULL;
 }
 
-int ObRemoteFetchLogImpl::do_schedule()
+int ObRemoteFetchLogImpl::do_schedule(const share::ObLogRestoreSourceItem &source)
 {
   int ret = OB_SUCCESS;
-  ObLS *ls = NULL;
-  ObLSIterator *iter = NULL;
-  common::ObSharedGuard<ObLSIterator> guard;
-  if (OB_UNLIKELY(! inited_)) {
+  if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
-    LOG_WARN("ObRemoteFetchLogImpl not init", K(ret));
-  } else if (OB_FAIL(ls_svr_->get_ls_iter(guard, ObLSGetMod::LOG_MOD))) {
-    LOG_WARN("get log stream iter failed", K(ret));
-  } else if (OB_ISNULL(iter = guard.get_ptr())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("iter is NULL", K(ret), K(iter));
+    CLOG_LOG(WARN, "ObRemoteFetchLogImpl not init", K(inited_));
+  } else if (is_service_log_source_type(source.type_)) {
+    RestoreServiceAttr service_attr;
+    ObSqlString value;
+  if (OB_FAIL(value.assign(source.value_))) {
+    CLOG_LOG(WARN, "string assign failed", K(source));
+  } else if (OB_FAIL(service_attr.parse_service_attr_from_str(value))) {
+    CLOG_LOG(WARN, "parse_service_attr failed", K(source));
   } else {
-    while (OB_SUCC(ret)) {
-      ls = NULL;
-      if (OB_FAIL(iter->get_next(ls))) {
-        if (OB_ITER_END != ret) {
-          LOG_WARN("iter ls get next failed", K(ret));
-        } else {
-          LOG_TRACE("iter to end", K(ret));
-        }
-      } else if (OB_ISNULL(ls)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("ls is NULL", K(ret), K(ls));
-      } else if (OB_FAIL(do_fetch_log_(*ls))) {
-        LOG_WARN("do fetch log failed", K(ret), K(ls));
-      }
-    } // while
-    if (OB_ITER_END == ret) {
-      ret = OB_SUCCESS;
-    }
+    ret = net_driver_->do_schedule(service_attr);
   }
+<<<<<<< HEAD
   return ret;
 }
 
@@ -147,47 +119,27 @@ int ObRemoteFetchLogImpl::do_fetch_log_(ObLS &ls)
     LOG_WARN("get fetch log base lsn failed", K(ret), K(id));
   } else if (OB_FAIL(submit_fetch_log_task_(ls, pre_scn, lsn, size, proposal_id))) {
     LOG_WARN("submit fetch log task failed", K(ret), K(id), K(lsn), K(size));
+=======
+  } else if (is_location_log_source_type(source.type_)) {
+    ret = archive_driver_->do_schedule();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   } else {
-    LOG_TRACE("do fetch log succ", K(id), K(lsn), K(size));
+    ret = OB_NOT_SUPPORTED;
   }
-  LOG_INFO("print do_fetch_log_", K(lsn), K(max_fetch_lsn), K(need_schedule),
-      K(proposal_id), K(last_fetch_ts), K(size), K(ls));
+  net_driver_->scan_ls(source.type_);
   return ret;
 }
 
-int ObRemoteFetchLogImpl::check_replica_status_(ObLS &ls, bool &can_fetch_log)
+void ObRemoteFetchLogImpl::clean_resource()
 {
-  int ret = OB_SUCCESS;
-  ObLSRestoreStatus restore_status;
-  if (OB_FAIL(ls.get_restore_status(restore_status))) {
-    LOG_WARN("get restore status failed", K(ret), K(ls));
-  } else {
-    can_fetch_log = restore_status.can_restore_log();
-  }
-  return ret;
+  net_driver_->clean_resource();
 }
 
-int ObRemoteFetchLogImpl::check_need_schedule_(ObLS &ls,
-    bool &need_schedule,
-    int64_t &proposal_id,
-    LSN &lsn,
-    int64_t &last_fetch_ts)
+void ObRemoteFetchLogImpl::update_restore_upper_limit()
 {
-  int ret = OB_SUCCESS;
-  ObRemoteFetchContext context;
-  ObLogRestoreHandler *restore_handler = NULL;
-  need_schedule = false;
-  if (OB_ISNULL(restore_handler = ls.get_log_restore_handler())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("get restore_handler failed", K(ret), "id", ls.get_ls_id());
-  } else if (OB_FAIL(restore_handler->need_schedule(need_schedule, proposal_id, context))) {
-    LOG_WARN("get fetch log context failed", K(ret), K(ls));
-  } else {
-    lsn = context.max_fetch_lsn_;
-    last_fetch_ts = context.last_fetch_ts_;
-  }
-  return ret;
+  (void)net_driver_->set_restore_log_upper_limit();
 }
+<<<<<<< HEAD
 
 // TODO 参考租户同步位点/可回放点/日志盘空间等, 计算可以拉取日志上限
 int ObRemoteFetchLogImpl::get_fetch_log_max_lsn_(ObLS &ls, palf::LSN &max_lsn)
@@ -280,5 +232,7 @@ int ObRemoteFetchLogImpl::submit_fetch_log_task_(ObLS &ls,
   return ret;
 }
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 } // namespace logservice
 } // namespace oceanbase

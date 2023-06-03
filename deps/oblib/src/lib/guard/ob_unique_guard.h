@@ -38,9 +38,9 @@
  * ObUniqueGuard protect a raw pointer's ownership, promise there is at most one owner holding the
  * guard, if there is no owner holding, the protected raw pointer will be deleted properly.
  *
- * 
+ *
  * When to use:
- *   - hope a pointer has unique ownership, and could delete(both logically and physically) it 
+ *   - hope a pointer has unique ownership, and could delete(both logically and physically) it
  *     customized under RAII.
  *
  * When not to use:
@@ -49,7 +49,7 @@
  * Memory usage:
  *   - sizeof(ObUniqueGuard<T>) is 24 Bytes in common, including 3 pointers.
  *   - if ObUniqueGuard is assigned by a raw pointer, a piece of heap memory for deleter will be al-
- *     located, to avoid this, using ob_make_unique() or ob_alloc_unique() to ceate a ObUniqueGuard 
+ *     located, to avoid this, using ob_make_unique() or ob_alloc_unique() to ceate a ObUniqueGuard
  *     and object with only one time alloc.
  *
  * Manual:
@@ -73,19 +73,19 @@
  *     + int assign(const ObUniqueGuard<T> &)
  *         success always
  *     + template <typename FUNC>
- *       int assign(T *, FUNC &&, ObIAllocator &) 
- *         general assign, could assigned by a raw pointer, may return OB_INVALID_ARGUMENT or 
+ *       int assign(T *, FUNC &&, ObIAllocator &)
+ *         general assign, could assigned by a raw pointer, may return OB_INVALID_ARGUMENT or
  *         OB_ALLOCATE_MEMORY_FAILED.
  *     5. using
  *       using ObUniqueGuard<T> obj just like using T* obj.
  *
  *  - CAUTION:
  *      + MAKE SURE ObUniqueGuard is valid before using it, or will CRASH.
- *      + if ObUniqueGuard is created by ob_make_unique() or ob_alloc_unique(), the delete action 
- *        behavior is just call ptr's destuction method and call allocator's free method, WILL NOT 
+ *      + if ObUniqueGuard is created by ob_make_unique() or ob_alloc_unique(), the delete action
+ *        behavior is just call ptr's destuction method and call allocator's free method, WILL NOT
  *        CALL destory() method even if ptr has one.
  *
- *  - Contact xuwang.txw@antgroup.com for help.
+ *  - Contact  for help.
  */
 
 #ifndef OCEANBASE_LIB_GUARD_OB_UNIQUE_GUARD_H
@@ -116,7 +116,9 @@ struct DefaultUniqueGuardAllocator : public ObIAllocator {
 #ifdef UNIITTEST_DEBUG
     total_alive_num++;
 #endif
-    return ob_malloc(size, "ObGuard");
+    static lib::ObMemAttr attr(OB_SERVER_TENANT_ID, "ObGuard");
+    SET_USE_500(attr);
+    return ob_malloc(size, attr);
   }
   void* alloc(const int64_t size, const ObMemAttr &attr) override
   {
@@ -192,7 +194,7 @@ public:
     if (OB_ISNULL(data)) {
       ret = OB_INVALID_ARGUMENT;
     } else {
-      ObFunction<void(T*)>* temp_ptr = 
+      ObFunction<void(T*)>* temp_ptr =
                             (ObFunction<void(T*)>*)alloc.alloc(sizeof(ObFunction<void(T*)>));
       if (OB_LIKELY(nullptr != temp_ptr)) {
         temp_ptr = new (temp_ptr)ObFunction<void(T*)>(alloc);// success always
@@ -224,9 +226,9 @@ public:
         allocator_->free(data_);
       }
     } else if (!OB_ISNULL(data_)) {
-      OCCAM_LOG(ERROR, "should never go here", K(*this));
+      OCCAM_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "should never go here", K(*this));
     } else if (!OB_ISNULL(allocator_)) {
-      OCCAM_LOG(ERROR, "should never go here", K(*this));
+      OCCAM_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "should never go here", K(*this));
     } else {}// it'ok that both data_ and allocator_ are nullptr, ObUniqueGuard has been reset
     data_ = nullptr;
     deleter_ = nullptr;

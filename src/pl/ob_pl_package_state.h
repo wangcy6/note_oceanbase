@@ -134,7 +134,7 @@ public:
   common::ObIAllocator &get_pkg_allocator() { return inner_allocator_; }
   common::ObIAllocator &get_pkg_cursor_allocator() { return cursor_allocator_; }
   int add_package_var_val(const common::ObObj &value, ObPLType type);
-  int set_package_var_val(int64_t var_idx, const common::ObObj &value);
+  int set_package_var_val(int64_t var_idx, const common::ObObj &value, bool deep_copy_complex = true);
   int get_package_var_val(int64_t var_idx, common::ObObj &value);
   int update_changed_vars(int64_t var_idx);
   inline bool is_package_info_changed()
@@ -166,6 +166,8 @@ public:
                                 common::ObString &key,
                                 common::ObObj &value);
   inline bool get_serially_reusable() const { return serially_reusable_; }
+  int remove_user_variables_for_package_state(ObSQLSessionInfo &session);
+  uint64_t get_package_id() { return package_id_; }
 
   ObIArray<ObObj> &get_vars() { return vars_; }
 

@@ -38,8 +38,6 @@ class ObBootstrapStmt;
     DISALLOW_COPY_AND_ASSIGN(name##Executor);              \
   }
 
-DEF_SIMPLE_EXECUTOR(ObAdminServer);
-
 DEF_SIMPLE_EXECUTOR(ObAdminZone);
 
 DEF_SIMPLE_EXECUTOR(ObFreeze);
@@ -88,6 +86,12 @@ DEF_SIMPLE_EXECUTOR(ObClearMergeError);
 
 DEF_SIMPLE_EXECUTOR(ObMigrateUnit);
 
+DEF_SIMPLE_EXECUTOR(ObAddArbitrationService);
+
+DEF_SIMPLE_EXECUTOR(ObRemoveArbitrationService);
+
+DEF_SIMPLE_EXECUTOR(ObReplaceArbitrationService);
+
 DEF_SIMPLE_EXECUTOR(ObUpgradeVirtualSchema);
 
 DEF_SIMPLE_EXECUTOR(ObAdminUpgradeCmd);
@@ -109,6 +113,7 @@ DEF_SIMPLE_EXECUTOR(ObDisableSqlThrottle);
 DEF_SIMPLE_EXECUTOR(ObSetDiskValid);
 DEF_SIMPLE_EXECUTOR(ObClearBalanceTask);
 DEF_SIMPLE_EXECUTOR(ObSwitchTenant);
+DEF_SIMPLE_EXECUTOR(ObRecoverTenant);
 DEF_SIMPLE_EXECUTOR(ObAddDisk);
 DEF_SIMPLE_EXECUTOR(ObDropDisk);
 
@@ -117,6 +122,7 @@ DEF_SIMPLE_EXECUTOR(ObBackupDatabase);
 DEF_SIMPLE_EXECUTOR(ObBackupManage);
 DEF_SIMPLE_EXECUTOR(ObBackupClean);
 DEF_SIMPLE_EXECUTOR(ObDeletePolicy);
+DEF_SIMPLE_EXECUTOR(ObBackupKey);
 DEF_SIMPLE_EXECUTOR(ObBackupBackupset);
 DEF_SIMPLE_EXECUTOR(ObBackupArchiveLog);
 DEF_SIMPLE_EXECUTOR(ObBackupBackupPiece);
@@ -164,6 +170,28 @@ public:
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObChangeTenantExecutor);
+};
+
+class ObAdminServerExecutor
+{
+public:
+  ObAdminServerExecutor() {}
+  virtual ~ObAdminServerExecutor() {}
+  int execute(ObExecContext &ctx, ObAdminServerStmt &stmt);
+private:
+  // wait leader switch out
+  // @params[in]  sql_proxy, the proxy to use
+  // @params[in]  svr_list, which servers to stop
+  int wait_leader_switch_out_(
+      ObISQLClient &sql_proxy,
+      const obrpc::ObServerList &svr_list);
+  // construct sql to check waitint-result
+  // @params[in]  svr_list, which servers to stop
+  // @params[in]  sql, the sql builded
+  int construct_wait_leader_switch_sql_(
+      const obrpc::ObServerList &svr_list,
+      ObSqlString &sql);
+  DISALLOW_COPY_AND_ASSIGN(ObAdminServerExecutor);
 };
 
 #undef DEF_SIMPLE_EXECUTOR

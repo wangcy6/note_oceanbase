@@ -21,6 +21,7 @@
 #include "lib/container/ob_id_map.h"
 #include "lib/utility/utility.h"
 #include "lib/allocator/ob_fifo_allocator.h"
+#include "ob_clock_generator.h"
 
 DEFINE_HAS_MEMBER(RP_MAX_FREE_LIST_NUM);
 
@@ -92,10 +93,8 @@ public:
       allocator_(allocator),
       inner_allocated_num_(0),
       inner_used_num_(0),
-      free_list_allocator_("PoolFreeList",
-                           OB_MALLOC_NORMAL_BLOCK_SIZE,
-                           mem_attr.tenant_id_,
-                           mem_attr.ctx_id_),
+      free_list_allocator_(SET_USE_500(ObMemAttr(mem_attr.tenant_id_, "PoolFreeList", mem_attr.ctx_id_)),
+                           OB_MALLOC_NORMAL_BLOCK_SIZE),
       slice_max_used_num_(0),
       max_idle_num_(0),
       last_check_ts_(0),
@@ -154,7 +153,7 @@ public:
         ret = &(node->data);
         node->magic = ALLOC_MAGIC_NUM;
       }
-      const int64_t cur_ts = ObTimeUtility::fast_current_time();
+      const int64_t cur_ts = ObClockGenerator::getClock();
       if (cur_ts - last_check_ts_ > CHECK_INTERVAL &&
           ATOMIC_BCAS(&updating_, 0, 1)) {
         int64_t n = 0;
@@ -179,7 +178,7 @@ public:
         (void)ATOMIC_STORE(&updating_, 0);
       }
     } else {
-      _COMMON_LOG(ERROR, "resource pool constuctor may be failed, this=%p type=%s", this, typeid(T).name());
+      _COMMON_LOG_RET(ERROR, OB_ERROR, "resource pool constuctor may be failed, this=%p type=%s", this, typeid(T).name());
     }
     return ret;
   };
@@ -188,7 +187,7 @@ public:
     if (NULL != ptr) {
       Node *node = (Node *)ptr;
       if (ALLOC_MAGIC_NUM != node->magic) {
-        _COMMON_LOG(ERROR, "node=%p magic=%lx not match %lx", node, node->magic,
+        _COMMON_LOG_RET(ERROR, OB_ERROR, "node=%p magic=%lx not match %lx", node, node->magic,
                     ALLOC_MAGIC_NUM);
       } else {
         free_node_(node);
@@ -248,7 +247,7 @@ protected:
         bool need_free = true;
         if (ATOMIC_LOAD(&inner_allocated_num_) < max_idle_num_) {
           if (common::OB_SUCCESS != free_list_.push(ptr)) {
-            _COMMON_LOG(ERROR, "free node to list fail, size=%ld ptr=%p", free_list_.get_total(), ptr);
+            _COMMON_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "free node to list fail, size=%ld ptr=%p", free_list_.get_total(), ptr);
           } else {
             need_free = false;
           }
@@ -262,7 +261,7 @@ protected:
         ptr->~Node();
         common::ob_free(ptr);
       } else {
-        _COMMON_LOG(ERROR, "invalid flag=%lu", ptr->flag);
+        _COMMON_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid flag=%lu", ptr->flag);
       }
     }
   }
@@ -300,14 +299,14 @@ template <class T, class RPLabel>
 ObResourcePool<T, RPLabel>::ObResourcePool()
   : ObBaseResourcePool<T, RPLabel>(MAX_FREE_LIST_NUM,
                                    &allocator_,
-                                   lib::ObMemAttr(OB_SERVER_TENANT_ID, RPLabel::LABEL))
+                                   SET_USE_500(lib::ObMemAttr(OB_SERVER_TENANT_ID, RPLabel::LABEL)))
 {
   int ret = OB_SUCCESS;
   const int64_t page_size =
     MIN(OB_MALLOC_BIG_BLOCK_SIZE, MAX(8 * sizeof(T), OB_MALLOC_MIDDLE_BLOCK_SIZE));
   if (OB_FAIL(allocator_.init(lib::ObMallocAllocator::get_instance(),
                               page_size,
-                              lib::ObMemAttr(OB_SERVER_TENANT_ID, RPLabel::LABEL)))) {
+                              ObBaseResourcePool<T, RPLabel>::mem_attr_))) {
     _COMMON_LOG(INFO,
                 "init fifo failed, ret=%d", ret);
   }

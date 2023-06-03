@@ -61,9 +61,10 @@ const char* ObITable::table_type_name_[] =
   "MAJOR",
   "MINOR",
   "MINI",
-  "BUF_MINOR",
+  "META_MAJOR",
   "DDL_DUMP",
   "REMOTE_LOGICAL_MINOR",
+  "DDL_MEM",
 };
 
 uint64_t ObITable::TableKey::hash() const
@@ -118,6 +119,12 @@ void ObITable::reset()
   key_.reset();
 }
 
+int ObITable::safe_to_destroy(bool &is_safe)
+{
+  is_safe = true;
+  return OB_SUCCESS;
+}
+
 int ObITable::exist(
     ObStoreCtx &ctx,
     const uint64_t table_id,
@@ -162,14 +169,12 @@ int64_t ObITable::to_string(char *buf, const int64_t buf_len) const
 ObTableHandleV2::ObTableHandleV2()
   : table_(nullptr), t3m_(nullptr), allocator_(nullptr), table_type_(ObITable::TableType::MAX_TABLE_TYPE)
 {
-  INIT_OBJ_LEAK_DEBUG_NODE(node_, this, share::LEAK_CHECK_OBJ_TABLE_HANDLE, MTL_ID());
 }
 
 ObTableHandleV2::ObTableHandleV2(ObITable *table, ObTenantMetaMemMgr *t3m, ObITable::TableType type)
   : table_(nullptr), t3m_(nullptr), allocator_(nullptr), table_type_(type)
 {
   abort_unless(OB_SUCCESS == set_table(table, t3m, table_type_));
-  INIT_OBJ_LEAK_DEBUG_NODE(node_, this, share::LEAK_CHECK_OBJ_TABLE_HANDLE, MTL_ID());
 }
 
 ObTableHandleV2::~ObTableHandleV2()
@@ -187,7 +192,7 @@ void ObTableHandleV2::reset()
 {
   if (nullptr != table_) {
     if (OB_UNLIKELY(!is_valid())) {
-      STORAGE_LOG(ERROR, "t3m or allocator is nullptr", KP_(table), KP_(t3m), KP_(allocator));
+      STORAGE_LOG_RET(ERROR, OB_INVALID_ERROR, "t3m or allocator is nullptr", KP_(table), KP_(t3m), KP_(allocator));
       ob_abort();
     } else {
       const int64_t ref_cnt = table_->dec_ref();
@@ -199,7 +204,7 @@ void ObTableHandleV2::reset()
           allocator_->free(table_);
         }
       } else if (OB_UNLIKELY(ref_cnt < 0)) {
-        LOG_ERROR("table ref cnt may be leaked", K(ref_cnt), KP(table_), K(table_type_));
+        LOG_ERROR_RET(OB_ERR_UNEXPECTED, "table ref cnt may be leaked", K(ref_cnt), KP(table_), K(table_type_));
       }
       table_ = nullptr;
       t3m_ = nullptr;
@@ -285,7 +290,7 @@ int ObTableHandleV2::get_data_memtable(memtable::ObMemtable *&memtable)
     ret = OB_NOT_INIT;
     STORAGE_LOG(WARN, "not inited", K(ret));
    } else if (!table_->is_data_memtable()) {
-     ret = OB_ENTRY_NOT_EXIST;
+     ret = OB_ERR_UNEXPECTED;
      STORAGE_LOG(WARN, "not data memtable", K(ret), K(table_->get_key()));
   } else {
     memtable = static_cast<memtable::ObMemtable*>(table_);
@@ -415,7 +420,6 @@ int ObTableHandleV2::get_lock_memtable(const ObLockMemtable *&memtable) const
 ObTableHandleV2::ObTableHandleV2(const ObTableHandleV2 &other)
   : table_(nullptr), t3m_(nullptr)
 {
-  INIT_OBJ_LEAK_DEBUG_NODE(node_, this, share::LEAK_CHECK_OBJ_TABLE_HANDLE, MTL_ID());
   *this = other;
 }
 
@@ -425,7 +429,7 @@ ObTableHandleV2 &ObTableHandleV2::operator= (const ObTableHandleV2 &other)
     reset();
     if (nullptr != other.table_) {
       if (OB_UNLIKELY(!other.is_valid())) {
-        STORAGE_LOG(ERROR, "t3m_ is nullptr", K(other));
+        STORAGE_LOG_RET(ERROR, OB_INVALID_ERROR, "t3m_ is nullptr", K(other));
         ob_abort();
       } else {
         table_ = other.table_;
@@ -434,7 +438,7 @@ ObTableHandleV2 &ObTableHandleV2::operator= (const ObTableHandleV2 &other)
         allocator_ = other.allocator_;
         table_type_ = other.table_type_;
         if (OB_UNLIKELY(other.table_->get_ref() < 2)) {
-          STORAGE_LOG(ERROR, "The reference count of the table is unexpectedly decreased,"
+          STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "The reference count of the table is unexpectedly decreased,"
               " the possible reason is that the table handle has concurrency", K(other));
         }
       }
@@ -506,7 +510,7 @@ void ObTablesHandleArray::reset()
         const int64_t ref_cnt = table->dec_ref();
         if (0 == ref_cnt) {
           if (OB_ISNULL(meta_mem_mgr_) && OB_ISNULL(allocator_)) {
-            STORAGE_LOG(ERROR, "[MEMORY LEAK] meta_mem_mgr is unexpected null!!!", KPC(table), K(tablet_id_), KP(meta_mem_mgr_), KP(allocator_));
+            STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "[MEMORY LEAK] meta_mem_mgr is unexpected null!!!", KPC(table), K(tablet_id_), KP(meta_mem_mgr_), KP(allocator_));
           } else if (nullptr != meta_mem_mgr_) {
             meta_mem_mgr_->push_table_into_gc_queue(table, table->get_key().table_type_);
           } else {
@@ -514,7 +518,7 @@ void ObTablesHandleArray::reset()
             allocator_->free(table);
           }
         } else if (OB_UNLIKELY(ref_cnt < 0)) {
-          LOG_ERROR("table ref cnt may be leaked", K(ref_cnt), KP(table), "table type", table->get_key().table_type_);
+          LOG_ERROR_RET(OB_ERR_UNEXPECTED, "table ref cnt may be leaked", K(ref_cnt), KP(table), "table type", table->get_key().table_type_);
         }
       }
       tables_.at(i) = nullptr;
@@ -613,8 +617,8 @@ int ObTablesHandleArray::assign(const ObTablesHandleArray &other)
     if (OB_ISNULL(table)) {
       ret = OB_ERR_SYS;
       STORAGE_LOG(WARN, "table must not null", K(ret), K(other));
-    } else if (OB_NOT_NULL(allocator_)) {
-      if (OB_FAIL(add_table(table, allocator_))) {
+    } else if (OB_NOT_NULL(other.allocator_)) {
+      if (OB_FAIL(add_table(table, other.allocator_))) {
         STORAGE_LOG(WARN, "fail to add table", K(ret));
       }
     } else if (OB_FAIL(add_table(table))) {
@@ -675,7 +679,7 @@ int ObTablesHandleArray::check_continues(const share::ObScnRange *scn_range) con
 
   if (!tables_.empty()) {
     // 1:check major sstable
-    // there can only be one major or buf minor
+    // there can only be one major or meta merge
     const ObITable *last_table = nullptr;
     const ObITable *table = nullptr;
     SCN base_end_scn = SCN::min_scn();
@@ -683,8 +687,13 @@ int ObTablesHandleArray::check_continues(const share::ObScnRange *scn_range) con
     if (OB_ISNULL(table = tables_.at(i))) {
       ret = OB_ERR_SYS;
       LOG_WARN("table is NULL", KPC(table));
+<<<<<<< HEAD
     } else if (table->is_major_sstable() || table->is_buf_minor_sstable()) {
       base_end_scn = table->is_buf_minor_sstable() ? table->get_end_scn() : SCN::min_scn();
+=======
+    } else if (table->is_major_sstable() || table->is_meta_major_sstable()) {
+      base_end_scn = table->is_meta_major_sstable() ? table->get_end_scn() : SCN::min_scn();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       i++;
     }
     // 2:check minor sstable
@@ -693,9 +702,9 @@ int ObTablesHandleArray::check_continues(const share::ObScnRange *scn_range) con
       if (OB_ISNULL(table)) {
         ret = OB_ERR_SYS;
         LOG_WARN("table is NULL", KPC(table));
-      } else if (table->is_major_sstable() || table->is_buf_minor_sstable()) {
+      } else if (table->is_major_sstable() || table->is_meta_major_sstable()) {
         ret = OB_ERR_SYS;
-        LOG_WARN("major sstable or buf minor should be first", K(ret), K(i), K(table));
+        LOG_WARN("major sstable or meta merge should be first", K(ret), K(i), K(table));
       } else if (OB_ISNULL(last_table)) { // first table
         if (OB_NOT_NULL(scn_range)
             && table->get_start_scn() > scn_range->start_scn_) {

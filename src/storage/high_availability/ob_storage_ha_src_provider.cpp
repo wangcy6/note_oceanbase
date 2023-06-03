@@ -14,6 +14,7 @@
 #include "ob_storage_ha_src_provider.h"
 #include "share/location_cache/ob_location_service.h"
 #include "observer/ob_server_event_history_table_operator.h"
+#include "storage/high_availability/ob_storage_ha_utils.h"
 
 namespace oceanbase {
 using namespace share;
@@ -194,9 +195,17 @@ int ObStorageHASrcProvider::inner_choose_ob_src_(const uint64_t tenant_id, const
     obrpc::ObFetchLSMetaInfoResp ls_info;
     ObMigrationStatus migration_status;
     share::ObLSRestoreStatus restore_status;
-    if (OB_SUCCESS != (tmp_ret = fetch_ls_meta_info_(tenant_id, ls_id, addr, ls_info))) {
-      LOG_WARN("failed to fetch ls meta info", K(ret), K(tenant_id), K(ls_id), K(addr));
-    } else if (!ObReplicaTypeCheck::is_full_replica(ls_info.ls_meta_package_.ls_meta_.replica_type_)) {
+    if (OB_TMP_FAIL(fetch_ls_meta_info_(tenant_id, ls_id, addr, ls_info))) {
+      LOG_WARN("failed to fetch ls meta info", K(tmp_ret), K(tenant_id), K(ls_id), K(addr));
+    } else if (OB_FAIL(ObStorageHAUtils::check_server_version(ls_info.version_))) {
+      if (OB_MIGRATE_NOT_COMPATIBLE == ret) {
+        LOG_INFO("do not choose this src", K(ret), K(tenant_id), K(ls_id), K(ls_info));
+        ret = OB_SUCCESS;
+      } else {
+        LOG_WARN("failed to check version", K(ret), K(tenant_id), K(ls_id), K(ls_info));
+      }
+    // TODO: muwei make sure this is right
+    } else if (!ObReplicaTypeCheck::is_full_replica(REPLICA_TYPE_FULL)) {
       LOG_INFO("do not choose this src", K(tenant_id), K(ls_id), K(addr), K(ls_info));
     } else if (local_clog_checkpoint_scn > ls_info.ls_meta_package_.ls_meta_.get_clog_checkpoint_scn()) {
       LOG_INFO("do not choose this src", K(tenant_id), K(ls_id), K(addr), K(local_clog_checkpoint_scn), K(ls_info));

@@ -226,7 +226,9 @@ int ObNodeArray<T>::init(const char *label, const int64_t max_cnt)
     COMMON_LOG(WARN, "failed to init bitset", K(ret), K(max_cnt));
   } else {
     void * buf = NULL;
-    allocator_.set_label(label);
+    auto attr = SET_USE_500(label);
+    allocator_.set_attr(attr);
+    free_node_bitset_.set_attr(attr);
     if (NULL == (buf = allocator_.alloc(sizeof(T) * max_cnt))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       COMMON_LOG(WARN, "failed to alloc info node", K(ret));
@@ -245,7 +247,7 @@ T* ObNodeArray<T>::at(const int64_t idx)
 {
   T *ret_ptr = NULL;
   if (OB_UNLIKELY(!is_inited_)) {
-    COMMON_LOG(WARN, "ObNodeArray has not been inited");
+    COMMON_LOG_RET(WARN, OB_NOT_INIT, "ObNodeArray has not been inited");
   } else if (idx >= 0 && idx < max_cnt_) {
     ret_ptr = &array_[idx];
   }
@@ -296,7 +298,7 @@ int ObNodeArray<T>::free_node(const int64_t idx)
  * */
 template <typename Key, typename Value>
 ObInfoManager<Key, Value>::ObInfoManager() :
-        lock_(),
+        lock_(common::ObLatchIds::INFO_MGR_LOCK),
         max_cnt_(0),
         node_array_(),
         is_inited_(false),
@@ -317,7 +319,8 @@ int ObInfoManager<Key, Value>:: init(
     const int64_t max_cnt)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(map_.create(bucket_num, label))) {
+  auto attr = SET_USE_500(label);
+  if (OB_FAIL(map_.create(bucket_num, attr))) {
     COMMON_LOG(WARN, "failed to create map", K(ret), K(bucket_num), K(label));
   } else if (OB_FAIL(node_array_.init(label, max_cnt))) {
     COMMON_LOG(WARN, "failed to init node array", K(ret), K(max_cnt), K(label));

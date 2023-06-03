@@ -16,11 +16,11 @@
  * ObFunction is a basic abstruct tool, just behave like std::function.
  * ObFunction is a template class, it can only be used with template specialization.
  * User need specify Function input args' types and return type when specialization.
- * All callable object, no matter function pointer, functor class, or lambda, as long as they have 
- * same input args' types and return type, they could be described as the same type using 
+ * All callable object, no matter function pointer, functor class, or lambda, as long as they have
+ * same input args' types and return type, they could be described as the same type using
  * ObFunction<Ret(Args...)>.
  * ObFunction has value semantics.
- * 
+ *
  *
  * When to use:
  *   - you want to describe a callable object.
@@ -71,7 +71,7 @@
  *        memory, set ObFunction to a invalid state if alloc memory failed.
  *      + MAKE SURE ObFunction is valid before call it, or will CRASH.
  *
- *  - Contact xuwang.txw@antgroup.com for help.
+ *  - Contact  for help.
  */
 
 #ifndef OCEANBASE_LIB_FUNCTION_OB_FUNTION_H
@@ -122,7 +122,9 @@ struct DefaultFunctionAllocator : public ObIAllocator {
 #ifdef UNIITTEST_DEBUG
     total_alive_num++;
 #endif
-    return ob_malloc(size, "ObFunction");
+    static lib::ObMemAttr attr(OB_SERVER_TENANT_ID, "ObFunction");
+    SET_USE_500(attr);
+    return ob_malloc(size, attr);
   }
   void* alloc(const int64_t size, const ObMemAttr &attr) override {
     UNUSED(attr);
@@ -193,7 +195,7 @@ class ObFunction<Ret(Args...)> {
       } else {
         const char* class_name = typeid(Fn).name();
         int class_size = sizeof(Derived<Fn>);
-        OCCAM_LOG(ERROR, "ptr is nullptr",
+        OCCAM_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "ptr is nullptr",
                       K(class_name), K(class_size),
                       K(function::SMALL_OBJ_MAX_SIZE), KP(local_buffer));
       }
@@ -301,7 +303,7 @@ public:
     RECORDER.function_copy_assign_time++;
 #endif
     return base_assign_(rhs.base_);
-  } 
+  }
   // move assign
   int assign(ObFunction<Ret(Args...)> &&rhs) {
 #ifdef UNIITTEST_DEBUG

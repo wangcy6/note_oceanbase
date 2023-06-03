@@ -80,7 +80,7 @@ function get_os_release() {
       uos)
         version_ge "20" && compat_centos7 && return
         ;;
-      arch)
+      arch | garuda)
         compat_centos8 && return
         ;;
       rocky)
@@ -100,6 +100,9 @@ function get_os_release() {
         version_ge "8.0" && OS_RELEASE=8 && return
         version_ge "7.0" && OS_RELEASE=7 && return
         ;;
+      ubuntu)
+        version_ge "16.04" && compat_centos7 && return
+        ;;
     esac
   elif [[ "${OS_ARCH}x" == "sw_64x" ]]; then
     case "$ID" in
@@ -108,7 +111,7 @@ function get_os_release() {
       ;;
     esac
   fi
-  not_supported && return 1 
+  not_supported && return 1
 }
 
 get_os_release || exit 1
@@ -136,7 +139,7 @@ if [ -f ${WORKSAPCE_DEPS_3RD_MD5} ]; then
     fi
 else
     echo_log "${DEP_FILE} has been not initialized, due to ${WORKSAPCE_DEPS_3RD_MD5} not exists"
-fi		
+fi
 
 # 依赖目录不存在，停止缓存
 if [ "x${DEP_CACHE_DIR}" == "x" ]; then
@@ -200,7 +203,7 @@ section="default"
 content=""
 
 function save_content {
-    if [[ "$content" != "" ]] 
+    if [[ "$content" != "" ]]
     then
         if [[ $(echo "$section" | grep -E "^target\-") != "" ]]
         then
@@ -225,7 +228,7 @@ do
     else
         [[ "$line" != "" ]] && [[ "$line" != '#'* ]] && content+=$'\n'"$line"
     fi
-done < $DEP_FILE 
+done < $DEP_FILE
 save_content
 
 # 真正开始下载
@@ -259,7 +262,7 @@ do
             fi
         fi
         echo_log "unpack package <${pkg}>... \c"
-        if [ "$ID" = "arch" ]; then
+        if [[ "$ID" = "arch" || "$ID" = "garuda" ]]; then
           (cd ${TARGET_DIR_3RD} && rpmextract.sh "${TARGET_DIR_3RD}/pkg/${pkg}")
         else
           (cd ${TARGET_DIR_3RD} && rpm2cpio "${TARGET_DIR_3RD}/pkg/${pkg}" | cpio -di -u --quiet)
@@ -313,7 +316,7 @@ if [ -f ${CACHE_DEPS_LOCKFILE} ];then
         fi
     else
         echo_log "lock file ${CACHE_DEPS_LOCKFILE} in 1 mins"
-    fi    
+    fi
 fi
 
 if [ ${LINK_CHACE_DIRECT}  == "ON" ]; then

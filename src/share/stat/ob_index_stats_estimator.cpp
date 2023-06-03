@@ -21,8 +21,8 @@ namespace oceanbase
 namespace common
 {
 
-ObIndexStatsEstimator::ObIndexStatsEstimator(ObExecContext &ctx)
-  : ObBasicStatsEstimator(ctx)
+ObIndexStatsEstimator::ObIndexStatsEstimator(ObExecContext &ctx, ObIAllocator &allocator)
+  : ObBasicStatsEstimator(ctx, allocator)
 {}
 
 int ObIndexStatsEstimator::estimate(const ObTableStatParam &param,
@@ -31,7 +31,7 @@ int ObIndexStatsEstimator::estimate(const ObTableStatParam &param,
 {
   int ret = OB_SUCCESS;
   const ObIArray<ObColumnStatParam> &column_params = param.column_params_;
-  ObString no_rewrite("NO_REWRITE");
+  ObString no_rewrite("NO_REWRITE USE_PLAN_CACHE(NONE) DBMS_STATS");
   ObString calc_part_id_str;
   ObOptTableStat tab_stat;
   ObOptStat src_opt_stat;
@@ -121,7 +121,7 @@ int ObIndexStatsEstimator::fill_index_info(common::ObIAllocator &alloc,
   } else {
     const char *fmt_str = "INDEX(%.*s %.*s)";
     char *buf = NULL;
-    int32_t buf_len = table_name.length() + index_name.length() + strlen(fmt_str);
+    int64_t buf_len = table_name.length() + index_name.length() + strlen(fmt_str);
     if (OB_ISNULL(buf = static_cast<char *>(alloc.alloc(buf_len)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("failed to alloc memory", K(ret), K(buf), K(buf_len));
@@ -165,7 +165,7 @@ int ObIndexStatsEstimator::fill_index_group_by_info(ObIAllocator &allocator,
     LOG_WARN("get unexpected type", K(extra.type_), K(ret));
   }
   if (OB_SUCC(ret)) {
-    const int32_t len = strlen(fmt_str) +
+    const int64_t len = strlen(fmt_str) +
                         param.data_table_name_.length() +
                         param.tab_name_.length() +
                         type_str.length() ;
@@ -210,7 +210,7 @@ int ObIndexStatsEstimator::fill_partition_condition(ObIAllocator &allocator,
     } else if (extra.type_ == SUBPARTITION_LEVEL) {
       type_str = ObString(7, "SUBPART");
     }
-    const int32_t len = strlen(fmt_str) +
+    const int64_t len = strlen(fmt_str) +
                         param.data_table_name_.length() +
                         param.tab_name_.length() +
                         type_str.length() + 30;
@@ -405,13 +405,13 @@ int ObIndexStatsEstimator::get_all_need_gather_partition_ids(const ObTableStatPa
                                                              ObIArray<int64_t> &gather_part_ids)
 {
   int ret = OB_SUCCESS;
-  if (index_param.need_global_ || index_param.need_approx_global_) {
+  if (index_param.global_stat_param_.need_modify_) {
     if (OB_FAIL(gather_part_ids.push_back(data_param.global_part_id_))) {
       LOG_WARN("failed to push back", K(ret));
     }
   }
 
-  if (OB_SUCC(ret) && index_param.need_part_) {
+  if (OB_SUCC(ret) && index_param.part_stat_param_.need_modify_) {
     for (int64_t i = 0; OB_SUCC(ret) && i < data_param.part_infos_.count(); ++i) {
       if (OB_FAIL(gather_part_ids.push_back(data_param.part_infos_.at(i).part_id_))) {
         LOG_WARN("failed to push back", K(ret));
@@ -419,7 +419,7 @@ int ObIndexStatsEstimator::get_all_need_gather_partition_ids(const ObTableStatPa
     }
   }
 
-  if (OB_SUCC(ret) && index_param.need_subpart_) {
+  if (OB_SUCC(ret) && index_param.subpart_stat_param_.need_modify_) {
     for (int64_t i = 0; OB_SUCC(ret) && i < data_param.subpart_infos_.count(); ++i) {
       if (OB_FAIL(gather_part_ids.push_back(data_param.subpart_infos_.at(i).part_id_))) {
         LOG_WARN("failed to push back", K(ret));

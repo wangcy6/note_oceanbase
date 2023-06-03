@@ -42,7 +42,7 @@ namespace share
 {
 /*
  * the columns of __all_freeze_info are as follows:
- * | frozen_scn | schema_version | cluster_version |
+ * | frozen_scn | schema_version | data_version |
  * we make sure the row_id of __all_freeze_info equals to frozen_scn
  */
 struct ObSimpleFrozenStatus
@@ -50,13 +50,19 @@ struct ObSimpleFrozenStatus
   ObSimpleFrozenStatus()
     : frozen_scn_(),
       schema_version_(INVALID_SCHEMA_VERSION), 
-      cluster_version_(0)
+      data_version_(0)
   {}
   ObSimpleFrozenStatus(const SCN &frozen_scn,
                        const int64_t schema_version,
+<<<<<<< HEAD
                        const int64_t cluster_version)
     : schema_version_(schema_version),
       cluster_version_(cluster_version)
+=======
+                       const int64_t data_version)
+    : schema_version_(schema_version),
+      data_version_(data_version)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   {
     frozen_scn_ = frozen_scn;
   }
@@ -65,20 +71,27 @@ struct ObSimpleFrozenStatus
   {
     frozen_scn_ = other.frozen_scn_;
     schema_version_ = other.schema_version_;
-    cluster_version_ = other.cluster_version_;
+    data_version_ = other.data_version_;
   }
 
   void reset()
   {
     frozen_scn_.reset();
     schema_version_ = INVALID_SCHEMA_VERSION;
-    cluster_version_ = 0;
+    data_version_ = 0;
   }
 
+<<<<<<< HEAD
   void set_initial_value(const int64_t cluster_version)
   {
     schema_version_ = ORIGIN_SCHEMA_VERSION;
     cluster_version_ = cluster_version;
+=======
+  void set_initial_value(const int64_t data_version)
+  {
+    schema_version_ = ORIGIN_SCHEMA_VERSION;
+    data_version_ = data_version;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     frozen_scn_ = share::SCN::base_scn();
   }
 
@@ -93,11 +106,11 @@ struct ObSimpleFrozenStatus
     return ((this == &other)
             || ((this->frozen_scn_ == other.frozen_scn_)
             && (this->schema_version_ == other.schema_version_)
-            && (this->cluster_version_ == other.cluster_version_)));
+            && (this->data_version_ == other.data_version_)));
   }
 
   TO_STRING_KV(N_FROZEN_VERSION, frozen_scn_, K_(schema_version),
-               K_(cluster_version));
+               K_(data_version));
 
   static const int64_t INVALID_SCHEMA_VERSION = 0;
   static const int64_t ORIGIN_SCHEMA_VERSION = 1;
@@ -108,7 +121,7 @@ struct ObSimpleFrozenStatus
 
   SCN frozen_scn_;
   int64_t schema_version_;
-  int64_t cluster_version_;
+  int64_t data_version_;
 
   OB_UNIS_VERSION(1);
 };
@@ -132,6 +145,12 @@ public:
       common::ObISQLClient &sql_proxy,
       const SCN &frozen_scn,
       common::ObIArray<ObSimpleFrozenStatus> &frozen_statuses);
+
+  // get the maximum frozen_scn which is smaller than or equal to the given @compaction_scn
+  int get_max_frozen_scn_smaller_or_equal_than(
+      common::ObISQLClient &sql_proxy,
+      const SCN &compaction_scn,
+      SCN &max_frozen_scn);
 
   int set_freeze_info(common::ObISQLClient &sql_proxy,
                       const ObSimpleFrozenStatus &frozen_status);

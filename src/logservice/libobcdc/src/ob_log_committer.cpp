@@ -82,7 +82,7 @@ ObLogCommitter::ObLogCommitter() :
     checkpoint_queue_(),
     checkpoint_queue_cond_(),
     checkpoint_queue_allocator_(),
-    last_output_checkpoint_(0),
+    last_output_checkpoint_(OB_INVALID_VERSION),
     global_heartbeat_seq_(0),
     global_heartbeat_info_queue_(),
     dml_part_trans_task_count_(0),
@@ -131,7 +131,7 @@ int ObLogCommitter::init(const int64_t start_seq,
     LOG_ERROR("init checkpoint_queue_allocator_ fail", KR(ret));
   } else {
     checkpoint_queue_allocator_.set_label(ObModIds::OB_LOG_COMMITTER_CHECKPOINT_QUEUE);
-    last_output_checkpoint_ = 0;
+    last_output_checkpoint_ = OB_INVALID_VERSION;
     global_heartbeat_seq_ = start_seq;
     commit_pid_ = 0;
     heartbeat_pid_ = 0;
@@ -167,7 +167,7 @@ void ObLogCommitter::destroy()
   (void)checkpoint_queue_.destroy();
   checkpoint_queue_allocator_.destroy();
 
-  last_output_checkpoint_ = 0;
+  last_output_checkpoint_ = OB_INVALID_VERSION;
   global_heartbeat_seq_ = 0;
   (void)global_heartbeat_info_queue_.destroy();
 
@@ -217,7 +217,7 @@ void ObLogCommitter::stop()
       int pthread_ret = pthread_join(commit_pid_, NULL);
 
       if (0 != pthread_ret) {
-        LOG_ERROR("join Committer commit thread fail", K(commit_pid_), KERRNOMSG(pthread_ret));
+        LOG_ERROR_RET(OB_ERR_SYS, "join Committer commit thread fail", K(commit_pid_), KERRNOMSG(pthread_ret));
       } else {
         LOG_INFO("stop Committer commit thread succ");
       }
@@ -229,7 +229,7 @@ void ObLogCommitter::stop()
       int pthread_ret = pthread_join(heartbeat_pid_, NULL);
 
       if (0 != pthread_ret) {
-        LOG_ERROR("join Committer HEARTBEAT thread fail", K(heartbeat_pid_), KERRNOMSG(pthread_ret));
+        LOG_ERROR_RET(OB_ERR_SYS, "join Committer HEARTBEAT thread fail", K(heartbeat_pid_), KERRNOMSG(pthread_ret));
       } else {
         LOG_INFO("stop Committer HEARTBEAT thread succ");
       }
@@ -313,7 +313,7 @@ int ObLogCommitter::push(PartTransTask *task,
     if (OB_FAIL(handle_not_served_trans_(*task))) {
       LOG_ERROR("handle_not_served_trans_ fail", KR(ret), KPC(task));
     }
-  } else if (task->is_ls_table_trans()) {
+  } else if (task->is_ls_op_trans()) {
     if (OB_FAIL(push_ls_table_task_(*task))) {
       LOG_ERROR("push_ls_table_task_ fail", KR(ret), KPC(task));
     }
@@ -417,7 +417,7 @@ int ObLogCommitter::recycle_task_directly_(PartTransTask &task, const bool can_a
     if (OB_NOT_NULL(resource_collector_)
         && OB_SUCCESS != (revert_ret = resource_collector_->revert(&task))) {
       if (OB_IN_STOP_STATE != revert_ret) {
-        LOG_ERROR("revert HEARTBEAT task fail", K(revert_ret), K(task));
+        LOG_ERROR("revert PartTransTask fail", K(revert_ret), K(task));
       }
       ret = OB_SUCCESS == ret ? revert_ret : ret;
     }
@@ -451,7 +451,7 @@ int ObLogCommitter::push_offline_ls_task_(PartTransTask &task)
 {
   int ret = OB_SUCCESS;
 
-  // TenantLSID should be valid
+  // logservice::TenantLSID should be valid
   if (OB_UNLIKELY(! task.get_tls_id().is_valid())) {
     ret = OB_INVALID_ERROR;
     LOG_ERROR("invalid offline ls task", KR(ret), K(task));
@@ -465,7 +465,7 @@ int ObLogCommitter::push_ls_table_task_(PartTransTask &task)
 {
   int ret = OB_SUCCESS;
 
-  // TenantLSID should be valid
+  // logservice::TenantLSID should be valid
   if (OB_UNLIKELY(! task.get_tls_id().is_valid())) {
     ret = OB_INVALID_ERROR;
     LOG_ERROR("invalid ls_table task", KR(ret), K(task));
@@ -639,7 +639,7 @@ int ObLogCommitter::handle_offline_checkpoint_task_(CheckpointTask &task)
     ret = OB_ERR_UNEXPECTED;
   } else {
     // See alloc_checkpoint_task_allocate_memory for details
-    const TenantLSID &tls_id = task.tenant_ls_id_;;
+    const logservice::TenantLSID &tls_id = task.tenant_ls_id_;
 
     // Go offline and reclaim the partition resources, requiring a successful recovery
     // Since the previous data has been exported, there are no transaction dependencies, so the recovery must be successful
@@ -1090,7 +1090,7 @@ int ObLogCommitter::handle_dml_task_(PartTransTask *participants)
 
     // Place the Binlog Record chain in the user queue
     // Binlog Record may be recycled at any time
-    if (OB_SUCCESS == ret) {
+    if (OB_SUCC(ret)) {
       if (OB_FAIL(commit_binlog_record_list_(*trans_ctx, cluster_id, valid_part_trans_task_count,
               tenant_id, trans_commit_version))) {
         if (OB_IN_STOP_STATE != ret) {
@@ -1125,7 +1125,7 @@ int ObLogCommitter::handle_dml_task_(PartTransTask *participants)
 int ObLogCommitter::update_tenant_trans_commit_version_(const PartTransTask &participants)
 {
   int ret = OB_SUCCESS;
-  const TenantLSID &tls_id = participants.get_tls_id();
+  const logservice::TenantLSID &tls_id = participants.get_tls_id();
   const int64_t trans_commit_version = participants.get_trans_commit_version();
   const transaction::ObTransID &tx_id = participants.get_trans_id();
 
@@ -1202,7 +1202,7 @@ int ObLogCommitter::after_trans_handled_(PartTransTask *participants)
   return ret;
 }
 
-int ObLogCommitter::do_trans_stat_(const TenantLSID &tls_id,
+int ObLogCommitter::do_trans_stat_(const logservice::TenantLSID &tls_id,
     const int64_t total_stmt_cnt)
 {
   int ret = OB_SUCCESS;
@@ -1249,8 +1249,13 @@ int ObLogCommitter::commit_binlog_record_list_(TransCtx &trans_ctx,
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(trans_ctx.has_valid_br(stop_flag_))) {
     if (OB_EMPTY_RESULT == ret) {
-      ret = OB_SUCCESS;
-      LOG_DEBUG("trans has no valid br to output, skip this trans", K(trans_ctx));
+      if (0 < trans_ctx.get_total_br_count()) {
+        // unexpected
+        LOG_ERROR("unexpected skiping trans with valid br", KR(ret), K(trans_ctx));
+      } else {
+        LOG_INFO("trans has no valid br to output, skip this trans", KR(ret), K(trans_ctx));
+        ret = OB_SUCCESS;
+      }
     } else {
       LOG_ERROR("failed to wait for valid br", KR(ret), K(trans_ctx));
     }
@@ -1409,6 +1414,9 @@ int ObLogCommitter::calculate_output_checkpoint_(int64_t &output_checkpoint)
     LOG_ERROR("tenant_mgr is NULL", KR(ret));
   } else if (OB_FAIL(tenant_mgr->get_min_output_checkpoint_for_all_tenant(output_checkpoint))) {
     LOG_ERROR("get_min_output_checkpoint_for_all_tenant failed", KR(ret), K(output_checkpoint));
+  } else if (OB_UNLIKELY(OB_INVALID_TIMESTAMP >= output_checkpoint)) {
+    LOG_INFO("IGNORE INVALID CHECKPOINT", K(output_checkpoint));
+    output_checkpoint = OB_INVALID_TIMESTAMP;
   } else if (OB_UNLIKELY(output_checkpoint < last_output_checkpoint_)) {
     // TODO: need handle new_tenant by create or restore.
     ret = OB_ERR_UNEXPECTED;

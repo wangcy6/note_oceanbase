@@ -103,12 +103,13 @@ int ObInnerSqlRpcP::process_write(
 {
   int ret = OB_SUCCESS;
   int64_t affected_rows = -1;
+  ResourceGroupGuard guard(transmit_arg.get_consumer_group_id());
   if (OB_FAIL(conn->execute_write(transmit_arg.get_tenant_id(), write_sql.ptr(), affected_rows))) {
     LOG_WARN("execute write failed", K(ret), K(transmit_arg), K(write_sql));
   } else {
     transmit_result.set_affected_rows(affected_rows);
     transmit_result.set_stmt_type(
-        static_cast<observer::ObInnerSQLConnection *>(conn)->get_session().get_stmt_type());
+    static_cast<observer::ObInnerSQLConnection *>(conn)->get_session().get_stmt_type());
   }
 
   return ret;
@@ -211,17 +212,120 @@ int ObInnerSqlRpcP::process_lock_table(sqlclient::ObISQLConnection *conn,
 {
   int ret = OB_SUCCESS;
   observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
-  ObInTransLockTableRequest lock_arg;
+  int64_t pos = 0;
+
+  if (GET_MIN_CLUSTER_VERSION() <= CLUSTER_VERSION_4_0_0_0) {
+    ObInTransLockTableRequest lock_arg;
+    if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+      LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+    } else {
+      ObLockTableRequest tmp_arg;
+      tmp_arg.owner_id_ = 0;
+      tmp_arg.lock_mode_ = lock_arg.lock_mode_;
+      tmp_arg.op_type_ = IN_TRANS_COMMON_LOCK;
+      tmp_arg.timeout_us_ = lock_arg.timeout_us_;
+      tmp_arg.table_id_ = lock_arg.table_id_;
+      if (OB_FAIL(inner_conn->lock_table(arg.get_tenant_id(),
+                                         tmp_arg))) {
+        LOG_WARN("lock table failed", K(ret), K(arg.get_tenant_id()), K(tmp_arg));
+      }
+    }
+  } else {
+    ObLockTableRequest lock_arg;
+    if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+      LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+    } else if (OB_FAIL(inner_conn->lock_table(arg.get_tenant_id(),
+                                              lock_arg))) {
+      LOG_WARN("lock table failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+    }
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::process_unlock_table(sqlclient::ObISQLConnection *conn,
+                                         const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObUnLockTableRequest lock_arg;
+  int64_t pos = 0;
+
+  if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(),
+                                   arg.get_inner_sql().length(), pos))) {
+    LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+  } else if (OB_FAIL(inner_conn->unlock_table(arg.get_tenant_id(),
+                                              lock_arg))) {
+    LOG_WARN("unlock table failed", K(ret), K(arg.get_tenant_id()),
+             K(lock_arg));
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::process_lock_partition(sqlclient::ObISQLConnection *conn,
+                                           const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObLockPartitionRequest lock_arg;
   int64_t pos = 0;
 
   if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
     LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
-  } else if (OB_FAIL(inner_conn->lock_table(
-                         arg.get_tenant_id(),
-                         lock_arg.table_id_,
-                         lock_arg.lock_mode_,
-                         lock_arg.timeout_us_))) {
-    LOG_WARN("lock table failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+  } else if (OB_FAIL(inner_conn->lock_partition(arg.get_tenant_id(), lock_arg))) {
+    LOG_WARN("lock partition failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::process_unlock_partition(sqlclient::ObISQLConnection *conn,
+                                             const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObUnLockPartitionRequest lock_arg;
+  int64_t pos = 0;
+
+  if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+    LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+  } else if (OB_FAIL(inner_conn->unlock_partition(arg.get_tenant_id(), lock_arg))) {
+    LOG_WARN("unlock partition failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::process_lock_subpartition(sqlclient::ObISQLConnection *conn,
+                                              const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObLockPartitionRequest lock_arg;
+  int64_t pos = 0;
+
+  if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+    LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+  } else if (OB_FAIL(inner_conn->lock_subpartition(arg.get_tenant_id(), lock_arg))) {
+    LOG_WARN("lock subpartition failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::process_unlock_subpartition(sqlclient::ObISQLConnection *conn,
+                                                const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObUnLockPartitionRequest lock_arg;
+  int64_t pos = 0;
+
+  if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+    LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+  } else if (OB_FAIL(inner_conn->unlock_subpartition(arg.get_tenant_id(), lock_arg))) {
+    LOG_WARN("unlock subpartition failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
   }
 
   return ret;
@@ -232,18 +336,137 @@ int ObInnerSqlRpcP::process_lock_tablet(sqlclient::ObISQLConnection *conn,
 {
   int ret = OB_SUCCESS;
   observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
-  ObInTransLockTabletRequest lock_arg;
+  int64_t pos = 0;
+
+  if (GET_MIN_CLUSTER_VERSION() <= CLUSTER_VERSION_4_0_0_0) {
+    ObInTransLockTabletRequest lock_arg;
+    if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+      LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+    } else {
+      ObLockTabletRequest tmp_arg;
+      tmp_arg.owner_id_ = 0;
+      tmp_arg.lock_mode_ = lock_arg.lock_mode_;
+      tmp_arg.op_type_ = IN_TRANS_COMMON_LOCK;
+      tmp_arg.timeout_us_ = lock_arg.timeout_us_;
+      tmp_arg.table_id_ = lock_arg.table_id_;
+      tmp_arg.tablet_id_ = lock_arg.tablet_id_;
+      if (OB_FAIL(inner_conn->lock_tablet(arg.get_tenant_id(), tmp_arg))) {
+        LOG_WARN("lock tablet failed", K(ret), K(arg.get_tenant_id()), K(tmp_arg));
+      }
+    }
+  } else {
+    ObLockTabletRequest lock_arg;
+    if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+      LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+    } else if (OB_FAIL(inner_conn->lock_tablet(arg.get_tenant_id(), lock_arg))) {
+      LOG_WARN("lock tablet failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+    }
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::process_unlock_tablet(sqlclient::ObISQLConnection *conn,
+                                          const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObUnLockTabletRequest lock_arg;
   int64_t pos = 0;
 
   if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
     LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
-  } else if (OB_FAIL(inner_conn->lock_tablet(
-                         arg.get_tenant_id(),
-                         lock_arg.table_id_,
-                         lock_arg.tablet_id_,
-                         lock_arg.lock_mode_,
-                         lock_arg.timeout_us_))) {
-    LOG_WARN("lock tablet failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+  } else if (OB_FAIL(inner_conn->unlock_tablet(arg.get_tenant_id(), lock_arg))) {
+    LOG_WARN("unlock tablet failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::create_tmp_session(
+    uint64_t tenant_id,
+    sql::ObSQLSessionInfo *&tmp_session,
+    sql::ObFreeSessionCtx &free_session_ctx,
+    const bool is_oracle_mode)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(NULL != tmp_session)) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("tmp_session is not null.", K(ret));
+  } else if (NULL == GCTX.session_mgr_) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session manager is NULL", K(ret));
+  } else {
+    uint32_t sid = sql::ObSQLSessionInfo::INVALID_SESSID;
+    uint64_t proxy_sid = 0;
+    if (OB_FAIL(GCTX.session_mgr_->create_sessid(sid))) {
+      LOG_WARN("alloc session id failed", K(ret));
+    } else if (OB_FAIL(GCTX.session_mgr_->create_session(tenant_id, sid, proxy_sid,
+                                                         ObTimeUtility::current_time(),
+                                                         tmp_session))) {
+      GCTX.session_mgr_->mark_sessid_unused(sid);
+      tmp_session = NULL;
+      LOG_WARN("create session failed", K(ret), K(sid));
+    } else {
+      const bool is_extern_session = true;
+      if (OB_NOT_NULL(tmp_session)
+            && OB_FAIL(observer::ObInnerSQLConnection::init_session_info(
+            tmp_session,
+            is_extern_session,
+            is_oracle_mode,
+            false))) {
+        LOG_WARN("fail to init session info", K(ret), KPC(tmp_session));
+      }
+      free_session_ctx.sessid_ = sid;
+      free_session_ctx.proxy_sessid_ = proxy_sid;
+    }
+  }
+  return ret;
+}
+
+void ObInnerSqlRpcP::cleanup_tmp_session(
+    sql::ObSQLSessionInfo *&tmp_session,
+    sql::ObFreeSessionCtx &free_session_ctx)
+{
+  if (NULL != GCTX.session_mgr_ && NULL != tmp_session) {
+    tmp_session->set_session_sleep();
+    GCTX.session_mgr_->revert_session(tmp_session);
+    GCTX.session_mgr_->free_session(free_session_ctx);
+    tmp_session = NULL;
+    GCTX.session_mgr_->mark_sessid_unused(free_session_ctx.sessid_);
+  }
+  ObActiveSessionGuard::setup_default_ash(); // enforce cleanup for future RPC cases
+}
+
+int ObInnerSqlRpcP::process_lock_obj(sqlclient::ObISQLConnection *conn,
+                                     const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObLockObjRequest lock_arg;
+  int64_t pos = 0;
+
+  if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+    LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+  } else if (OB_FAIL(inner_conn->lock_obj(arg.get_tenant_id(), lock_arg))) {
+    LOG_WARN("lock object failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
+  }
+
+  return ret;
+}
+
+int ObInnerSqlRpcP::process_unlock_obj(sqlclient::ObISQLConnection *conn,
+                                       const ObInnerSQLTransmitArg &arg)
+{
+  int ret = OB_SUCCESS;
+  observer::ObInnerSQLConnection *inner_conn = static_cast<observer::ObInnerSQLConnection *>(conn);
+  ObUnLockObjRequest lock_arg;
+  int64_t pos = 0;
+
+  if (OB_FAIL(lock_arg.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
+    LOG_WARN("deserialize multi source data str failed", K(ret), K(arg), K(pos));
+  } else if (OB_FAIL(inner_conn->unlock_obj(arg.get_tenant_id(), lock_arg))) {
+    LOG_WARN("unlock object failed", K(ret), K(arg.get_tenant_id()), K(lock_arg));
   }
 
   return ret;
@@ -363,6 +586,7 @@ int ObInnerSqlRpcP::process()
     } else if (OB_FAIL(pool->acquire(transmit_arg.get_conn_id(), transmit_arg.get_is_oracle_mode(),
                ObInnerSQLTransmitArg::OPERATION_TYPE_ROLLBACK == transmit_arg.get_operation_type(),
                conn, tmp_session))) {
+<<<<<<< HEAD
       cleanup_tmp_session(tmp_session, free_session_ctx);
       LOG_WARN("failed to acquire inner connection", K(ret), K(transmit_arg));
     }
@@ -377,6 +601,33 @@ int ObInnerSqlRpcP::process()
                                       ObTimeUtility::current_time(),
                                       obmysql::COM_QUERY))) {
         LOG_WARN("failed to set tmp session active", K(ret));
+=======
+      LOG_WARN("failed to acquire inner connection", K(ret), K(transmit_arg));
+    }
+    /* init session info */
+    if (OB_SUCC(ret) && OB_NOT_NULL(tmp_session)) {
+      uint64_t tenant_id = transmit_arg.get_tenant_id();
+      share::schema::ObSchemaGetterGuard schema_guard;
+      const ObSimpleTenantSchema *tenant_schema = NULL;
+      if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(tenant_id, schema_guard))) {
+        LOG_WARN("fail to get schema guard", K(ret), K(tenant_id));
+      } else if (OB_FAIL(schema_guard.get_tenant_info(tenant_id, tenant_schema))) {
+        LOG_WARN("fail to get tenant schema", K(ret), K(tenant_id));
+      } else if (OB_ISNULL(tenant_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("tenant schema is null", K(ret));
+      } else {
+        tmp_session->set_current_trace_id(ObCurTraceId::get_trace_id());
+        tmp_session->switch_tenant_with_name(transmit_arg.get_tenant_id(), tenant_schema->get_tenant_name_str());
+        ObString sql_stmt(sql_str.ptr());
+        if (OB_FAIL(tmp_session->set_session_active(
+            sql_stmt,
+            0,  /* ignore this parameter */
+            ObTimeUtility::current_time(),
+            obmysql::COM_QUERY))) {
+          LOG_WARN("failed to set tmp session active", K(ret));
+        }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       }
     }
     if (OB_FAIL(ret)) {
@@ -419,7 +670,7 @@ int ObInnerSqlRpcP::process()
           }
           case ObInnerSQLTransmitArg::OPERATION_TYPE_EXECUTE_READ: {
             if (OB_FAIL(process_read(conn, sql_str, transmit_arg, transmit_result))) {
-              LOG_WARN("process_read failed", K(ret), K(transmit_arg), K(sql_str));
+              LOG_WARN("process_read failed", K(ret), K(sql_str));
             }
             break;
           }
@@ -435,9 +686,57 @@ int ObInnerSqlRpcP::process()
             }
             break;
           }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_TABLE: {
+            if (OB_FAIL(process_unlock_table(conn, transmit_arg))) {
+              LOG_WARN("process unlock table failed", K(ret));
+            }
+            break;
+          }
           case ObInnerSQLTransmitArg::OPERATION_TYPE_LOCK_TABLET: {
             if (OB_FAIL(process_lock_tablet(conn, transmit_arg))) {
-              LOG_WARN("process lock tableet failed", K(ret));
+              LOG_WARN("process lock tablet failed", K(ret));
+            }
+            break;
+          }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_TABLET: {
+            if (OB_FAIL(process_unlock_tablet(conn, transmit_arg))) {
+              LOG_WARN("process unlock tablet failed", K(ret));
+            }
+            break;
+          }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_LOCK_OBJ: {
+            if (OB_FAIL(process_lock_obj(conn, transmit_arg))) {
+              LOG_WARN("process lock obj failed", K(ret));
+            }
+            break;
+          }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_OBJ: {
+            if (OB_FAIL(process_unlock_obj(conn, transmit_arg))) {
+              LOG_WARN("process unlock obj failed", K(ret));
+            }
+            break;
+          }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_LOCK_PART: {
+            if (OB_FAIL(process_lock_partition(conn, transmit_arg))) {
+              LOG_WARN("process lock partition failed", K(ret));
+            }
+            break;
+          }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_PART: {
+            if (OB_FAIL(process_unlock_partition(conn, transmit_arg))) {
+              LOG_WARN("process unlock partition failed", K(ret));
+            }
+            break;
+          }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_LOCK_SUBPART: {
+            if (OB_FAIL(process_lock_subpartition(conn, transmit_arg))) {
+              LOG_WARN("process lock subpartition failed", K(ret));
+            }
+            break;
+          }
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_SUBPART: {
+            if (OB_FAIL(process_unlock_subpartition(conn, transmit_arg))) {
+              LOG_WARN("process unlock subpartition failed", K(ret));
             }
             break;
           }
@@ -451,11 +750,16 @@ int ObInnerSqlRpcP::process()
     }
     if (OB_NOT_NULL(conn)) {
       bool need_reuse_conn = true;
-      const bool in_trans = OB_INVALID_ID != transmit_arg.get_conn_id() || ObInnerSQLTransmitArg::OPERATION_TYPE_START_TRANSACTION == transmit_arg.get_operation_type();
-      if (!in_trans // need to release conn if not in a trans
+      const bool is_start_trans = ObInnerSQLTransmitArg::OPERATION_TYPE_START_TRANSACTION
+                                    == transmit_arg.get_operation_type();
+      const bool in_trans = is_start_trans || OB_INVALID_ID != transmit_arg.get_conn_id();
+      if (!in_trans
+          // need to release conn if not in a trans
           || ObInnerSQLTransmitArg::OPERATION_TYPE_ROLLBACK == transmit_arg.get_operation_type()
           || ObInnerSQLTransmitArg::OPERATION_TYPE_COMMIT == transmit_arg.get_operation_type()
           // need to release conn after commit or rollback
+          || (OB_FAIL(ret) && is_start_trans)
+          // need to release conn if start_trans was failed
           ) {
         need_reuse_conn = false;
       }
@@ -494,6 +798,23 @@ int ObInnerSqlRpcP::set_session_param_to_conn(
     }
   }
   return ret;
+}
+
+ResourceGroupGuard::ResourceGroupGuard(const int32_t group_id)
+  : group_change_(false), old_group_id_(0)
+{
+  if (group_id >= RESOURCE_GROUP_START_ID) {
+    old_group_id_ = THIS_WORKER.get_group_id();
+    THIS_WORKER.set_group_id(group_id);
+    group_change_ = true;
+  }
+}
+
+ResourceGroupGuard::~ResourceGroupGuard()
+{
+  if (group_change_) {
+    THIS_WORKER.set_group_id(old_group_id_);
+  }
 }
 
 }

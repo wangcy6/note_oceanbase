@@ -388,7 +388,7 @@ void ObIOBenchRunner::run1()
     io_info.size_ = load_.size_;
     io_info.buf_ = ObIOMode::READ == load_.mode_ ? nullptr : write_buf_;
     io_info.flag_.set_mode(load_.mode_);
-    io_info.flag_.set_category(ObIOCategory::SYS_IO);
+    io_info.flag_.set_group_id(0);
     io_info.flag_.set_wait_event(ObIOMode::READ == load_.mode_ ?
         ObWaitEventIds::DB_FILE_DATA_READ : ObWaitEventIds::DB_FILE_COMPACT_WRITE);
     io_info.flag_.set_unlimited(true);
@@ -470,7 +470,7 @@ void ObIOBenchController::run1()
   finish_ts_ = 0;
   ret_code_ = OB_SUCCESS;
   // prepare io bench runner
-  const double MIN_FREE_SPACE_PERCENTAGE = 0.1;
+  const double MIN_FREE_SPACE_PERCENTAGE = 0.1; // if auto extend is on, _datafile_usage_upper_bound_percentage maybe less than (1 - 0.1 = 0.9), may cause OB_SERVER_OUTOF_DISK_SPACE
   const int64_t MIN_CALIBRATION_BLOCK_COUNT = 1024L * 1024L * 1024L / OB_DEFAULT_MACRO_BLOCK_SIZE;
   const int64_t MAX_CALIBRATION_BLOCK_COUNT = 20L * 1024L * 1024L * 1024L / OB_DEFAULT_MACRO_BLOCK_SIZE;
   const int64_t free_block_count = OB_SERVER_BLOCK_MGR.get_free_macro_block_count();
@@ -650,7 +650,7 @@ int ObIOCalibration::get_io_ability(ObIOAbility &io_ability)
   return ret;
 }
 
-int ObIOCalibration::get_iops_scale(const ObIOMode mode, const int64_t size, double &iops_scale)
+int ObIOCalibration::get_iops_scale(const ObIOMode mode, const int64_t size, double &iops_scale, bool &is_io_ability_valid)
 {
   int ret = OB_SUCCESS;
   iops_scale = 0;
@@ -663,6 +663,7 @@ int ObIOCalibration::get_iops_scale(const ObIOMode mode, const int64_t size, dou
     DRWLock::RDLockGuard guard(lock_);
     if (!io_ability_.is_valid()) {
       ret = OB_ERR_UNEXPECTED;
+      is_io_ability_valid = false;
     } else {
       double iops = 0;
       if (OB_FAIL(io_ability_.get_iops(mode, size, iops))) {
@@ -810,7 +811,7 @@ int ObIOCalibration::parse_calibration_table(ObIOAbility &io_ability)
   sqlclient::ObMySQLResult *result = nullptr;
   SMART_VAR(ObISQLClient::ReadResult, res) {
     ObSqlString sql_string;
-    char ip_str[32] = { 0 };
+    char ip_str[INET6_ADDRSTRLEN] = { 0 };
     const ObAddr &self_addr = OBSERVER.get_self();
     if (OB_UNLIKELY(!self_addr.ip_to_string(ip_str, sizeof(ip_str)))) {
       ret = OB_ERR_UNEXPECTED;

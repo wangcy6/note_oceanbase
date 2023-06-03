@@ -49,17 +49,24 @@ int calc_not_between_expr(const ObExpr &expr,
   } else {
     bool left_cmp_succ = true;  // is val < left true or not
     bool right_cmp_succ = true; // is right < val true or not
+    int cmp_ret = 0;
     if (!left->is_null()) {
-      left_cmp_succ =
-        (reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[0]))(*val, *left) < 0 ?
-          true : false;
+      if (OB_FAIL((reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[0]))(*val, *left, cmp_ret))) {
+        LOG_WARN("cmp left failed", K(ret));
+      } else {
+        left_cmp_succ = cmp_ret < 0 ? true : false;
+      }
     }
-    if (left->is_null() || (!left_cmp_succ && !right->is_null())) {
-      right_cmp_succ =
-        (reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[1]))(*right, *val) < 0 ?
-          true : false;
+    if (OB_FAIL(ret)) {
+    } else if (left->is_null() || (!left_cmp_succ && !right->is_null())) {
+      if (OB_FAIL((reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[1]))(*right, *val, cmp_ret))) {
+        LOG_WARN("cmp right failed", K(ret));
+      } else {
+        right_cmp_succ = cmp_ret < 0 ? true : false;
+      }
     }
-    if ((left->is_null() && !right_cmp_succ) || (right->is_null() && !left_cmp_succ)) {
+    if (OB_FAIL(ret)) {
+    } else if ((left->is_null() && !right_cmp_succ) || (right->is_null() && !left_cmp_succ)) {
       res_datum.set_null();
     } else if (!left_cmp_succ && !right_cmp_succ) {
       res_datum.set_int32(0);
@@ -91,17 +98,25 @@ int ObExprNotBetween::cg_expr(ObExprCGCtx &expr_cg_ctx,
     const ObDatumMeta &right_meta = rt_expr.args_[2]->datum_meta_;
     const ObCollationType cmp_cs_type =
       raw_expr.get_result_type().get_calc_collation_type();
+    const bool has_lob_header1 = rt_expr.args_[0]->obj_meta_.has_lob_header() ||
+                                 rt_expr.args_[1]->obj_meta_.has_lob_header();
+    const bool has_lob_header2 = rt_expr.args_[0]->obj_meta_.has_lob_header() ||
+                                 rt_expr.args_[2]->obj_meta_.has_lob_header();
     if (OB_ISNULL(cmp_func_1 = ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
                                                       val_meta.type_, left_meta.type_,
+                                                      val_meta.scale_, left_meta.scale_,
                                                       is_oracle_mode(),
-                                                      cmp_cs_type))) {
+                                                      cmp_cs_type,
+                                                      has_lob_header1))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get_datum_expr_cmp_func failed", K(ret), K(left_meta), K(val_meta),
                 K(is_oracle_mode()), K(rt_expr));
     } else if (OB_ISNULL(cmp_func_2 = ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
                                                         right_meta.type_, val_meta.type_,
+                                                        right_meta.scale_, val_meta.scale_,
                                                         is_oracle_mode(),
-                                                        cmp_cs_type))) {
+                                                        cmp_cs_type,
+                                                        has_lob_header2))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get_datum_expr_cmp_func failed", K(ret), K(val_meta), K(right_meta),
                 K(is_oracle_mode()), K(rt_expr));

@@ -216,7 +216,7 @@ REG_SER_FUNC_ARRAY(OB_SFA_SQL_EXPR_ABS_EVAL, abs_funcs, ARRAYSIZEOF(abs_funcs));
 
 
 ObExprAbs::ObExprAbs(ObIAllocator &alloc)
-    : ObExprOperator(alloc, T_OP_ABS, N_ABS, 1, NOT_ROW_DIMENSION),
+    : ObExprOperator(alloc, T_OP_ABS, N_ABS, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION),
       func_(NULL) {}
 
 int ObExprAbs::deserialize(const char *buf, const int64_t data_len, int64_t &pos)
@@ -271,7 +271,9 @@ int ObExprAbs::calc_result_type1(ObExprResType &type, ObExprResType &type1,
     // result type
     ObObjType itype;
     if (OB_SUCC(ObExprResultTypeUtil::get_abs_result_type(itype, type1.get_type()))) {
-      if (ObMaxType == itype) {
+      if (lib::is_oracle_mode() && ob_is_json(type1.get_type())) {
+        ret = OB_ERR_INVALID_TYPE_FOR_OP;
+      } else if (ObMaxType == itype) {
         ret = OB_ERR_INVALID_TYPE_FOR_OP;
       } else {
         type.set_type(itype);
@@ -283,6 +285,9 @@ int ObExprAbs::calc_result_type1(ObExprResType &type, ObExprResType &type1,
     if (lib::is_oracle_mode() && (type1.is_varchar_or_char() || type1.is_number_float())) {
       type.set_precision(PRECISION_UNKNOWN_YET);
       type.set_scale(ORA_NUMBER_SCALE_UNKNOWN_YET);
+    } else if (lib::is_mysql_mode() && type.is_double() && type1.get_scale() != SCALE_UNKNOWN_YET) {
+      type.set_scale(type1.get_scale());
+      type.set_precision(static_cast<ObPrecision>(ObMySQLUtil::float_length(type1.get_scale())));
     } else {
       type.set_accuracy(type1.get_accuracy());
     }

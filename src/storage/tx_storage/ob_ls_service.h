@@ -55,6 +55,7 @@ public:
            observer::ObIMetaReport *reporter);
   int start();
   int stop();
+  int wait();
   void destroy();
   bool safe_to_destroy();
   void inc_ls_safe_destroy_task_cnt();
@@ -115,6 +116,9 @@ public:
   // use guard just like a pointer of ObLSIterator
   int get_ls_iter(common::ObSharedGuard<ObLSIterator> &guard, ObLSGetMod mod);
 
+  // get all ls ids
+  int get_ls_ids(common::ObIArray<share::ObLSID> &ls_id_array);
+
   // tablet operation
   int create_tablet(const obrpc::ObBatchCreateTabletArg &batch_arg,
                     obrpc::ObCreateTabletBatchRes &result);
@@ -156,7 +160,6 @@ private:
       CREATE_STATE_FINISH
   };
   int inner_create_ls_(const share::ObLSID &lsid,
-                       const ObReplicaType replica_type,
                        const ObMigrationStatus &migration_status,
                        const share::ObLSRestoreStatus &restore_status,
                        const share::SCN &create_scn,
@@ -178,6 +181,8 @@ private:
   int alloc_ls_(ObLS *&ls);
   bool is_ls_to_restore_(const obrpc::ObCreateLSArg &arg) const;
   bool need_create_inner_tablets_(const obrpc::ObCreateLSArg &arg) const;
+  int get_restore_status_(
+      share::ObLSRestoreStatus &restore_status);
 
 private:
   bool is_inited_;

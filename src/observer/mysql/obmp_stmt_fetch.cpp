@@ -17,6 +17,7 @@
 #include "lib/profile/ob_perf_event.h"
 #include "lib/timezone/ob_time_convert.h"
 #include "observer/mysql/obsm_utils.h"
+#include "observer/mysql/obmp_utils.h"
 #include "rpc/ob_request.h"
 #include "rpc/obmysql/ob_mysql_packet.h"
 #include "rpc/obmysql/ob_mysql_util.h"
@@ -42,6 +43,8 @@
 #include "rpc/obmysql/packet/ompk_resheader.h"
 #include "rpc/obmysql/packet/ompk_field.h"
 #include "observer/mysql/obmp_stmt_send_piece_data.h"
+#include "share/ob_lob_access_utils.h"
+#include "sql/plan_cache/ob_ps_cache.h"
 
 namespace oceanbase
 {
@@ -175,7 +178,7 @@ int ObMPStmtFetch::do_process(ObSQLSessionInfo &session)
     ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
     int64_t fetch_limit = OB_INVALID_COUNT == fetch_rows_ ? INT64_MAX : fetch_rows_;
     int64_t true_row_num = 0;
-    if (enable_sql_audit) {
+    if (enable_perf_event) {
       audit_record.exec_record_.record_start(di);
     }
     if (OB_ISNULL(gctx_.sql_engine_)) {
@@ -189,10 +192,8 @@ int ObMPStmtFetch::do_process(ObSQLSessionInfo &session)
       exec_start_timestamp_ = ObTimeUtility::current_time();
     }
     if (OB_SUCC(ret)) {
-      if (enable_perf_event) {
-        //监控项统计开始
-        exec_start_timestamp_ = ObTimeUtility::current_time();
-      }
+      //监控项统计开始
+      exec_start_timestamp_ = ObTimeUtility::current_time();
       // 本分支内如果出错，全部会在response_result内部处理妥当
       // 无需再额外处理回复错误包
       session.set_current_execution_id(execution_id);
@@ -212,17 +213,27 @@ int ObMPStmtFetch::do_process(ObSQLSessionInfo &session)
         ret = OB_SUCCESS;
       }
     }
+    //监控项统计结束
+    exec_end_timestamp_ = ObTimeUtility::current_time();
+
+    // some statistics must be recorded for plan stat, even though sql audit disabled
+    bool first_record = (1 == audit_record.try_cnt_);
+    ObExecStatUtils::record_exec_timestamp(*this, first_record, audit_record.exec_timestamp_);
+    audit_record.exec_timestamp_.update_stage_time();
+
     if (enable_perf_event) {
-      //监控项统计结束
-      exec_end_timestamp_ = ObTimeUtility::current_time();
+      audit_record.exec_record_.record_end(di);
       record_stat(stmt::T_EXECUTE, exec_end_timestamp_);
+      audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
+      audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
+      audit_record.update_event_stage_state();
     }
+
     if (enable_sql_audit) {
       audit_record.affected_rows_ = fetch_limit;
       audit_record.return_rows_ = true_row_num;
-      audit_record.exec_record_.record_end(di);
       audit_record.ps_stmt_id_ = cursor_id_;
-      bool first_record = (1 == audit_record.try_cnt_);
+      audit_record.is_perf_event_closed_ = !lib::is_diagnose_info_enabled();
       if (OB_NOT_NULL(cursor)
           && cursor->is_ps_cursor()) {
         ObPsStmtInfoGuard guard;
@@ -231,29 +242,17 @@ int ObMPStmtFetch::do_process(ObSQLSessionInfo &session)
         if (OB_SUCC(session.get_inner_ps_stmt_id(cursor_id_, inner_stmt_id))
               && OB_SUCC(session.get_ps_cache()->get_stmt_info_guard(inner_stmt_id, guard))
               && OB_NOT_NULL(ps_info = guard.get_stmt_info())) {
+          audit_record.ps_inner_stmt_id_ = inner_stmt_id;
           audit_record.sql_ = const_cast<char *>(ps_info->get_ps_sql().ptr());
           audit_record.sql_len_ = min(ps_info->get_ps_sql().length(), OB_MAX_SQL_LENGTH);
         } else {
-          LOG_INFO("get sql fail in fetch", K(ret), K(cursor_id_), K(cursor->get_id()));
+          LOG_WARN("get sql fail in fetch", K(ret), K(cursor_id_), K(cursor->get_id()));
         }
       }
-      ObExecStatUtils::record_exec_timestamp(*this,
-          (1 == audit_record.try_cnt_), // first_record
-          audit_record.exec_timestamp_);
-      //更新阶段累加时间
-      audit_record.update_stage_stat();
     }
     session.partition_hit().freeze();
     session.set_show_warnings_buf(ret); // TODO: 挪个地方性能会更好，减少部分wb拷贝
 
-    //set read_only
-    if (OB_SUCC(ret)) {
-      if (session.get_in_transaction()) {
-        //do nothing
-      } else {
-        session.set_has_exec_write_stmt(false);
-      }
-    }
     clear_wb_content(session);
     // 流式审计信息交给dbms_cursor来做
     ObSQLUtils::handle_audit_record(false/*no need retry*/, EXECUTE_PS_FETCH, session);
@@ -396,12 +395,21 @@ int ObMPStmtFetch::response_result(pl::ObPLCursorInfo &cursor,
               }
             } else {
               tmp_exec_ctx.set_my_session(&session);
+              tmp_exec_ctx.set_mem_attr(ObMemAttr(session.get_effective_tenant_id(),
+                                                  ObModIds::OB_SQL_EXEC_CONTEXT,
+                                                  ObCtxIds::EXECUTE_CTX_ID));
               exec_ctx = &tmp_exec_ctx;
               if (OB_ISNULL(cursor.get_spi_cursor())) {
                 ret = OB_ERR_UNEXPECTED;
                 LOG_WARN("cursor result set is null.", K(ret), K(cursor.get_id()));
               } else {
                 ObSPICursor *spi_cursor = cursor.get_spi_cursor();
+                // ps cursor position is be record in current_position
+                // ref cursor position is be record in get_spi_cursor()->cur_
+                if (!cursor.is_ps_cursor() && cursor.get_spi_cursor()->cur_ > 0
+                      && cursor.get_current_position() != cursor.get_spi_cursor()->cur_) {
+                  cursor.set_current_position(cursor.get_spi_cursor()->cur_ - 1);
+                }
                 cur = cursor.get_current_position();
                 max_count = spi_cursor->row_store_.get_row_cnt();
                 if (max_count > 0) {
@@ -578,8 +586,6 @@ int ObMPStmtFetch::response_result(pl::ObPLCursorInfo &cursor,
             LOG_WARN("failed to alloc easy buf", K(ret));
           } else if (!has_ok_packet() && OB_FAIL(update_last_pkt_pos())) {
             LOG_WARN("failed to update last packet pos", K(ret));
-          } else if (OB_FAIL(response_packet(eofp, &session))) {
-            LOG_WARN("response packet fail", K(ret));
           } else if (last_row && !cursor.is_scrollable() 
                               && !cursor.is_streaming()
                               && cursor.is_ps_cursor()
@@ -609,8 +615,12 @@ int ObMPStmtFetch::response_result(pl::ObPLCursorInfo &cursor,
             }
             ok_param.is_partition_hit_ = session.partition_hit().get_bool();
             ok_param.has_more_result_ = false;
-            if (OB_FAIL(send_ok_packet(session, ok_param))) {
+            if (OB_FAIL(send_ok_packet(session, ok_param, &eofp))) {
               LOG_WARN("fail to send ok packt", K(ok_param), K(ret));
+            }
+          } else {
+            if (OB_FAIL(response_packet(eofp, &session))) {
+              LOG_WARN("response packet fail", K(ret));
             }
           }
         }
@@ -632,43 +642,38 @@ int ObMPStmtFetch::response_result(pl::ObPLCursorInfo &cursor,
 int ObMPStmtFetch::process_fetch_stmt(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
-  bool use_sess_trace = false;
   // 执行setup_wb后，所有WARNING都会写入到当前session的WARNING BUFFER中
   setup_wb(session);
   ObSessionStatEstGuard stat_est_guard(get_conn()->tenant_->id(), session.get_sessid());
-  if (OB_FAIL(session.is_use_trace_log(use_sess_trace))) {
-    LOG_WARN("check usr trace log failed.", K(ret));
+  const bool enable_trace_log = lib::is_trace_log_enabled();
+  if (enable_trace_log) {
+    //set session log_level.Must use ObThreadLogLevelUtils::clear() in pair
+    ObThreadLogLevelUtils::init(session.get_log_id_level_map());
+  }
+  // obproxy may use 'SET @@last_schema_version = xxxx' to set newest schema,
+  // observer will force refresh schema if local_schema_version < last_schema_version;
+  if (OB_FAIL(check_and_refresh_schema(session.get_login_tenant_id(),
+                                       session.get_effective_tenant_id()))) {
+    LOG_WARN("failed to check_and_refresh_schema", K(ret));
   } else {
-    const bool enable_trace_log = lib::is_trace_log_enabled();
-    if (enable_trace_log) {
-      //set session log_level.Must use ObThreadLogLevelUtils::clear() in pair
-      ObThreadLogLevelUtils::init(session.get_log_id_level_map());
-    }
-    // obproxy may use 'SET @@last_schema_version = xxxx' to set newest schema,
-    // observer will force refresh schema if local_schema_version < last_schema_version;
-    if (OB_FAIL(check_and_refresh_schema(session.get_login_tenant_id(),
-                                         session.get_effective_tenant_id()))) {
-      LOG_WARN("failed to check_and_refresh_schema", K(ret));
+    //每次执行不同sql都需要更新
+    if (OB_FAIL(update_transmission_checksum_flag(session))) {
+      LOG_WARN("update transmisson checksum flag failed", K(ret));
     } else {
-      //每次执行不同sql都需要更新
-      if (OB_FAIL(update_transmission_checksum_flag(session))) {
-        LOG_WARN("update transmisson checksum flag failed", K(ret));
-      } else {
-        // do the real work
-        ret = do_process(session);
-      }
+      // do the real work
+      ret = do_process(session);
     }
-    if (enable_trace_log) {
-      ObThreadLogLevelUtils::clear();
-    }
-    const int64_t debug_sync_timeout = GCONF.debug_sync_timeout;
-    if (debug_sync_timeout > 0) {
-      // ignore thread local debug sync actions to session actions failed
-      int tmp_ret = OB_SUCCESS;
-      tmp_ret = GDS.collect_result_actions(session.get_debug_sync_actions());
-      if (OB_UNLIKELY(OB_SUCCESS != tmp_ret)) {
-        LOG_WARN("set thread local debug sync actions to session actions failed", K(tmp_ret));
-      }
+  }
+  if (enable_trace_log) {
+    ObThreadLogLevelUtils::clear();
+  }
+  const int64_t debug_sync_timeout = GCONF.debug_sync_timeout;
+  if (debug_sync_timeout > 0) {
+    // ignore thread local debug sync actions to session actions failed
+    int tmp_ret = OB_SUCCESS;
+    tmp_ret = GDS.collect_result_actions(session.get_debug_sync_actions());
+    if (OB_UNLIKELY(OB_SUCCESS != tmp_ret)) {
+      LOG_WARN("set thread local debug sync actions to session actions failed", K(tmp_ret));
     }
   }
   //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
@@ -683,7 +688,7 @@ int ObMPStmtFetch::process_fetch_stmt(ObSQLSessionInfo &session)
       ObSqlCtx *sql_ctx
           = cursor->get_cursor_handler()->get_result_set()->get_exec_context().get_sql_ctx();
       if (NULL != sql_ctx) {
-        tmp_ret = do_after_process(session, use_sess_trace, *sql_ctx, false/*no asyn response*/);
+        tmp_ret = do_after_process(session, *sql_ctx, false/*no asyn response*/);
       }
     }
   }
@@ -693,10 +698,13 @@ int ObMPStmtFetch::process()
 {
   int ret = OB_SUCCESS;
   int flush_ret = OB_SUCCESS;
+  bool need_disconnect = true;
+  bool need_response_error = true;
   ObSQLSessionInfo *sess = NULL;
   int64_t query_timeout = 0;
   ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
   ObSMConnection *conn = get_conn();
+  const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
   bool cursor_fetched = false;
   reset_close_cursor();
   if (OB_ISNULL(req_) || OB_ISNULL(conn) || OB_ISNULL(cur_trace_id)) {
@@ -747,7 +755,12 @@ int ObMPStmtFetch::process()
     } else if (OB_FAIL(gctx_.schema_service_->get_tenant_received_broadcast_version(
                 OB_SYS_TENANT_ID, sys_version))) {
       LOG_WARN("fail get tenant broadcast version", K(ret));
+    } else if (FALSE_IT(session.set_txn_free_route(pkt.txn_free_route()))) {
+    } else if (OB_FAIL(process_extra_info(session, pkt, need_response_error))) {
+      LOG_WARN("fail get process extra info", K(ret));
+    } else if (FALSE_IT(session.post_sync_session_info())) {
     } else {
+      need_disconnect = false;
       ObPLCursorInfo *cursor = NULL;
       THIS_WORKER.set_timeout_ts(get_receive_timestamp() + query_timeout);
       session.partition_hit().reset();
@@ -770,9 +783,11 @@ int ObMPStmtFetch::process()
     session.set_last_trace_id(ObCurTraceId::get_trace_id());
   }
 
-  if (!OB_SUCC(ret) && is_conn_valid()) {
-    send_error_packet(ret, NULL);
-    if (cursor_fetched) {
+  if (OB_FAIL(ret) && is_conn_valid()) {
+    if (need_response_error) {
+      send_error_packet(ret, NULL);
+    }
+    if (cursor_fetched || need_disconnect) {
       force_disconnect();
       LOG_WARN("disconnect connection when process query", K(ret));
     }
@@ -852,7 +867,14 @@ int ObMPStmtFetch::response_row(ObSQLSessionInfo &session,
       } else if (NULL == piece) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("piece is null before use.", K(ret), K(stmt_id), K(i));
-      } else if (ob_is_string_type(value.get_type()) || ob_is_raw(value.get_type()) || ob_is_json(value.get_type())) {
+      } else if (is_lob_storage(value.get_type())) {
+        ObTextStringIter iter(value);
+        if (OB_FAIL(iter.init(0, &session, &(THIS_WORKER.get_sql_arena_allocator())))) {
+          LOG_WARN("Lob: init lob str iter failed ", K(ret), K(value));
+        } else if (OB_FAIL(iter.get_full_data(str))) {
+          LOG_WARN("Lob: get full data failed ", K(ret), K(value));
+        }
+      } else if (ob_is_string_type(value.get_type()) || ob_is_raw(value.get_type())) {
         str = value.get_string();
       } else if (ob_is_rowid_tc(value.get_type())) {
         str = value.get_string_ptr();

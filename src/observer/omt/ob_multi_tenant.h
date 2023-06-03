@@ -17,7 +17,6 @@
 #include <functional>
 #include "lib/container/ob_vector.h"
 #include "lib/lock/ob_bucket_lock.h"    // ObBucketLock
-#include "ob_worker_pool.h"
 #include "ob_tenant_node_balancer.h"
 
 namespace oceanbase
@@ -41,8 +40,7 @@ class ObTenantConfig;
 #define VIRTUAL_TENANTS_CPU_RESERVED_QUOTA \
   (GCONF.user_location_cpu_quota() + GCONF.sys_location_cpu_quota() \
   + GCONF.root_location_cpu_quota() + GCONF.core_location_cpu_quota() \
-  + EXT_LOG_TENANT_CPU + OB_MONITOR_CPU \
-  + OB_SVR_BLACKLIST_CPU + OB_DATA_CPU + OB_DTL_CPU + OB_RS_CPU + OB_DIAG_CPU)
+  + OB_SVR_BLACKLIST_CPU + OB_DATA_CPU + OB_DTL_CPU + OB_DIAG_CPU)
 
 struct ObCtxMemConfig
 {
@@ -80,16 +78,12 @@ class ObMultiTenant
     : public share::ObThreadPool
 {
 public:
-  const     static int64_t DEFAULT_TIMES_OF_WORKERS = 10;
   const     static int64_t TIME_SLICE_PERIOD        = 10000;
-  constexpr static double  DEFAULT_NODE_QUOTA       = 16.;
 
 public:
   explicit ObMultiTenant();
 
   int init(common::ObAddr myaddr,
-           double node_quota = DEFAULT_NODE_QUOTA,
-           int64_t times_of_workers = DEFAULT_TIMES_OF_WORKERS,
            common::ObMySQLProxy *sql_proxy = NULL,
            bool mtl_bind_flag = true);
 
@@ -106,7 +100,7 @@ public:
 
   int get_tenant_unit(const uint64_t tenant_id, share::ObUnitInfoGetter::ObTenantConfig &unit);
   int get_unit_id(const uint64_t tenant_id, uint64_t &unit_id);
-  int get_tenant_units(share::TenantUnits &units);
+  int get_tenant_units(share::TenantUnits &units, bool include_hidden_sys);
   int get_tenant_metas(common::ObIArray<ObTenantMeta> &metas);
   int get_tenant_metas_for_ckpt(common::ObIArray<ObTenantMeta> &metas);
   int get_compat_mode(const uint64_t tenant_id, lib::Worker::CompatMode &compat_mode);
@@ -119,7 +113,7 @@ public:
                                   const int64_t expected_log_disk_size);
   int modify_tenant_io(const uint64_t tenant_id, const share::ObUnitConfig &unit_config);
   int update_tenant_config(uint64_t tenant_id);
-  int update_palf_disk_config(ObTenantConfigGuard &tenant_config);
+  int update_palf_config();
   int update_tenant_dag_scheduler_config();
   int get_tenant(const uint64_t tenant_id, ObTenant *&tenant) const;
   int get_tenant_with_tenant_lock(const uint64_t tenant_id, common::ObLDHandle &handle, ObTenant *&tenant) const;
@@ -159,7 +153,6 @@ public:
   inline bool has_synced() const;
 
   void set_workers_per_cpu(int64_t v);
-  void set_group_sug_token();
   int write_create_tenant_abort_slog(uint64_t tenant_id);
   int write_delete_tenant_commit_slog(uint64_t tenant_id);
   int clear_persistent_data(const uint64_t tenant_id);
@@ -180,19 +173,20 @@ protected:
                                         const int64_t mem_limit,
                                         ObTenantMeta &meta);
   int create_virtual_tenants();
-  int remove_tenant(const uint64_t tenant_id);
+  int remove_tenant(const uint64_t tenant_id, bool &remove_tenant_succ);
   uint32_t get_tenant_lock_bucket_idx(const uint64_t tenant_id);
   int update_tenant_unit_no_lock(const share::ObUnitInfoGetter::ObTenantConfig &unit);
 
 protected:
       static const int DEL_TRY_TIMES = 30;
-  enum class ObTenantCreateStep {
-      STEP_BEGIN = 0, // begin
-      STEP_CTX_MEM_CONFIG_SETTED = 1, // set_tenant_ctx_idle succ
-      STEP_TENANT_NEWED = 2, // new tenant succ
-      STEP_WRITE_PREPARE_SLOG = 3, // write_prepare_create_tenant_slog succ
-      STEP_FINISH,
-  };
+      enum class ObTenantCreateStep {
+        STEP_BEGIN = 0, // begin
+        STEP_CTX_MEM_CONFIG_SETTED = 1, // set_tenant_ctx_idle succ
+        STEP_LOG_DISK_SIZE_PINNED = 2,  // pin log disk size succ
+        STEP_TENANT_NEWED = 3, // new tenant succ
+        STEP_WRITE_PREPARE_SLOG = 4, // write_prepare_create_tenant_slog succ
+        STEP_FINISH,
+      };
 
   bool is_inited_;
   storage::ObStorageLogger *server_slogger_;
@@ -204,8 +198,6 @@ protected:
 
   mutable common::SpinRWLock lock_; // protect tenant list
   TenantList tenants_;
-  double node_quota_;
-  int64_t times_of_workers_;
   ObTenantNodeBalancer *balancer_;
   common::ObAddr myaddr_;
   bool cpu_dump_;
@@ -220,16 +212,6 @@ private:
 TenantList &ObMultiTenant::get_tenant_list()
 {
   return tenants_;
-}
-
-double ObMultiTenant::get_node_quota() const
-{
-  return node_quota_;
-}
-
-int64_t ObMultiTenant::get_times_of_workers() const
-{
-  return times_of_workers_;
 }
 
 int ObMultiTenant::lock_tenant_list(bool write)

@@ -259,6 +259,10 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
         DEFINE_EXECUTE_CMD(ObCreateTenantStmt, ObCreateTenantExecutor);
         break;
       }
+      case stmt::T_CREATE_STANDBY_TENANT: {
+        DEFINE_EXECUTE_CMD(ObCreateTenantStmt, ObCreateStandbyTenantExecutor);
+        break;
+      }
       case stmt::T_DROP_TENANT: {
         DEFINE_EXECUTE_CMD(ObDropTenantStmt, ObDropTenantExecutor);
         break;
@@ -596,6 +600,18 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
         DEFINE_EXECUTE_CMD(ObMigrateUnitStmt, ObMigrateUnitExecutor);
         break;
       }
+      case stmt::T_ADD_ARBITRATION_SERVICE: {
+        DEFINE_EXECUTE_CMD(ObAddArbitrationServiceStmt, ObAddArbitrationServiceExecutor);
+        break;
+      }
+      case stmt::T_REMOVE_ARBITRATION_SERVICE: {
+        DEFINE_EXECUTE_CMD(ObRemoveArbitrationServiceStmt, ObRemoveArbitrationServiceExecutor);
+        break;
+      }
+      case stmt::T_REPLACE_ARBITRATION_SERVICE: {
+        DEFINE_EXECUTE_CMD(ObReplaceArbitrationServiceStmt, ObReplaceArbitrationServiceExecutor);
+        break;
+      }
       case stmt::T_UPGRADE_VIRTUAL_SCHEMA: {
         DEFINE_EXECUTE_CMD(ObUpgradeVirtualSchemaStmt, ObUpgradeVirtualSchemaExecutor);
         break;
@@ -749,6 +765,14 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
       }
       case stmt::T_DROP_SEQUENCE: {
         DEFINE_EXECUTE_CMD(ObDropSequenceStmt, ObDropSequenceExecutor);
+        if (OB_SUCC(ret)) {
+          ObDropSequenceStmt &stmt = *(static_cast<ObDropSequenceStmt*>(&cmd));
+          const uint64_t tenant_id = stmt.get_arg().get_tenant_id();
+          const uint64_t sequence_id = stmt.get_arg().get_sequence_id();
+          if (OB_FAIL(my_session->drop_sequence_value_if_exists(tenant_id, sequence_id))) {
+            LOG_WARN("failed to drop sequence value from session", K(ret));
+          }
+        }
         break;
       }
       case stmt::T_ALTER_SEQUENCE: {
@@ -757,6 +781,10 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
       }
       case stmt::T_SWITCHOVER: {
         DEFINE_EXECUTE_CMD(ObSwitchTenantStmt, ObSwitchTenantExecutor);
+        break;
+      }
+      case stmt::T_RECOVER: {
+        DEFINE_EXECUTE_CMD(ObRecoverTenantStmt, ObRecoverTenantExecutor);
         break;
       }
       case stmt::T_SET_TABLE_COMMENT:
@@ -832,6 +860,10 @@ int ObCmdExecutor::execute(ObExecContext &ctx, ObICmd &cmd)
       }
       case stmt::T_DELETE_POLICY: {
         DEFINE_EXECUTE_CMD(ObDeletePolicyStmt, ObDeletePolicyExecutor);
+        break;
+      }
+      case stmt::T_BACKUP_KEY: {
+        DEFINE_EXECUTE_CMD(ObBackupKeyStmt, ObBackupKeyExecutor);
         break;
       }
       case stmt::T_CREATE_DBLINK: {

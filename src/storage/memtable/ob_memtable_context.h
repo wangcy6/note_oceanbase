@@ -140,7 +140,7 @@ public:
   ~ObQueryAllocator()
   {
     if (OB_UNLIKELY(ATOMIC_LOAD(&free_count_) != ATOMIC_LOAD(&alloc_count_))) {
-      TRANS_LOG(ERROR, "query allocator leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
+      TRANS_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "query allocator leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
     }
     ATOMIC_STORE(&is_inited_, false);
   }
@@ -171,7 +171,7 @@ public:
   void reset()
   {
     if (OB_UNLIKELY(ATOMIC_LOAD(&free_count_) != ATOMIC_LOAD(&alloc_count_))) {
-      TRANS_LOG(ERROR, "query allocator leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
+      TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "query allocator leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
     }
     allocator_.reset();
     ATOMIC_STORE(&alloc_count_, 0);
@@ -183,7 +183,7 @@ public:
   {
     void *ret = nullptr;
     if (OB_ISNULL(ret = allocator_.alloc(size))) {
-      TRANS_LOG(ERROR, "query alloc failed",
+      TRANS_LOG_RET(ERROR, common::OB_ALLOCATE_MEMORY_FAILED, "query alloc failed",
         K(alloc_count_), K(free_count_), K(alloc_size_), K(size));
     } else {
       ATOMIC_INC(&alloc_count_);
@@ -226,7 +226,7 @@ public:
   ~ObMemtableCtxCbAllocator()
   {
     if (OB_UNLIKELY(ATOMIC_LOAD(&free_count_) != ATOMIC_LOAD(&alloc_count_))) {
-      TRANS_LOG(ERROR, "callback memory leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
+      TRANS_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "callback memory leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
     }
     ATOMIC_STORE(&is_inited_, false);
   }
@@ -258,7 +258,7 @@ public:
   void reset()
   {
     if (OB_UNLIKELY(free_count_ != alloc_count_)) {
-      TRANS_LOG(ERROR, "callback memory leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
+      TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "callback memory leak found", K(alloc_count_), K(free_count_), K(alloc_size_));
     }
     allocator_.reset();
     ATOMIC_STORE(&alloc_count_, 0);
@@ -270,7 +270,7 @@ public:
   {
     void *ret = nullptr;
     if (OB_ISNULL(ret = allocator_.alloc(size))) {
-      TRANS_LOG(ERROR, "callback memory failed",
+      TRANS_LOG_RET(ERROR, OB_ALLOCATE_MEMORY_FAILED, "callback memory failed",
         K(alloc_count_), K(free_count_), K(alloc_size_), K(size));
     } else {
       ATOMIC_INC(&alloc_count_);
@@ -302,7 +302,7 @@ private:
 };
 
 class ObMemtable;
-typedef ObMemtableCtxFactory::IDMap MemtableIDMap;
+typedef common::ObIDMap<ObIMemtableCtx, uint32_t> MemtableIDMap;
 class ObMemtableCtx final : public ObIMemtableCtx
 {
   using RWLock = common::SpinRWLock;
@@ -342,7 +342,7 @@ public:
   virtual void set_read_only();
   virtual void inc_ref();
   virtual void dec_ref();
-  void set_replay();
+  void wait_pending_write();
   virtual int write_auth(const bool exclusive);
   virtual int write_done();
   virtual int trans_begin();
@@ -390,17 +390,17 @@ public:
   virtual void set_trans_ctx(transaction::ObPartTransCtx *ctx);
   virtual transaction::ObPartTransCtx *get_trans_ctx() const { return ctx_; }
   virtual void inc_truncate_cnt() override { truncate_cnt_++; }
-  virtual int audit_partition(const enum transaction::ObPartitionAuditOperator op,
-                              const int64_t count);
   int get_memtable_key_arr(transaction::ObMemtableKeyArray &memtable_key_arr);
   uint64_t get_lock_for_read_retry_count() const { return lock_for_read_retry_count_; }
   virtual void add_trans_mem_total_size(const int64_t size);
   int64_t get_ref() const { return ATOMIC_LOAD(&ref_); }
   uint64_t get_tenant_id() const;
-  bool is_can_elr() const;
-  inline bool has_read_elr_data() const { return read_elr_data_; }
+  inline bool has_row_updated() const { return has_row_updated_; }
+  inline void set_row_updated() { has_row_updated_ = true; }
   int remove_callbacks_for_fast_commit();
-  int remove_callback_for_uncommited_txn(memtable::ObMemtable* mt);
+  int remove_callback_for_uncommited_txn(
+    const memtable::ObMemtableSet *memtable_set,
+    const share::SCN max_applied_scn);
   int rollback(const int64_t seq_no, const int64_t from_seq_no);
   bool is_all_redo_submitted();
   bool is_for_replay() const { return trans_mgr_.is_for_replay(); }
@@ -433,8 +433,6 @@ public:
   virtual void dec_unsubmitted_cnt() override;
   virtual void inc_unsynced_cnt() override;
   virtual void dec_unsynced_cnt() override;
-  void replay_auth();
-  void replay_done();
   int64_t get_checksum() const { return trans_mgr_.get_checksum(); }
   int64_t get_tmp_checksum() const { return trans_mgr_.get_tmp_checksum(); }
   share::SCN get_checksum_scn() const { return trans_mgr_.get_checksum_scn(); }
@@ -455,6 +453,7 @@ public:
   int check_lock_exist(const ObLockID &lock_id,
                        const ObTableLockOwnerID &owner_id,
                        const ObTableLockMode mode,
+                       const ObTableLockOpType op_type,
                        bool &is_exist,
                        ObTableLockMode &lock_mode_in_same_trans) const;
   int check_modify_schema_elapsed(const common::ObTabletID &tablet_id,
@@ -479,6 +478,13 @@ public:
   // for deadlock detect.
   void set_table_lock_killed() { lock_mem_ctx_.set_killed(); }
   bool is_table_lock_killed() const { return lock_mem_ctx_.is_killed(); }
+  // The SQL can be rollbacked, and the callback of it will be removed, too.
+  // In this case, the remove count of callbacks is larger than 0, but the callbacks
+  // may be all decided. So we can't exactly know whether they're decided.
+  bool maybe_has_undecided_callback() const {
+      return trans_mgr_.get_callback_remove_for_fast_commit_count() > 0 ||
+             trans_mgr_.get_callback_remove_for_remove_memtable_count() > 0;
+  }
 private:
   int do_trans_end(
       const bool commit,
@@ -493,9 +499,6 @@ private:
       const transaction::tablelock::ObTableLockOp &lock_op,
       const bool is_replay);
   static int64_t get_us() { return ::oceanbase::common::ObTimeUtility::current_time(); }
-  int audit_partition_cache_(const enum transaction::ObPartitionAuditOperator op, const int32_t count);
-  int flush_audit_partition_cache_(bool commit);
-  void set_read_elr_data(const bool read_elr_data) { read_elr_data_ = read_elr_data; }
   int reset_log_generator_();
   int reuse_log_generator_();
   void inc_pending_log_size(const int64_t size)
@@ -522,7 +525,6 @@ private:
   MemtableCtxStat mtstat_;
   ObTimeInterval log_conflict_interval_;
   transaction::ObPartTransCtx *ctx_;
-  transaction::ObPartitionAuditInfoCache partition_audit_info_cache_;
   int64_t truncate_cnt_;
   // the retry count of lock for read
   uint64_t lock_for_read_retry_count_;
@@ -537,9 +539,9 @@ private:
   int64_t callback_free_count_;
   bool is_read_only_;
   bool is_master_;
-  // Used to indicate whether elr data is read. When a statement executes,
-  // if one row involves elr data, set it to true, and the row can't be purged
-  bool read_elr_data_;
+  // Used to indicate whether mvcc row is updated or not.
+  // When a statement is update or select for update, the value can be set ture;
+  bool has_row_updated_;
   storage::ObTxTableGuard tx_table_guard_;
   // For deaklock detection
   // The trans id of the holder of the conflict row lock

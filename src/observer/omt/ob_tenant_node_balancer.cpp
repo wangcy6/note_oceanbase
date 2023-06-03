@@ -30,6 +30,7 @@
 #include "observer/omt/ob_tenant_config_mgr.h"
 #include "storage/blocksstable/ob_block_manager.h"
 #include "logservice/palf/palf_options.h"
+#include "logservice/ob_server_log_block_mgr.h"
 #include "storage/tx_storage/ob_tenant_freezer.h"
 #include "storage/tx_storage/ob_ls_service.h"
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
@@ -114,6 +115,9 @@ void ObTenantNodeBalancer::run1()
       LOG_WARN("get cluster tenants fail", K(ret));
     } else if (OB_FAIL(OTC_MGR.refresh_tenants(tenants))) {
       LOG_WARN("fail refresh tenant config", K(tenants), K(ret));
+    }
+    if (OB_SUCCESS != (tmp_ret = GCTX.log_block_mgr_->try_resize())) {
+      LOG_WARN("ObServerLogBlockMgr try_resize failed", K(tmp_ret));
     }
 
     FLOG_INFO("refresh tenant config", K(tenants), K(ret));
@@ -208,16 +212,27 @@ int ObTenantNodeBalancer::try_notify_drop_tenant(const int64_t tenant_id)
 {
   LOG_INFO("[DELETE_TENANT] succ to receive notify of dropping tenant", K(tenant_id));
   int ret = OB_SUCCESS;
-  TenantUnits units;
+  int tmp_ret = OB_SUCCESS;
   TCWLockGuard guard(lock_);
-
-  if (OB_FAIL(omt_->mark_del_tenant(tenant_id))) {
-    LOG_WARN("failed to mark del tenant", K(ret));
-  }  else {
-    ret = OB_SUCCESS;
-    LOG_INFO("[DELETE_TENANT] succ to mark drop tenant", K(tenant_id), K(units));
+  uint64_t meta_tenant_id = OB_INVALID_TENANT_ID;
+  if (OB_UNLIKELY(is_meta_tenant(tenant_id))) {
+    ret = OB_OP_NOT_ALLOW;
+    LOG_WARN("meta tenant is not allowed", KR(ret), K(tenant_id));
+  } else if (OB_ISNULL(omt_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("omt_ is null", KR(ret),KP(omt_));
+  } else {
+    if (OB_TMP_FAIL(omt_->mark_del_tenant(tenant_id))) {
+      LOG_WARN("fail to mark del user_tenant", KR(ret), KR(tmp_ret), K(tenant_id));
+      ret = OB_SUCC(ret) ? tmp_ret : ret;
+    }
+    meta_tenant_id = gen_meta_tenant_id(tenant_id);
+    if (OB_TMP_FAIL(omt_->mark_del_tenant(meta_tenant_id))) {
+      LOG_WARN("fail to mark del meta_tenant", KR(ret), KR(tmp_ret), K(meta_tenant_id));
+      ret = OB_SUCC(ret) ? tmp_ret : ret;
+    }
   }
-
+  LOG_INFO("[DELETE_TENANT] mark drop tenant", KR(ret), K(tenant_id), K(meta_tenant_id));
   return ret;
 }
 
@@ -227,7 +242,7 @@ int ObTenantNodeBalancer::get_server_allocated_resource(ServerResource &server_r
   server_resource.reset();
   TenantUnits tenant_units;
 
-  if (OB_FAIL(omt_->get_tenant_units(tenant_units))) {
+  if (OB_FAIL(omt_->get_tenant_units(tenant_units, true))) {
     LOG_WARN("failed to get tenant units");
   } else {
     for (int64_t i = 0; i < tenant_units.count(); i++) {
@@ -277,15 +292,6 @@ int ObTenantNodeBalancer::check_del_tenants(const TenantUnits &local_units, Tena
         }
       } else if (OB_FAIL(omt_->del_tenant(local_unit.tenant_id_))) {
         LOG_WARN("delete tenant fail", K(local_unit), K(ret));
-      }
-      if (OB_FAIL(ret)) {
-        // do nothing
-      } else if (OB_FAIL(OB_TMP_FILE_STORE.free_tenant_file_store(local_unit.tenant_id_))) {
-        if (OB_ENTRY_NOT_EXIST == ret) {
-          ret = OB_SUCCESS;
-        } else {
-          STORAGE_LOG(WARN, "fail to free tmp tenant file store", K(ret), K(local_unit.tenant_id_));
-        }
       }
     }
   }
@@ -374,6 +380,26 @@ int ObTenantNodeBalancer::check_new_tenant(const ObUnitInfoGetter::ObTenantConfi
     if (OB_FAIL(omt_->modify_tenant_io(tenant_id, unit.config_))) {
       LOG_WARN("modify tenant io config failed", K(ret), K(tenant_id), K(unit.config_));
     }
+  }
+  return ret;
+}
+
+int ObTenantNodeBalancer::refresh_hidden_sys_memory()
+{
+  int ret = OB_SUCCESS;
+  int64_t sys_tenant_memory = 0;
+  int64_t allowed_mem_limit = 0;
+  ObTenant *tenant = nullptr;
+  if (OB_FAIL(omt_->get_tenant(OB_SYS_TENANT_ID, tenant))) {
+    LOG_WARN("get sys tenant failed", K(ret));
+  } else if (OB_ISNULL(tenant) || !tenant->is_hidden()) {
+    // do nothing
+  } else if (OB_FAIL(ObUnitResource::get_sys_tenant_default_memory(sys_tenant_memory))) {
+    LOG_WARN("get hidden sys tenant default memory failed", K(ret));
+  } else if (OB_FAIL(omt_->update_tenant_memory(OB_SYS_TENANT_ID, sys_tenant_memory, allowed_mem_limit))) {
+    LOG_WARN("update hidden sys tenant memory failed", K(ret));
+  } else {
+    LOG_INFO("update hidden sys tenant memory succeed ", K(allowed_mem_limit));
   }
   return ret;
 }
@@ -509,7 +535,7 @@ int ObTenantNodeBalancer::refresh_tenant(TenantUnits &units)
   int ret = OB_SUCCESS;
 
   TenantUnits local_units;
-  if (OB_FAIL(omt_->get_tenant_units(local_units))) {
+  if (OB_FAIL(omt_->get_tenant_units(local_units, false))) {
     LOG_WARN("failed to get local tenant units");
   } else if (OB_FAIL(fetch_effective_tenants(local_units, units))) {
     LOG_WARN("failed to fetch effective tenants", K(local_units));
@@ -521,6 +547,8 @@ int ObTenantNodeBalancer::refresh_tenant(TenantUnits &units)
     } else if (FALSE_IT(omt_->set_synced())) {
     } else if (OB_FAIL(check_del_tenants(local_units, units))) {
       LOG_WARN("check delete tenant fail", K(ret));
+    } else if (OB_FAIL(refresh_hidden_sys_memory())) {
+      LOG_WARN("refresh hidden sys memory failed", K(ret));
     }
   }
 

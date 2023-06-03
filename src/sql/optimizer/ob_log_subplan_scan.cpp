@@ -80,58 +80,41 @@ int ObLogSubPlanScan::allocate_expr_post(ObAllocExprContext &ctx)
   return ret;
 }
 
-int ObLogSubPlanScan::print_my_plan_annotation(char *buf,
-                                               int64_t &buf_len,
-                                               int64_t &pos,
-                                               ExplainType type)
+int ObLogSubPlanScan::get_plan_item_info(PlanText &plan_text,
+                                         ObSqlPlanItem &plan_item)
 {
   int ret = OB_SUCCESS;
   // print access
-  if (OB_FAIL(BUF_PRINTF(", "))) {
-    LOG_WARN("BUF_PRINTF fails", K(ret));
-  } else if (OB_FAIL(BUF_PRINTF("\n      "))) {
-    LOG_WARN("BUF_PRINTF fails", K(ret));
-  } else { /* Do nothing */ }
-  const ObIArray<ObRawExpr*> &access = get_access_exprs();
-  if (OB_SUCC(ret)) {
+  if (OB_FAIL(ObLogicalOperator::get_plan_item_info(plan_text, plan_item))) {
+    LOG_WARN("failed to get plan item info", K(ret));
+  } else {
+    BEGIN_BUF_PRINT;
+    const ObIArray<ObRawExpr*> &access = get_access_exprs();
     EXPLAIN_PRINT_EXPRS(access, type);
-  } else { /* Do nothing */ }
-  return ret;
-}
-
-int ObLogSubPlanScan::generate_link_sql_post(GenLinkStmtPostContext &link_ctx)
-{
-  int ret = OB_SUCCESS;
-  ObLogicalOperator *child = get_child(first_child);
-  if (0 == dblink_id_) {
-    // do nothing
-  } else if (OB_ISNULL(child)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("child is NULL", K(ret));
-  } else if (OB_FAIL(link_ctx.spell_subplan_scan(static_cast<const ObSelectStmt *>(get_stmt()),
-                                                get_output_exprs(),
-                                                child->get_output_exprs(),
-                                                startup_exprs_,
-                                                filter_exprs_,
-                                                subquery_name_))) {
-    LOG_WARN("dblink fail to reverse spell subplan scan", K(dblink_id_), K(ret));
+    END_BUF_PRINT(plan_item.access_predicates_,
+                  plan_item.access_predicates_len_);
+  }
+  if (OB_SUCC(ret)) {
+    const ObString &name = get_subquery_name();
+    BUF_PRINT_OB_STR(name.ptr(),
+                     name.length(),
+                     plan_item.object_alias_,
+                     plan_item.object_alias_len_);
   }
   return ret;
 }
 
-int ObLogSubPlanScan::re_est_cost(EstimateCostInfo &param, double &card, double &cost)
+int ObLogSubPlanScan::do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost)
 {
   int ret = OB_SUCCESS;
   ObLogicalOperator *child = NULL;
-  int parallel = 1.0;
+  const int64_t parallel = param.need_parallel_;
   double selectivity = 1.0;
   if (OB_ISNULL(child = get_child(ObLogicalOperator::first_child)) ||
       OB_ISNULL(get_plan())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(child), K(ret));
-  } else if (OB_UNLIKELY((parallel = get_parallel()) < 1)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected parallel degree", K(parallel), K(ret));
+  } else if (OB_FALSE_IT(get_plan()->get_selectivity_ctx().init_op_ctx(&child->get_output_equal_sets(), child->get_card()))) {
   } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(get_plan()->get_basic_table_metas(),
                                                             get_plan()->get_selectivity_ctx(),
                                                             get_filter_exprs(),
@@ -149,16 +132,11 @@ int ObLogSubPlanScan::re_est_cost(EstimateCostInfo &param, double &card, double 
       LOG_WARN("failed to re est exchange cost", K(ret));
     } else {
       ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
-      double op_cost = ObOptEstCost::cost_filter_rows(child_card / parallel, 
-                                                      get_filter_exprs(),
-                                                      opt_ctx.get_cost_model_type());
+      op_cost = ObOptEstCost::cost_filter_rows(child_card / parallel,
+                                               get_filter_exprs(),
+                                               opt_ctx.get_cost_model_type());
       cost = child_cost + op_cost;
       card = child_card * selectivity;
-      if (param.override_) {
-        set_op_cost(op_cost);
-        set_cost(cost);
-        set_card(card);
-      }
     }
   }
   return ret;
@@ -181,4 +159,10 @@ int ObLogSubPlanScan::check_output_dependance(ObIArray<ObRawExpr *> &child_outpu
     LOG_TRACE("succeed to check output exprs", K(exprs), K(type_), K(deps));
   }
   return ret;
+}
+
+int ObLogSubPlanScan::is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed)
+{
+  is_fixed = ObOptimizerUtil::find_item(access_exprs_, expr);
+  return OB_SUCCESS;
 }

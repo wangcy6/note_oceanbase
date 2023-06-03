@@ -26,7 +26,11 @@ namespace share
 
 int ObLSLifeAgentManager::create_new_ls(
     const ObLSStatusInfo &ls_info, const SCN &create_ls_scn,
+<<<<<<< HEAD
     const common::ObString &zone_priority)
+=======
+    const common::ObString &zone_priority, const share::ObTenantSwitchoverStatus &working_sw_status)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   int ret = OB_SUCCESS;
   ObMySQLTransaction trans; 
@@ -36,7 +40,11 @@ int ObLSLifeAgentManager::create_new_ls(
     LOG_WARN("invalid argument", KR(ret), K(ls_info), K(create_ls_scn), K(zone_priority));
   } else if (OB_FAIL(trans.start(proxy_, exec_tenant_id))) {
     LOG_WARN("failed to start trans", KR(ret), K(exec_tenant_id), K(ls_info));
+<<<<<<< HEAD
   } else if (OB_FAIL(create_new_ls_in_trans(ls_info, create_ls_scn, zone_priority, trans))) {
+=======
+  } else if (OB_FAIL(create_new_ls_in_trans(ls_info, create_ls_scn, zone_priority, working_sw_status, trans))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     LOG_WARN("failed to create new ls", KR(ret), K(ls_info), K(create_ls_scn), K(zone_priority));
   }
   if (trans.is_started()) {
@@ -50,7 +58,8 @@ int ObLSLifeAgentManager::create_new_ls(
   return ret;
 }
 int ObLSLifeAgentManager::drop_ls(const uint64_t &tenant_id,
-                                         const share::ObLSID &ls_id)
+                                  const share::ObLSID &ls_id,
+                                  const ObTenantSwitchoverStatus &working_sw_status)
 {
   int ret = OB_SUCCESS;
   ObMySQLTransaction trans; 
@@ -60,7 +69,7 @@ int ObLSLifeAgentManager::drop_ls(const uint64_t &tenant_id,
     LOG_WARN("invalid argument", KR(ret), K(ls_id), K(tenant_id));
   } else if (OB_FAIL(trans.start(proxy_, exec_tenant_id))) {
     LOG_WARN("failed to start trans", KR(ret), K(exec_tenant_id), K(tenant_id));
-  } else if (OB_FAIL(drop_ls_in_trans(tenant_id, ls_id, trans))) {
+  } else if (OB_FAIL(drop_ls_in_trans(tenant_id, ls_id, working_sw_status, trans))) {
     LOG_WARN("failed to create new ls", KR(ret), K(tenant_id), K(ls_id));
   }
   if (trans.is_started()) {
@@ -78,7 +87,12 @@ int ObLSLifeAgentManager::drop_ls(const uint64_t &tenant_id,
 int ObLSLifeAgentManager::set_ls_offline(const uint64_t &tenant_id,
     const share::ObLSID &ls_id,
     const ObLSStatus &ls_status,
+<<<<<<< HEAD
     const SCN &drop_scn)
+=======
+    const SCN &drop_scn,
+    const ObTenantSwitchoverStatus &working_sw_status)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 {
   int ret = OB_SUCCESS;
   ObMySQLTransaction trans; 
@@ -90,7 +104,12 @@ int ObLSLifeAgentManager::set_ls_offline(const uint64_t &tenant_id,
     LOG_WARN("invalid argument", KR(ret), K(ls_id), K(tenant_id), K(drop_scn), K(ls_status));
   } else if (OB_FAIL(trans.start(proxy_, exec_tenant_id))) {
     LOG_WARN("failed to start trans", KR(ret), K(exec_tenant_id), K(tenant_id));
+<<<<<<< HEAD
   } else if (OB_FAIL(set_ls_offline_in_trans(tenant_id, ls_id, ls_status, drop_scn, trans))) {
+=======
+  } else if (OB_FAIL(set_ls_offline_in_trans(tenant_id, ls_id, ls_status, drop_scn,
+                                             working_sw_status, trans))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     LOG_WARN("failed to create new ls", KR(ret), K(tenant_id), K(ls_id),
         K(ls_status), K(drop_scn));
   }
@@ -145,6 +164,7 @@ int ObLSLifeAgentManager::update_ls_primary_zone(
 int ObLSLifeAgentManager::create_new_ls_in_trans(const ObLSStatusInfo &ls_info,
                             const SCN &create_ls_scn,
                             const common::ObString &zone_priority,
+                            const share::ObTenantSwitchoverStatus &working_sw_status,
                             ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
@@ -156,7 +176,11 @@ int ObLSLifeAgentManager::create_new_ls_in_trans(const ObLSStatusInfo &ls_info,
     if (OB_ISNULL(agents_[i])) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("agent is null", KR(ret), K(i));
+<<<<<<< HEAD
     } else if (OB_FAIL(agents_[i]->create_new_ls(ls_info, create_ls_scn, zone_priority, trans))) {
+=======
+    } else if (OB_FAIL(agents_[i]->create_new_ls(ls_info, create_ls_scn, zone_priority, working_sw_status, trans))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("failed to create new ls", KR(ret), K(i), K(ls_info), K(create_ls_scn), K(zone_priority));
     }
   }
@@ -165,6 +189,7 @@ int ObLSLifeAgentManager::create_new_ls_in_trans(const ObLSStatusInfo &ls_info,
 
 int ObLSLifeAgentManager::drop_ls_in_trans(const uint64_t &tenant_id,
                       const share::ObLSID &ls_id,
+                      const ObTenantSwitchoverStatus &working_sw_status,
                       ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
@@ -176,7 +201,7 @@ int ObLSLifeAgentManager::drop_ls_in_trans(const uint64_t &tenant_id,
     if (OB_ISNULL(agents_[i])) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("agent is null", KR(ret), K(i));
-    } else if (OB_FAIL(agents_[i]->drop_ls(tenant_id, ls_id, trans))) {
+    } else if (OB_FAIL(agents_[i]->drop_ls(tenant_id, ls_id, working_sw_status, trans))) {
       LOG_WARN("failed to create new ls", KR(ret), K(i), K(tenant_id), K(ls_id));
     }
   }
@@ -187,6 +212,10 @@ int ObLSLifeAgentManager::set_ls_offline_in_trans(const uint64_t &tenant_id,
     const share::ObLSID &ls_id,
     const ObLSStatus &ls_status,
     const SCN &drop_scn,
+<<<<<<< HEAD
+=======
+    const ObTenantSwitchoverStatus &working_sw_status,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
@@ -201,7 +230,11 @@ int ObLSLifeAgentManager::set_ls_offline_in_trans(const uint64_t &tenant_id,
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("agent is null", KR(ret), K(i));
     } else if (OB_FAIL(agents_[i]->set_ls_offline(tenant_id, ls_id,
+<<<<<<< HEAD
             ls_status, drop_scn, trans))) {
+=======
+            ls_status, drop_scn, working_sw_status, trans))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       LOG_WARN("failed to create new ls", KR(ret), K(i), K(tenant_id), K(ls_id),
           K(ls_status), K(drop_scn));
     }

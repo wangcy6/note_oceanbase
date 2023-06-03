@@ -39,6 +39,10 @@ typedef struct easy_ma_t {
 } easy_ma_t;
 easy_ma_t g_ma;
 
+int ob_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                      void *(*start_routine) (void *), void *arg);
+int ob_epoll_wait(int __epfd, struct epoll_event *__events,
+		          int __maxevents, int __timeout);
 void easy_ma_init(int port)
 {
     int i;
@@ -168,7 +172,7 @@ void* easy_ma_thread_func(easy_ma_t* ma)
     while (!ma->stop) {
         const int maxevents = 64;
         struct epoll_event events[maxevents];
-        int cnt = epoll_wait(efd, events, maxevents, 1000);
+        int cnt = ob_epoll_wait(efd, events, maxevents, 1000);
         for (i = 0; i < cnt; i++) {
             int cfd = events[i].data.fd;
             int emask = events[i].events;
@@ -215,7 +219,7 @@ int easy_ma_start()
     g_ma.efd = efd;
     g_ma.lfd = lfd;
     g_ma.stop = 0;
-    if (0 != pthread_create(&g_ma.th, NULL, (void*)easy_ma_thread_func, (void*)&g_ma)) {
+    if (0 != ob_pthread_create(&g_ma.th, NULL, (void*)easy_ma_thread_func, (void*)&g_ma)) {
         goto error_exit;
     }
     

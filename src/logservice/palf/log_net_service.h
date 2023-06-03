@@ -114,7 +114,8 @@ public:
       const int64_t &msg_proposal_id,
       const bool vote_granted,
       const int64_t &log_proposal_id,
-      const LSN &lsn,
+      const LSN &max_flushed_lsn,
+      const LSN &committed_end_lsn,
       const LogModeMeta &mode_meta);
 
   int submit_fetch_log_req(
@@ -131,6 +132,9 @@ public:
     const ObAddr &server,
     const LSN &base_lsn,
     const LogInfo &base_prev_log_info);
+
+  int submit_notify_fetch_log_req(
+    const ObMemberList &dst_list);
 
   template<class List>
   int submit_change_config_meta_req(
@@ -158,20 +162,38 @@ public:
       const int64_t msg_proposal_id,
       const LogConfigVersion &config_version);
 
+  template <class List>
   int submit_change_mode_meta_req(
-      const common::ObMemberList &member_list,
+      const List &member_list,
       const int64_t &msg_proposal_id,
-      const LogModeMeta &mode_meta);
+      const bool is_applied_mode_meta,
+      const LogModeMeta &mode_meta)
+  {
+    int ret = OB_SUCCESS;
+    int64_t pos = 0;
+    if (IS_NOT_INIT) {
+      ret = OB_NOT_INIT;
+    } else {
+      LogChangeModeMetaReq req(msg_proposal_id, mode_meta, is_applied_mode_meta);
+      ret = post_request_to_member_list_(member_list, req);
+    }
+    return ret;
+  }
 
   int submit_change_mode_meta_resp(
       const common::ObAddr &server,
       const int64_t &msg_proposal_id);
 
-  int submit_get_memberchange_status_req(
+  int submit_config_change_pre_check_req(
       const common::ObAddr &server,
       const LogConfigVersion &config_version,
+<<<<<<< HEAD
+=======
+      const bool need_purge_throttling,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       const int64_t timeout_us,
       LogGetMCStResp &resp);
+
 
   int submit_register_parent_req(
       const common::ObAddr &server,
@@ -212,6 +234,10 @@ public:
     }
     return ret;
   }
+  int submit_get_stat_req(const common::ObAddr &server,
+                          const int64_t timeout_us,
+                          const LogGetStatReq &req,
+                          LogGetStatResp &resp);
 
 public:
   template <class ReqType>
@@ -238,8 +264,8 @@ int LogNetService::post_request_to_server_(
 {
   int ret = common::OB_SUCCESS;
   if (OB_FAIL(log_rpc_->post_request(server, palf_id_, req))) {
-    PALF_LOG(WARN, "LogRpc post_request failed", K(ret), K(palf_id_),
-        K(req), K(server));
+    // PALF_LOG(WARN, "LogRpc post_request failed", K(ret), K(palf_id_),
+    //     K(req), K(server));
   } else {
     PALF_LOG(TRACE, "post_request_to_server_ success", K(ret), K(server), K(palf_id_), K(req));
   }
@@ -257,13 +283,13 @@ int LogNetService::post_request_to_member_list_(
   if (!req.is_valid() || !member_list.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    for (int64_t i = 0; i < member_number && OB_SUCC(ret); i++) {
+    for (int64_t i = 0; i < member_number; i++) {
       if (OB_FAIL(member_list.get_server_by_index(i, server))) {
         PALF_LOG(WARN, "ObMemberList get_server_by_index failed", K(ret),
             K(server), K(palf_id_), K(req));
       } else if (OB_FAIL(post_request_to_server_(server, req))) {
-        PALF_LOG(WARN, "post_request_to_server_ failed", K(ret),
-            K(server), K(palf_id_), K(server));
+        // PALF_LOG(WARN, "post_request_to_server_ failed", K(ret),
+        //     K(server), K(palf_id_), K(server));
       } else {
       }
     }
@@ -279,10 +305,10 @@ int LogNetService::post_sync_request_to_server_(const common::ObAddr &server,
 {
   int ret = common::OB_SUCCESS;
   if (OB_FAIL(log_rpc_->post_sync_request(server, palf_id_, timeout_us, req, resp))) {
-    CLOG_LOG(WARN, "ObLogRpc post_sync_request failed", K(ret), K(palf_id_),
+    CLOG_LOG(WARN, "ObLogRpc post_sync_request failed", K(ret), K_(palf_id),
         K(req), K(server));
   } else {
-    CLOG_LOG(INFO, "post_sync_request_to_server_ success", K(ret), K(server), K(palf_id_), K(req));
+    CLOG_LOG(TRACE, "post_sync_request_to_server_ success", K(ret), K(server), K(palf_id_), K(req));
   }
   return ret;
 }

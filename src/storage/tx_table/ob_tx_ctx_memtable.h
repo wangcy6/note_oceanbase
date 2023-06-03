@@ -35,8 +35,8 @@ namespace storage
 // 2, Adaptation is required for a management insituation like LSM mgr[2] as a
 // design prototype, the goal is a unified abstraction of the merge module.
 //
-// [1]: https://yuque.antfin.com/ob/transaction/pxs1cv
-// [2]: https://yuque.antfin.com/docs/share/1e78f01c-73fb-4c32-a002-c2c75ca844a8?#
+// [1]:
+// [2]:
 class ObTxCtxMemtable : public memtable::ObIMemtable, public checkpoint::ObCommonCheckpoint
 {
 public:
@@ -83,7 +83,8 @@ public:
                   const uint64_t table_id,
                   const storage::ObTableReadInfo &read_info,
                   const common::ObIArray<share::schema::ObColDesc> &columns,
-                  const storage::ObStoreRow &row) override;
+                  const storage::ObStoreRow &row,
+                  const share::ObEncryptMeta *encrypt_meta) override;
 
   virtual int lock(storage::ObStoreCtx &ctx,
                    const uint64_t table_id,

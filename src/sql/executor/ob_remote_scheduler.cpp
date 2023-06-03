@@ -160,6 +160,8 @@ int ObRemoteScheduler::build_remote_task(ObExecContext &ctx,
   remote_task.set_session(ctx.get_my_session());
   remote_task.set_query_schema_version(task_exec_ctx.get_query_tenant_begin_schema_version(),
                                        task_exec_ctx.get_query_sys_begin_schema_version());
+  LOG_TRACE("print schema_version", K(task_exec_ctx.get_query_tenant_begin_schema_version()),
+      K(task_exec_ctx.get_query_sys_begin_schema_version()));
   remote_task.set_remote_sql_info(&plan_ctx->get_remote_sql_info());
   ObDASTabletLoc *first_tablet_loc = DAS_CTX(ctx).get_table_loc_list().get_first()->get_first_tablet_loc();
   if (OB_ISNULL(session = ctx.get_my_session())) {
@@ -243,16 +245,7 @@ int ObRemoteScheduler::execute_with_sql(ObExecContext &ctx, ObPhysicalPlan *phy_
                                      *handler,
                                      has_sent_task,
                                      has_transfer_err))) {
-      int add_ret = OB_SUCCESS;
-      if (is_data_not_readable_err(ret) || is_server_down_error(ret)) {
-        // 读到落后太多的备机或者正在回放日志的副本了，
-        // 将远端的这个observer加进retry info的invalid servers中
-        if (OB_UNLIKELY(OB_SUCCESS != (add_ret =
-                retry_info->add_invalid_server_distinctly(task.get_runner_svr(), true)))) {
-          LOG_WARN("fail to add remote addr to invalid servers distinctly",
-                   K(ret), K(add_ret), K(task), K(*retry_info));
-        }
-      }
+      LOG_WARN("task execute failed", K(ret));
     }
 
     // handle tx relative info if plan involved in transaction

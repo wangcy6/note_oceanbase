@@ -123,7 +123,7 @@ static void make_random_cache_key(ObBackupIndexCacheKey &cache_key)
   make_random_offset(block_desc.offset_);
   make_random_length(block_desc.length_);
   cache_key.mode_ = BACKUP_MODE;
-  cache_key.tenant_id_ = 1002;
+  cache_key.tenant_id_ = 1;
   make_random_backup_set_id(cache_key.backup_set_id_);
   make_random_ls_id(cache_key.ls_id_);
   cache_key.backup_data_type_.type_ = share::ObBackupDataType::BACKUP_SYS;
@@ -160,7 +160,7 @@ static bool cmp(const common::ObIArray<T> &lhs_list, const common::ObIArray<T> &
   LOG_INFO("compare summary", "lhs_count", lhs_list.count(), "rhs_count", rhs_list.count());
   if (lhs_list.count() != rhs_list.count()) {
     bret = false;
-    LOG_WARN("count not match", K(lhs_list.count()), K(rhs_list.count()));
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "count not match", K(lhs_list.count()), K(rhs_list.count()));
   } else {
     for (int64_t i = 0; i < lhs_list.count(); ++i) {
       const T &lhs = lhs_list.at(i);
@@ -169,7 +169,7 @@ static bool cmp(const common::ObIArray<T> &lhs_list, const common::ObIArray<T> &
         bret = true;
       } else {
         bret = false;
-        LOG_WARN("value not match", K(lhs), K(rhs));
+        LOG_WARN_RET(OB_ERR_UNEXPECTED, "value not match", K(lhs), K(rhs));
         break;
       }
     }

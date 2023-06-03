@@ -178,7 +178,7 @@ int ObLoadDataBase::make_parameterize_stmt(ObExecContext &ctx,
     ObMaxConcurrentParam::FixParamStore fixed_param_store(OB_MALLOC_NORMAL_BLOCK_SIZE,
                                                           ObWrapperAllocator(&ctx.get_allocator()));
     if (OB_FAIL(parser.parse(insertsql.string(), parse_result))) {
-      LOG_WARN("paser template insert sql failed", K(ret));
+      LOG_WARN("parser template insert sql failed", K(ret));
     } else if (OB_FAIL(ObSqlParameterization::transform_syntax_tree(ctx.get_allocator(),
                                                                     *session,
                                                                     NULL,
@@ -274,7 +274,7 @@ int ObLoadDataBase::memory_check_remote(uint64_t tenant_id, bool &need_wait_mino
 
 /*
  * if param_a != param_b: this variable is from a field of data file,
- * calc the correspond field index via param string value
+ * calc the corresponding field index via param string value
  * return the index
 */
 int ObLoadDataBase::calc_param_offset(const ObObj &param_a,
@@ -344,9 +344,9 @@ int ObLoadDataBase::memory_wait_local(ObExecContext &ctx,
                K(tablet_id), K(server_addr), K(total_wait_secs));
     }
 
-    bool force_renew = false;
     bool need_wait_freeze = true;
     ObAddr leader_addr;
+    ObDASLocationRouter &loc_router = DAS_CTX(ctx).get_location_router();
 
     while (OB_SUCC(ret) && need_wait_freeze) {
 
@@ -355,26 +355,17 @@ int ObLoadDataBase::memory_wait_local(ObExecContext &ctx,
       leader_addr.reset();
       res.reuse();
       char leader_ip_str[MAX_IP_ADDR_LENGTH];
-      bool force_renew = false;
-      do {
-        const int64_t retry_us = 200 * 1000;
-        const int64_t expire_renew_time = 2 * 1000000; // 2s
-        if (OB_FAIL(ObLoadDataUtils::check_session_status(*session))) {
-          LOG_WARN("session is not valid during wait", K(ret));
-        } else if (OB_FAIL(ObDASLocationRouter::get_leader(tenant_id, tablet_id, leader_addr, expire_renew_time))) {
-          if (is_location_service_renew_error(ret) && !force_renew) {
-            // retry one time
-            force_renew = true;
-            LOG_WARN("failed to get location and force renew", K(ret));
-          } else {
-            LOG_WARN("failed to get location", K(ret));
-            ob_usleep(retry_us);
-          }
-        } else {
-          force_renew = false;
-          LOG_DEBUG("get participants", K(tablet_id), K(leader_addr));
-        }
-      } while (is_location_service_renew_error(ret) && force_renew);
+      const int64_t retry_us = 200 * 1000;
+      //Try to use the results in the cache as much as possible, without forcing a cache refresh.
+      const int64_t expire_renew_time = 0;
+      if (OB_FAIL(ObLoadDataUtils::check_session_status(*session))) {
+        LOG_WARN("session is not valid during wait", K(ret));
+      } else if (OB_FAIL(loc_router.get_leader(tenant_id, tablet_id, leader_addr, expire_renew_time))) {
+        LOG_WARN("failed to get location", K(ret));
+        ob_usleep(retry_us);
+      } else {
+        LOG_DEBUG("get participants", K(tablet_id), K(leader_addr));
+      }
 
       if (OB_FAIL(ret)) {
       } else if (!leader_addr.ip_to_string(leader_ip_str, sizeof(leader_ip_str))) {
@@ -393,16 +384,16 @@ int ObLoadDataBase::memory_wait_local(ObExecContext &ctx,
       } else if (OB_FAIL(result->next())) {
         LOG_WARN("fail to get result, force renew location", K(ret), K(leader_addr));
         if (OB_ITER_END == ret) {
-          force_renew = true;
           ret = OB_SUCCESS;
         }
       } else {
-        force_renew = false;
         EXTRACT_BOOL_FIELD_MYSQL(*result, "need_wait_freeze", need_wait_freeze);
         //LOG_INFO("LOAD DATA is waiting for tenant memory available",
                  //K(waited_seconds), K(total_wait_secs), K(tenant_id));
       }
-
+      //if it is location exception, refresh location cache with block interface
+      //because load data can only local retry
+      loc_router.refresh_location_cache(false, ret);
     }
 
     //print info
@@ -454,7 +445,7 @@ int ObLoadDataBase::pre_parse_lines(ObLoadFileBuffer &buffer,
         }
       }
     }
-    if (is_last_buf && buffer.current_ptr() > cur_pos) {
+    if (is_last_buf && cur_lines < line_count && buffer.current_ptr() > cur_pos) {
       cur_lines++;
       cur_pos = buffer.current_ptr();
     }
@@ -588,13 +579,15 @@ int ObInsertValueGenerator::set_params(ObString &insert_header, ObCollationType 
 }
 
 int ObInsertValueGenerator::init(ObSQLSessionInfo &session,
-                                 ObLoadFileBuffer *data_buffer)
+                                 ObLoadFileBuffer *data_buffer,
+                                 ObSchemaGetterGuard *schema_guard)
 {
   ObObjPrintParams param = session.create_obj_print_params();
   param.cs_type_ = CS_TYPE_UTF8MB4_BIN;
   expr_printer_.init(data_buffer->begin_ptr(),
                      data_buffer->get_buffer_size(),
                      data_buffer->get_pos(),
+                     schema_guard,
                      param);
   data_buffer_ = data_buffer;
   return OB_SUCCESS;
@@ -603,7 +596,8 @@ int ObInsertValueGenerator::init(ObSQLSessionInfo &session,
 int ObLoadDataSPImpl::gen_insert_columns_names_buff(ObExecContext &ctx,
                                                     const ObLoadArgument &load_args,
                                                     ObIArray<ObLoadTableColumnDesc> &insert_infos,
-                                                    ObString &data_buff)
+                                                    ObString &data_buff,
+                                                    bool need_online_osg)
 {
   int ret = OB_SUCCESS;
 
@@ -639,7 +633,8 @@ int ObLoadDataSPImpl::gen_insert_columns_names_buff(ObExecContext &ctx,
     if (OB_FAIL(ObLoadDataUtils::build_insert_sql_string_head(load_args.dupl_action_,
                                                               load_args.combined_name_,
                                                               insert_column_names,
-                                                              insert_stmt))) {
+                                                              insert_stmt,
+                                                              need_online_osg))) {
       LOG_WARN("gen insert sql column_names failed", K(ret));
     } else if (OB_FAIL(ob_write_string(ctx.get_allocator(), insert_stmt.string(), data_buff))) {
       LOG_WARN("fail to write string", K(ret));
@@ -899,7 +894,7 @@ void ObCSVFormats::init(const ObDataInFileStruct &file_formats)
   if (!file_formats.field_term_str_.empty()
       && file_formats.line_term_str_.empty()) {
     is_line_term_by_counting_field_ = true;
-    field_term_char_ = line_term_char_;
+    line_term_char_ = field_term_char_;
   }
   is_simple_format_ =
       !is_line_term_by_counting_field_
@@ -985,7 +980,8 @@ int ObLoadDataSPImpl::exec_shuffle(int64_t task_id, ObShuffleTaskHandle *handle)
 
   if (OB_ISNULL(handle)
       || OB_ISNULL(handle->data_buffer)
-      || OB_ISNULL(handle->exec_ctx.get_my_session())) {
+      || OB_ISNULL(handle->exec_ctx.get_my_session())
+      || OB_ISNULL(handle->exec_ctx.get_sql_ctx())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", KP(handle));
 //  } else if (FALSE_IT(handle->exec_ctx.get_allocator().reuse())) {
@@ -1017,7 +1013,8 @@ int ObLoadDataSPImpl::exec_shuffle(int64_t task_id, ObShuffleTaskHandle *handle)
       return common::OB_SUCCESS;
     };
 
-    if (OB_FAIL(handle->generator.init(*(handle->exec_ctx.get_my_session()), expr_buffer))) {
+    if (OB_FAIL(handle->generator.init(*(handle->exec_ctx.get_my_session()), expr_buffer,
+                                       handle->exec_ctx.get_sql_ctx()->schema_guard_))) {
       LOG_WARN("fail to init buffer", K(ret));
     } else if (OB_FAIL(parse_result.prepare_allocate(handle->generator.get_field_exprs().count()))) {
       LOG_WARN("fail to allocate", K(ret));
@@ -1057,7 +1054,8 @@ int ObLoadDataSPImpl::exec_shuffle(int64_t task_id, ObShuffleTaskHandle *handle)
         } else if (OB_FAIL(handle->generator.gen_insert_values(insert_values, str_buf))) {
           LOG_WARN("fail to generate insert values", K(ret));
         } else if (nullptr == handle->calc_tablet_id_expr) {
-          tablet_id = handle->datafrag_mgr.get_tablet_ids().at(0);
+          int64_t idx = task_id % handle->datafrag_mgr.get_tablet_ids().count();
+          tablet_id = handle->datafrag_mgr.get_tablet_ids().at(idx);
         } else {
           for (int i = 0; i < handle->parser.get_fields_per_line().count(); ++i) {
             ObCSVGeneralParser::FieldValue &str_v = handle->parser.get_fields_per_line().at(i);
@@ -1666,8 +1664,8 @@ int ObLoadDataSPImpl::handle_returned_insert_task(ObExecContext &ctx,
       }
       */
      
-      box.job_status->processed_rows_ = box.affected_rows;
-      box.job_status->processed_bytes_ += insert_task.data_size_;
+      box.job_status->parsed_rows_ = box.affected_rows;
+      box.job_status->parsed_bytes_ += insert_task.data_size_;
       box.job_status->total_insert_task_ = box.insert_task_controller.get_total_task_cnt();
       box.job_status->insert_rt_sum_ = box.insert_rt_sum;
       box.job_status->total_wait_secs_ = box.wait_secs_for_mem_release;
@@ -1691,6 +1689,7 @@ int ObLoadDataSPImpl::handle_returned_insert_task(ObExecContext &ctx,
                "task_id", insert_task.task_id_,
                "ret", result.exec_ret_,
                "row_count", insert_task.row_count_);
+      ret = result.exec_ret_;
       break;
     default:
       ret = OB_ERR_UNEXPECTED;
@@ -1944,6 +1943,10 @@ int ObLoadDataSPImpl::execute(ObExecContext &ctx, ObLoadDataStmt &load_stmt)
     if (OB_SUCC(ret) && OB_NOT_NULL(ctx.get_physical_plan_ctx())) {
       ctx.get_physical_plan_ctx()->set_affected_rows(box.affected_rows);
       ctx.get_physical_plan_ctx()->set_row_matched_count(box.data_trimer.get_lines_count());
+    }
+
+    if (OB_NOT_NULL(ctx.get_my_session())) {
+      ctx.get_my_session()->reset_cur_phy_plan_to_null();
     }
 
     if (OB_FAIL(ret)) {
@@ -2264,9 +2267,10 @@ int ObPartDataFragMgr::update_part_location(ObExecContext &ctx)
     LOG_WARN("invalid partition key", K(ret));
   } else {
     bool force_renew = false;
-    const int64_t expire_renew_time = 2 * 1000000; // 2s
+    ObDASLocationRouter &loc_router = DAS_CTX(ctx).get_location_router();
     do {
-      if (OB_FAIL(ObDASLocationRouter::get_leader(tenant_id_, tablet_id_, leader_addr_, expire_renew_time))) {
+      const int64_t expire_renew_time = force_renew ? INT64_MAX : 0;
+      if (OB_FAIL(loc_router.get_leader(tenant_id_, tablet_id_, leader_addr_, expire_renew_time))) {
         if (is_location_service_renew_error(ret) && !force_renew) {
           // retry one time
           force_renew = true;
@@ -2321,6 +2325,7 @@ int ObLoadDataSPImpl::ToolBox::release_resources()
                    K(ret), "wait_seconds", log_print_cnt * 10, K(gid), K(ref_cnt));
         }
       }
+      job_status->~ObLoadDataStat();
     }
   }
 
@@ -2414,14 +2419,17 @@ int ObLoadDataSPImpl::ToolBox::build_calc_partid_expr(ObExecContext &ctx,
   ObSqlString insert_sql;
   ObSEArray<ObString, 16> column_names;
   ObLoadArgument &load_args = load_stmt.get_load_arguments();
+  bool need_online_osg = false;
 
   for (int i = 0; OB_SUCC(ret) && i < insert_infos.count(); ++i) {
     OZ (column_names.push_back(insert_infos.at(i).column_name_));
   }
+  OZ (ObLoadDataUtils::check_need_opt_stat_gather(ctx, load_stmt, need_online_osg));
   OZ (ObLoadDataUtils::build_insert_sql_string_head(load_args.dupl_action_,
                                                     load_args.combined_name_,
                                                     column_names,
-                                                    insert_sql));
+                                                    insert_sql,
+                                                    need_online_osg));
   OZ (insert_sql.append(" VALUES("));
   for (int i = 0; OB_SUCC(ret) && i < insert_infos.count(); ++i) {
     if (i != 0) {
@@ -2534,10 +2542,14 @@ int ObLoadDataSPImpl::ToolBox::build_calc_partid_expr(ObExecContext &ctx,
     }
 
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(ObStaticEngineExprCG::gen_expr_with_row_desc(calc_partid_expr,
+      if (OB_ISNULL(ctx.get_sql_ctx())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("sql ctx is null", K(ret));
+      } else if (OB_FAIL(ObStaticEngineExprCG::gen_expr_with_row_desc(calc_partid_expr,
                                                                row_desc,
                                                                ctx.get_allocator(),
                                                                ctx.get_my_session(),
+                                                               ctx.get_sql_ctx()->schema_guard_,
                                                                temp_expr))) {
         LOG_WARN("fail to gen temp expr", K(ret));
       } else {
@@ -2551,6 +2563,14 @@ int ObLoadDataSPImpl::ToolBox::build_calc_partid_expr(ObExecContext &ctx,
         LOG_WARN("plan ctx is null", K(ret));
       } else {
         ctx.get_physical_plan_ctx()->set_autoinc_params(insert_stmt->get_autoinc_params());
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      bool part_key_has_autoinc = false;
+      OZ (insert_stmt->part_key_has_auto_inc(part_key_has_autoinc));
+      if (part_key_has_autoinc) {
+        calc_tablet_id_expr = NULL;
       }
     }
 
@@ -2574,6 +2594,7 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
   ObIODOpt opt;
   ObIODOpts iod_opts;
   ObBackupIoAdapter util;
+  bool need_online_osg = false;
 
   iod_opts.opts_ = &opt;
   iod_opts.opt_cnt_ = 0;
@@ -2599,16 +2620,20 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
   ObSQLSessionInfo *session = NULL;
   ObTempExpr *calc_tablet_id_expr = nullptr;
 
-  if (OB_ISNULL(session = ctx.get_my_session())) {
+  if (OB_ISNULL(session = ctx.get_my_session()) ||
+      OB_ISNULL(ctx.get_sql_ctx())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
   } else if (OB_FAIL(data_trimer.init(ctx.get_allocator(), formats))) {
     LOG_WARN("fail to init data_trimer", K(ret));
   } else if (OB_FAIL(gen_load_table_column_desc(ctx, load_stmt, insert_infos))) {
     LOG_WARN("fail to build load table column desc", K(ret));
+  } else if (OB_FAIL(ObLoadDataUtils::check_need_opt_stat_gather(ctx, load_stmt, need_online_osg))) {
+    LOG_WARN("fail to check need online stats gather", K(ret));
   } else if (OB_FAIL(gen_insert_columns_names_buff(ctx, load_args,
                                                    insert_infos,
-                                                   insert_stmt_head_buff))) {
+                                                   insert_stmt_head_buff,
+                                                   need_online_osg))) {
     LOG_WARN("fail to gen insert column names buff", K(ret));
   } else if (OB_FAIL(data_frag_mgr.init(ctx, load_args.table_id_))) {
     LOG_WARN("fail to init data frag mgr", K(ret));
@@ -2717,7 +2742,7 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
       LOG_WARN("allocate memory failed", K(ret));
     } else if (FALSE_IT(expr_buffer = new(buf) ObLoadFileBuffer(
                           ObLoadFileBuffer::MAX_BUFFER_SIZE - sizeof(ObLoadFileBuffer)))) {
-    } else if (OB_FAIL(generator.init(*session, expr_buffer))) {
+    } else if (OB_FAIL(generator.init(*session, expr_buffer, ctx.get_sql_ctx()->schema_guard_))) {
       LOG_WARN("fail to init generator", K(ret));
     } else if (OB_FAIL(generator.set_params(insert_stmt_head_buff, load_args.file_cs_type_))) {
       LOG_WARN("fail to set pararms", K(ret));
@@ -2789,6 +2814,22 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
       batch_row_count = std::max(1L, std::min(DEFAULT_BUFFERRED_ROW_COUNT, hint_batch_size));
     }
     LOG_DEBUG("batch size", K(hint_batch_size), K(batch_row_count));
+  }
+
+  if (OB_SUCC(ret)) {
+    int64_t query_timeout = 0;
+    if (OB_FAIL(hint.get_value(ObLoadDataHint::QUERY_TIMEOUT, query_timeout))) {
+      LOG_WARN("fail to get value", K(ret));
+    } else if (0 == query_timeout) {
+      if (OB_FAIL(ctx.get_my_session()->get_query_timeout(query_timeout))) {
+        LOG_WARN("fail to get query timeout", KR(ret));
+      } else {
+        query_timeout = MAX(query_timeout, RPC_BATCH_INSERT_TIMEOUT_US);
+        THIS_WORKER.set_timeout_ts(ctx.get_my_session()->get_query_start_time() + query_timeout);
+      }
+    } else if (query_timeout > 0) {
+      THIS_WORKER.set_timeout_ts(ctx.get_my_session()->get_query_start_time() + query_timeout);
+    }
   }
 
   if (OB_SUCC(ret)) {
@@ -2981,8 +3022,11 @@ int ObLoadDataSPImpl::ToolBox::init(ObExecContext &ctx, ObLoadDataStmt &load_stm
       ObLoadDataGID::generate_new_id(temp_gid);
       job_status->tenant_id_ = tenant_id;
       job_status->job_id_ = temp_gid.id;
-      job_status->table_name_ = load_args.combined_name_;
-      job_status->file_path_ = load_args.file_name_;
+      job_status->allocator_.set_tenant_id(tenant_id);
+      OZ(ob_write_string(job_status->allocator_,
+                         load_args.combined_name_, job_status->table_name_));
+      OZ(ob_write_string(job_status->allocator_,
+                         load_args.file_name_, job_status->file_path_));
       job_status->file_column_ = num_of_file_column;
       job_status->table_column_ = num_of_table_column;
       job_status->batch_size_ = batch_row_count;

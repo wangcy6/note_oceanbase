@@ -355,6 +355,7 @@ my @errors_deps = map {$_->[0]} @sorted_deps;
 my @pairs = map {[$_, $map{$_}->[0] ]} keys %map;
 my @sorted = sort {$b->[1] <=> $a->[1]} @pairs;
 my @errors = map {$_->[0]} @sorted;
+my @errnos = reverse sort { $a <=> $b } map {$map{$_}->[0]} keys %map;
 
 # generate share/ob_errno.h
 open my $fh_header, '>', "ob_errno.h";
@@ -424,6 +425,9 @@ constexpr int OB_ERR_SQL_END = -5999;
     my $tmp_ora_user_errmsg=sprintf($print_ora_errmsg, "ORA", $ora_errno, substr($ora_msg, 1, length($ora_msg) - 2));
     print $fh_header "#define ${oberr}__ORA_USER_ERROR_MSG $tmp_ora_user_errmsg\n";
   }
+
+  print $fh_header "\nextern int g_all_ob_errnos[${\(scalar @errnos)}];";
+
   print $fh_header '
 
   const char *ob_error_name(const int oberr);
@@ -514,7 +518,7 @@ print $fh_cpp '
 // and will jam when asan turned on
 // it can be solved by introducing <iostream> header file currently
 // TODO: it is clang bug and the specific reason to be further located
-// issue: https://work.aone.alibaba-inc.com/issue/39615894
+// issue:
 #include <iostream>
 
 #include "ob_errno.h"
@@ -588,10 +592,34 @@ inline const _error *get_error(int index)
   return _errors[index];
 }
 
+int get_oracle_errno(int index)
+{
+  return get_error(index)->oracle_errno;
+}
+
+int get_mysql_errno(int index)
+{
+  return get_error(index)->mysql_errno;
+}
+
+const char* get_oracle_str_error(int index)
+{
+  return get_error(index)->oracle_str_error;
+}
+
+const char* get_mysql_str_error(int index)
+{
+  return get_error(index)->str_error;
+}
+
 namespace oceanbase
 {
 namespace common
 {
+';
+print $fh_cpp "int g_all_ob_errnos[${\(scalar @errnos)}] = {" . join(", ", @errnos) . "};";
+
+print $fh_cpp '
   const char *ob_error_name(const int err)
   {
     const char *ret = "Unknown error";
@@ -707,67 +735,6 @@ namespace common
     }
     return ret;
   }
-#ifndef __ERROR_CODE_PARSER_
-  int get_ob_errno_from_oracle_errno(const int error_no, const char *error_msg, int &ob_errno) {
-    const int orcl_errno = abs(error_no);
-    ob_errno = error_no;
-    int64_t edit_dist = 0x7fffffffffffffff;
-    int64_t min_edit_dist = 0x7fffffffffffffff;
-    if (nullptr == error_msg) {
-      for (int i = 0; i < OB_MAX_ERROR_CODE; ++i) {
-        if (orcl_errno == get_error(i)->oracle_errno) {
-          ob_errno = -i;
-          break;
-        }
-      }
-      /**
-       * In ob-ob mode dblink if there is an error when using the mysql interface
-       * mysql_real_connect to connect to the remote database, 
-       * the ob internal error code is mapped through the MYSQL_ERRNO array, 
-       * so in order to get the original ob internal error code, 
-       * it needs to be reversed mapped through MYSQL_ERRNO instead of ORACLE_ERRNO.
-      */
-      if (ob_errno == error_no) {
-        for (int i = 0; i < OB_MAX_ERROR_CODE; ++i) {
-          if (orcl_errno == get_error(i)->mysql_errno) {
-            ob_errno = -i;
-            break;
-          }
-        }
-      }
-    } else {
-      ObEditDistance<ObWords> ed;
-      ObWords errmsg_words(error_msg);
-      errmsg_words.divide();
-      for (int i = 0; i < OB_MAX_ERROR_CODE; ++i) {
-        if (orcl_errno == get_error(i)->oracle_errno) {
-          const char *orcl_str_error = get_error(i)->oracle_str_user_error;
-          if (nullptr == orcl_str_error) {
-            // In the case of a null pointer boundary, 
-            // the reason for setting edit_distance to 0x7ffffffffffffffe is to deal with the situation where 
-            // error_msg does not match ORACLE_STR_USER_ERROR[i] but orcl_errno == ORACLE_ERRNO[i].
-            edit_dist = 0x7ffffffffffffffe;
-          } else {
-            // The edit distance between the strings is used to measure their similarity. 
-            // The smaller the edit distance, the greater the similarity, so as to find the most similar error message.
-            ObWords orclmsg_words(orcl_str_error);
-            orclmsg_words.divide();
-            ed.cal_edit_distance(errmsg_words, orclmsg_words, edit_dist);
-          }
-          if (edit_dist < min_edit_dist) {
-            ob_errno = -i;
-            min_edit_dist = edit_dist;
-            if (0 == min_edit_dist) {
-              break;
-            }
-          }
-        }
-      }
-    }
-    LOG_TRACE("trace the ob_errno and oracle_errno.", K(ob_errno), K(error_no), K(min_edit_dist));
-    return OB_SUCCESS;
-  }
-#endif
   int ob_oracle_errno(const int err)
   {
     int ret = -1;

@@ -12,7 +12,10 @@
 
 #define USING_LOG_PREFIX SHARE
 
+#include "lib/ob_name_id_def.h" //OB_ID
 #include "share/ob_tenant_role.h"
+#include "lib/utility/ob_print_utils.h" //TO_STRING_KV
+#include "lib/trace/ob_trace_event.h"
 
 using namespace oceanbase;
 using namespace oceanbase::common;
@@ -29,6 +32,8 @@ static const char* TENANT_ROLE_ARRAY[] =
 };
 
 OB_SERIALIZE_MEMBER(ObTenantRole, value_);
+DEFINE_TO_YSON_KV(ObTenantRole,
+                  OB_ID(value), value_);
 
 const char* ObTenantRole::to_str() const
 {
@@ -36,7 +41,7 @@ const char* ObTenantRole::to_str() const
   const char *type_str = "UNKNOWN";
   if (OB_UNLIKELY(value_ >= ARRAYSIZEOF(TENANT_ROLE_ARRAY)
                   || value_ < INVALID_TENANT)) {
-    LOG_ERROR("fatal error, unknown tenant role", K_(value));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "fatal error, unknown tenant role", K_(value));
   } else {
     type_str = TENANT_ROLE_ARRAY[value_];
   }
@@ -57,7 +62,7 @@ ObTenantRole::ObTenantRole(const ObString &str)
   }
 
   if (INVALID_TENANT == value_) {
-    LOG_WARN("invalid tenant role", K_(value), K(str));
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "invalid tenant role", K_(value), K(str));
   }
 }
 

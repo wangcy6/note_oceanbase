@@ -14,11 +14,11 @@
 #define _OCEABASE_LIB_NET_OB_ADDR_H_
 
 #include "lib/ob_define.h"
-#include "lib/string/ob_string.h"
+#include "util/easy_inet.h"
 #include "lib/utility/ob_unify_serialize.h"
-#include "lib/container/ob_se_array.h"
-#include "lib/container/ob_array_serialization.h"
-#include "lib/ob_name_id_def.h"
+#include "lib/utility/ob_print_utils.h"
+
+struct easy_addr_t;
 
 namespace oceanbase
 {
@@ -29,6 +29,7 @@ class ObBatchP;
 };
 namespace common
 {
+class ObString;
 
 class ObAddr
 {
@@ -71,6 +72,8 @@ public:
     ip_.v4_  = ip;
   }
 
+  explicit ObAddr(const easy_addr_t& addr);
+
   void reset()
   {
     port_ = 0;
@@ -99,6 +102,7 @@ public:
   ObAddr &as_subnet(const ObAddr &mask);
 
   int64_t hash() const;
+  int hash(uint64_t &code) const;
   ObAddr &operator=(const ObAddr &rv);
   bool operator !=(const ObAddr &rv) const;
   bool operator ==(const ObAddr &rv) const;
@@ -140,10 +144,6 @@ private:
   } ip_;
   int32_t port_;
 }; // end of class ObAddr
-
-typedef ObSEArray<ObAddr, 3> ObAddrArray;
-typedef ObSArray<ObAddr> ObAddrSArray;
-typedef ObIArray<ObAddr> ObAddrIArray;
 
 inline bool ObAddr::is_valid() const
 {
@@ -188,6 +188,12 @@ inline int64_t ObAddr::hash() const
   }
 
   return code;
+}
+
+inline int ObAddr::hash(uint64_t &code) const
+{
+  code = hash();
+  return OB_SUCCESS;
 }
 
 inline ObAddr &ObAddr::operator=(const ObAddr &rv) {
@@ -250,6 +256,10 @@ public:
   int64_t hash() const {
     return murmurhash(&server_addr_, sizeof(server_addr_), server_seq_);
   }
+  int hash(uint64_t &hash_val) const {
+    hash_val = hash();
+    return OB_SUCCESS;
+  }
 
   bool is_valid() const {
     return server_addr_.is_valid() && server_seq_ >= 0;
@@ -275,7 +285,7 @@ public:
 
   const ObAddr &get_addr() const { return server_addr_; }
   const int64_t &get_seq() const { return server_seq_; }
-  TO_STRING_KV(K_(server_addr), K_(server_seq));
+  DECLARE_TO_STRING;
 private:
   ObAddr server_addr_;
   int64_t server_seq_;

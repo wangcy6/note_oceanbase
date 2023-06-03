@@ -124,7 +124,7 @@ int ObLockMemCtx::commit_table_lock_(const SCN &commit_version, const SCN &commi
     DLIST_FOREACH_REMOVESAFE(curr, lock_list_) {
       switch (curr->lock_op_.op_type_) {
       case IN_TRANS_DML_LOCK:
-      case IN_TRANS_LOCK_TABLE_LOCK: {
+      case IN_TRANS_COMMON_LOCK: {
         // remove the lock op.
         memtable->remove_lock_record(curr->lock_op_);
         break;
@@ -251,7 +251,7 @@ void ObLockMemCtx::remove_lock_record(
     ObMemCtxLockOpLinkNode *lock_op)
 {
   if (OB_ISNULL(lock_op)) {
-    LOG_WARN("invalid argument.", K(lock_op));
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid argument.", K(lock_op));
   } else {
     {
       WRLockGuard guard(list_rwlock_);
@@ -267,7 +267,7 @@ void ObLockMemCtx::remove_lock_record(
     const ObTableLockOp &lock_op)
 {
   if (OB_UNLIKELY(!lock_op.is_valid())) {
-    LOG_WARN("invalid argument.", K(lock_op));
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid argument.", K(lock_op));
   } else {
     WRLockGuard guard(list_rwlock_);
     DLIST_FOREACH_REMOVESAFE_NORET(curr, lock_list_) {
@@ -288,7 +288,7 @@ void ObLockMemCtx::set_log_synced(
     const SCN &scn)
 {
   if (OB_ISNULL(lock_op)) {
-    LOG_WARN("invalid argument.", K(lock_op));
+    LOG_WARN_RET(OB_INVALID_ARGUMENT, "invalid argument.", K(lock_op));
   } else {
     max_durable_scn_.inc_update(scn);
     lock_op->logged_ = true;
@@ -300,6 +300,7 @@ int ObLockMemCtx::check_lock_exist(
     const ObLockID &lock_id,
     const ObTableLockOwnerID &owner_id,
     const ObTableLockMode mode,
+    const ObTableLockOpType op_type,
     bool &is_exist,
     ObTableLockMode &lock_mode_in_same_trans) const
 {
@@ -313,14 +314,16 @@ int ObLockMemCtx::check_lock_exist(
   } else {
     RDLockGuard guard(list_rwlock_);
     DLIST_FOREACH(curr, lock_list_) {
-      if (curr->lock_op_.lock_id_ == lock_id &&
-          curr->lock_op_.owner_id_ == owner_id &&
-          curr->lock_op_.lock_op_status_ == LOCK_OP_DOING) {
-        if (curr->lock_op_.lock_mode_ == mode) {
+      if (curr->lock_op_.lock_id_ == lock_id) {
+        // BE CAREFUL: get all the lock mode curr trans has got.
+        lock_mode_in_same_trans |= curr->lock_op_.lock_mode_;
+        // check exist.
+        if (curr->lock_op_.lock_mode_ == mode &&
+            curr->lock_op_.owner_id_ == owner_id &&
+            curr->lock_op_.op_type_ == op_type && /* different op type may lock twice */
+            curr->lock_op_.lock_op_status_ == LOCK_OP_DOING) {
           is_exist = true;
           break;
-        } else {
-          lock_mode_in_same_trans |= curr->lock_op_.lock_mode_;
         }
       }
     }
@@ -341,7 +344,7 @@ int ObLockMemCtx::check_modify_schema_elapsed(
     RDLockGuard guard(list_rwlock_);
     DLIST_FOREACH(curr, lock_list_) {
       if (curr->lock_op_.lock_id_ == lock_id &&
-          curr->lock_op_.create_schema_version_ <= schema_version) {
+          curr->lock_op_.create_schema_version_ < schema_version) {
         // there is some trans that modify the tablet before schema version
         // running.
         ret = OB_EAGAIN;
@@ -367,7 +370,7 @@ int ObLockMemCtx::check_modify_time_elapsed(
     RDLockGuard guard(list_rwlock_);
     DLIST_FOREACH(curr, lock_list_) {
       if (curr->lock_op_.lock_id_ == lock_id &&
-          curr->lock_op_.create_timestamp_ <= timestamp) {
+          curr->lock_op_.create_timestamp_ < timestamp) {
         // there is some trans that modify the tablet before timestamp
         // running.
         ret = OB_EAGAIN;

@@ -174,12 +174,25 @@ int LogNetService::submit_notify_rebuild_req(
   return ret;
 }
 
+int LogNetService::submit_notify_fetch_log_req(const ObMemberList &dst_list)
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+  } else {
+    NotifyFetchLogReq notify_req;
+    ret = post_request_to_member_list_(dst_list, notify_req);
+  }
+  return ret;
+}
+
 int LogNetService::submit_prepare_meta_resp(
     const common::ObAddr &server,
     const int64_t &msg_proposal_id,
     const bool vote_granted,
     const int64_t &log_proposal_id,
-    const LSN &lsn,
+    const LSN &max_flushed_lsn,
+    const LSN &committed_end_lsn,
     const LogModeMeta &mode_meta)
 {
   int ret = OB_SUCCESS;
@@ -187,7 +200,8 @@ int LogNetService::submit_prepare_meta_resp(
     ret = OB_NOT_INIT;
     PALF_LOG(ERROR, "LogNetService not inited!!!", K(ret), K(palf_id_));
   } else {
-    LogPrepareResp prepare_meta_resp(msg_proposal_id, vote_granted, log_proposal_id, lsn, mode_meta);
+    LogPrepareResp prepare_meta_resp(msg_proposal_id, vote_granted, log_proposal_id, max_flushed_lsn, \
+        mode_meta, committed_end_lsn);
     ret = post_request_to_server_(server, prepare_meta_resp);
     PALF_LOG(INFO, "submit_prepare_meta_resp success", K(ret), K(server), K(msg_proposal_id));
   }
@@ -209,22 +223,6 @@ int LogNetService::submit_change_config_meta_resp(
   return ret;
 }
 
-int LogNetService::submit_change_mode_meta_req(
-    const common::ObMemberList &member_list,
-    const int64_t &msg_proposal_id,
-    const LogModeMeta &mode_meta)
-{
-  int ret = OB_SUCCESS;
-  int64_t pos = 0;
-  if (IS_NOT_INIT) {
-    ret = OB_NOT_INIT;
-  } else {
-    LogChangeModeMetaReq req(msg_proposal_id, mode_meta);
-    ret = post_request_to_member_list_(member_list, req);
-  }
-  return ret;
-}
-
 int LogNetService::submit_change_mode_meta_resp(
     const common::ObAddr &server,
     const int64_t &msg_proposal_id)
@@ -237,11 +235,15 @@ int LogNetService::submit_change_mode_meta_resp(
     ret = post_request_to_server_(server, req);
   }
   return ret;
-
 }
-int LogNetService::submit_get_memberchange_status_req(
+
+int LogNetService::submit_config_change_pre_check_req(
     const ObAddr &server,
     const LogConfigVersion &config_version,
+<<<<<<< HEAD
+=======
+    const bool need_purge_throttling,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     const int64_t timeout_us,
     LogGetMCStResp &resp)
 {
@@ -249,11 +251,16 @@ int LogNetService::submit_get_memberchange_status_req(
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
   } else {
+<<<<<<< HEAD
     LogGetMCStReq req(config_version);
+=======
+    LogGetMCStReq req(config_version, need_purge_throttling);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     ret = post_sync_request_to_server_(server, timeout_us, req, resp);
   }
   return ret;
 }
+
 
 int LogNetService::submit_register_parent_req(
     const common::ObAddr &server,
@@ -332,6 +339,20 @@ int LogNetService::submit_learner_keepalive_resp(const common::ObAddr &server, c
   } else {
     LogLearnerReq req(sender_itself, LogLearnerReqType::KEEPALIVE_RESP);
     ret = post_request_to_server_(server, req);
+  }
+  return ret;
+}
+
+int LogNetService::submit_get_stat_req(const common::ObAddr &server,
+                                       const int64_t timeout_us,
+                                       const LogGetStatReq &req,
+                                       LogGetStatResp &resp)
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+  } else {
+    ret = post_sync_request_to_server_(server, timeout_us, req, resp);
   }
   return ret;
 }

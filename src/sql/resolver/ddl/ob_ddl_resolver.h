@@ -34,6 +34,7 @@ struct ObObjCastParams;
 }
 namespace sql
 {
+struct ObExternalFileFormat;
 struct PartitionInfo
 {
   share::schema::ObPartitionLevel part_level_;
@@ -108,7 +109,8 @@ public:
   };
   enum INDEX_KEYNAME {
     NORMAL_KEY = 0,
-    UNIQUE_KEY = 1
+    UNIQUE_KEY = 1,
+    SPATIAL_KEY = 2
   };
   enum COLUMN_NODE {
     COLUMN_REF_NODE = 0,
@@ -204,6 +206,7 @@ public:
       const ObSQLMode sql_mode);
   static int print_expr_to_default_value(ObRawExpr &expr,
                                          share::schema::ObColumnSchemaV2 &column,
+                                         ObSchemaChecker *schema_checker,
                                          const common::ObTimeZoneInfo *tz_info);
   static int check_dup_gen_col(const ObString &expr,
                                ObIArray<ObString> &gen_col_expr_arr);
@@ -242,7 +245,8 @@ public:
       ObIArray<ObString> &gen_col_expr_arr,
       const ObSQLMode sql_mode,
       bool allow_sequence,
-      ObSchemaChecker *schema_checker);
+      ObSchemaChecker *schema_checker,
+      share::schema::ObColumnSchemaV2 *hidden_col = NULL);
   static int check_default_value(
       common::ObObj &default_value,
       const common::ObTimeZoneInfoWrap &tz_info_wrap,
@@ -365,6 +369,7 @@ public:
       const share::schema::ObTableSchema &table_schema,
       const ObString &column_name,
       ObAlterTableStmt *alter_table_stmt);
+  int check_is_json_contraint(ObTableSchema &tmp_table_schema, ObIArray<ObConstraint> &csts, ParseNode *cst_check_expr_node);
 
   int check_column_in_check_constraint(
       const share::schema::ObTableSchema &table_schema,
@@ -402,6 +407,19 @@ public:
   int resolve_subpartition_option(ObPartitionedStmt *stmt,
                                   ParseNode *subpart_node,
                                   share::schema::ObTableSchema &table_schema);
+  int resolve_spatial_index_constraint(
+      const share::schema::ObTableSchema &table_schema,
+      const common::ObString &column_name,
+      int64_t column_num,
+      const int64_t index_keyname_value,
+      bool is_explicit_order,
+      bool is_func_index);
+  int resolve_spatial_index_constraint(
+      const share::schema::ObColumnSchemaV2 &column_schema,
+      int64_t column_num,
+      const int64_t index_keyname_value,
+      bool is_oracle_mode,
+      bool is_explicit_order);
 protected:
   static int check_same_substr_expr(ObRawExpr &left, ObRawExpr &right, bool &same);
   static int check_uniq_allow(ObResolverParams &params,
@@ -450,7 +468,8 @@ protected:
       bool &is_modify_column_visibility,
       common::ObString &pk_name,
       const bool is_oracle_temp_table = false,
-      const bool is_create_table_as = false);
+      const bool is_create_table_as = false,
+      const bool is_external_table = false);
   int resolve_uk_name_from_column_attribute(
       ParseNode *attrs_node,
       common::ObString &uk_name);
@@ -478,11 +497,14 @@ protected:
                                                   ObCreateTableStmt *create_table_stmt);
   int resolve_generated_column_attribute(share::schema::ObColumnSchemaV2 &column,
                                          ParseNode *attrs_node,
-                                         ObColumnResolveStat &reslove_stat);
+                                         ObColumnResolveStat &reslove_stat,
+                                         const bool is_external_table);
   int resolve_identity_column_attribute(share::schema::ObColumnSchemaV2 &column,
                                         ParseNode *attrs_node,
                                         ObColumnResolveStat &reslove_stat,
                                         common::ObString &pk_name);
+  int resolve_srid_node(share::schema::ObColumnSchemaV2 &column,
+                        const ParseNode &srid_node);
   /*
   int resolve_generated_column_definition(
       share::schema::ObColumnSchemaV2 &column,
@@ -656,10 +678,15 @@ protected:
   int resolve_not_null_constraint_node(share::schema::ObColumnSchemaV2 &column,
                                         const ParseNode *cst_node,
                                         const bool is_identity_column);
-  int add_default_not_null_constraint(share::schema::ObColumnSchemaV2 &column);
-  int add_not_null_constraint(share::schema::ObColumnSchemaV2 &column,
+  static int add_default_not_null_constraint(share::schema::ObColumnSchemaV2 &column,
+                                             const common::ObString &table_name,
+                                             common::ObIAllocator &allocator,
+                                             ObStmt *stmt);
+  static int add_not_null_constraint(share::schema::ObColumnSchemaV2 &column,
                               const common::ObString &cst_name,
-                              share::schema::ObConstraint &cst);
+                              share::schema::ObConstraint &cst,
+                              common::ObIAllocator &allocator,
+                              ObStmt *stmt);
   int create_name_for_empty_partition(const bool is_subpartition,
                                       ObIArray<share::schema::ObPartition> &partitions,
                                       ObIArray<share::schema::ObSubPartition> &subpartitions);
@@ -814,6 +841,10 @@ protected:
   int check_and_set_individual_subpartition_names(ObPartitionedStmt *stmt,
                                                   share::schema::ObTableSchema &table_schema);
 
+  int resolve_file_format(const ParseNode *node, ObExternalFileFormat &format);
+
+  int check_format_valid(const ObExternalFileFormat &format, bool &is_valid);
+
   void reset();
   int64_t block_size_;
   int64_t consistency_level_;
@@ -870,6 +901,7 @@ protected:
   int64_t tablespace_id_;
   int64_t table_dop_; // default value is 1
   int64_t hash_subpart_num_;
+  bool is_external_table_;
 private:
   template <typename STMT>
   DISALLOW_COPY_AND_ASSIGN(ObDDLResolver);
@@ -1010,8 +1042,11 @@ int ObDDLResolver::resolve_split_into_partition(STMT *stmt, const ParseNode *nod
       check_part_name = false;
       part_node = node->children_[i];
       share::schema::ObPartition part;
-      if (OB_ISNULL(part_node)
-          || T_PARTITION_ELEMENT != part_node->type_) {
+      if (OB_ISNULL(part_node) ||
+          (T_PARTITION_ELEMENT != part_node->type_ &&
+           T_PARTITION_HASH_ELEMENT != part_node->type_ &&
+           T_PARTITION_LIST_ELEMENT != part_node->type_ &&
+           T_PARTITION_RANGE_ELEMENT != part_node->type_)) {
         ret = OB_INVALID_ARGUMENT;
         SQL_RESV_LOG(WARN,"invalid argument", K(ret), K(part_node), "node type", part_node->type_);
       } else if (OB_NOT_NULL(part_node->children_[ObDDLResolver::PART_ID_NODE])) {

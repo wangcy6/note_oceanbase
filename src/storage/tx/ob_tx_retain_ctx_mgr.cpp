@@ -172,6 +172,7 @@ void ObTxRetainCtxMgr::reset()
   max_wait_ckpt_ts_.reset();
   last_push_gc_task_ts_ = ObTimeUtility::current_time();
   retain_ctx_list_.reset();
+  skip_remove_cnt_ = 0;
   reserve_allocator_.reset();
 }
 
@@ -179,19 +180,36 @@ void *ObTxRetainCtxMgr::alloc_object(const int64_t size) { return reserve_alloca
 
 void ObTxRetainCtxMgr::free_object(void *ptr) { reserve_allocator_.free(ptr); }
 
-int ObTxRetainCtxMgr::push_retain_ctx(ObIRetainCtxCheckFunctor *retain_func)
+int ObTxRetainCtxMgr::push_retain_ctx(ObIRetainCtxCheckFunctor *retain_func, int64_t timeout_us)
 {
   int ret = OB_SUCCESS;
+  bool lock_succ = false;
 
   ObTimeGuard tg(__func__, 1 * 1000 * 1000);
-  SpinWLockGuard guard(retain_ctx_lock_);
+  // SpinWLockGuard guard(retain_ctx_lock_);
+  if (OB_FAIL(retain_ctx_lock_.wrlock(timeout_us))) {
+    if (ret == OB_TIMEOUT) {
+      ret = OB_EAGAIN;
+    }
+    TRANS_LOG(WARN, "[RetainCtxMgr] lock retain_ctx_mgr failed", K(ret), K(timeout_us));
+  } else {
+    lock_succ = true;
+  }
   tg.click();
 
-  if (!retain_func->is_valid()) {
+  if (OB_FAIL(ret)) {
+  } else if (!retain_func->is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "[RetainCtxMgr] invalid argument", K(ret), KPC(retain_func));
   } else if (OB_FAIL(retain_ctx_list_.push_back(retain_func))) {
     TRANS_LOG(WARN, "[RetainCtxMgr] push back retain func failed", K(ret));
+  }
+
+  if (lock_succ) {
+    int64_t tmp_ret = OB_SUCCESS;
+    if (OB_TMP_FAIL(retain_ctx_lock_.unlock())) {
+      TRANS_LOG(WARN, "[RetainCtxMgr] unlock retain_ctx_mgr failed", K(tmp_ret));
+    }
   }
 
   return ret;
@@ -222,8 +240,15 @@ int ObTxRetainCtxMgr::force_gc_retain_ctx()
   SpinWLockGuard guard(retain_ctx_lock_);
   tg.click();
 
-  if (OB_FAIL(for_each_remove_(&ObTxRetainCtxMgr::force_gc_, nullptr, INT64_MAX))) {
-    TRANS_LOG(WARN, "[RetainCtxMgr] force gc all retain ctx faild", K(ret));
+  int64_t retry_force_gc_times = 0;
+  while (retain_ctx_list_.size() > 0) {
+    const int64_t before_remove_count = retain_ctx_list_.size();
+    if (OB_FAIL(for_each_remove_(&ObTxRetainCtxMgr::force_gc_, nullptr, INT64_MAX))) {
+      TRANS_LOG(WARN, "[RetainCtxMgr] force gc all retain ctx faild", K(ret));
+    }
+    TRANS_LOG(INFO, "[RetainCtxMgr] try to force gc all retain ctx", K(ret),
+              K(retry_force_gc_times), K(before_remove_count), KPC(this));
+    retry_force_gc_times++;
   }
 
   return ret;
@@ -249,6 +274,7 @@ void ObTxRetainCtxMgr::try_advance_retain_ctx_gc(share::ObLSID ls_id)
 
   const int64_t CUR_LS_CNT = MTL(ObLSService *)->get_ls_map()->get_ls_count();
   const int64_t IDLE_GC_INTERVAL = 30 * 60 * 1000 * 1000; // 30 min
+  const int64_t MIN_RETAIN_CTX_GC_THRESHOLD = 1000;
 
   ObTimeGuard tg(__func__, 1 * 1000 * 1000);
   SpinRLockGuard guard(retain_ctx_lock_);
@@ -259,7 +285,7 @@ void ObTxRetainCtxMgr::try_advance_retain_ctx_gc(share::ObLSID ls_id)
   ObAdvanceLSCkptTask *task = nullptr;
   if (retain_ctx_list_.size() <= 0) {
     //do nothing
-  } else if (retain_ctx_list_.size() <= MAX_PART_CTX_COUNT / 10 / CUR_LS_CNT
+  } else if (retain_ctx_list_.size() <= std::min(MAX_PART_CTX_COUNT / 10 / CUR_LS_CNT, MIN_RETAIN_CTX_GC_THRESHOLD)
              && (OB_INVALID_TIMESTAMP == last_push_gc_task_ts_
                  || (OB_INVALID_TIMESTAMP != last_push_gc_task_ts_
                      && cur_time - last_push_gc_task_ts_ <= IDLE_GC_INTERVAL))) {
@@ -301,10 +327,12 @@ int ObTxRetainCtxMgr::remove_ctx_func_(RetainCtxList::iterator remove_iter)
   return ret;
 }
 
-int ObTxRetainCtxMgr::for_each_remove_(RetainFuncHandler remove_handler, storage::ObLS *ls,
+int ObTxRetainCtxMgr::for_each_remove_(RetainFuncHandler remove_handler,
+                                       storage::ObLS *ls,
                                        const int64_t max_run_us)
 {
   int ret = OB_SUCCESS;
+  int64_t iter_count = 0;
   int64_t remove_count = 0;
   bool need_remove = false;
   const int64_t start_ts = ObTimeUtility::current_time();
@@ -315,8 +343,8 @@ int ObTxRetainCtxMgr::for_each_remove_(RetainFuncHandler remove_handler, storage
 
     if (last_remove_iter != retain_ctx_list_.end()) {
       if (OB_FAIL(remove_ctx_func_(last_remove_iter))) {
-        TRANS_LOG(WARN, "[RetainCtxMgr] remove from retain_ctx_list_ failed", K(ret), KPC(*last_remove_iter),
-                  KPC(this));
+        TRANS_LOG(WARN, "[RetainCtxMgr] remove from retain_ctx_list_ failed", K(ret),
+                  KPC(*last_remove_iter), KPC(this));
       } else {
         remove_count++;
         last_remove_iter = retain_ctx_list_.end();
@@ -328,28 +356,39 @@ int ObTxRetainCtxMgr::for_each_remove_(RetainFuncHandler remove_handler, storage
     } else if (*iter == nullptr) {
       ret = OB_ERR_UNEXPECTED;
       TRANS_LOG(WARN, "[RetainCtxMgr] empty retain ctx functor", K(ret), KPC(this));
+    } else if (iter_count < skip_remove_cnt_) {
+      // do nothing
     } else if (OB_FAIL((this->*remove_handler)(*iter, need_remove, ls))) {
-      TRANS_LOG(WARN, "[RetainCtxMgr] execute remove_handler failed", K(ret), KPC(*iter), KPC(this));
+      TRANS_LOG(WARN, "[RetainCtxMgr] execute remove_handler failed", K(ret), KPC(*iter),
+                KPC(this));
     } else if (need_remove) {
       last_remove_iter = iter;
     }
     const int64_t use_ts = ObTimeUtility::current_time() - start_ts;
     if (use_ts > max_run_us) {
-      TRANS_LOG(WARN, "remove retain ctx use too much time", K(use_ts), K(remove_count));
+      TRANS_LOG_RET(WARN, OB_ERR_TOO_MUCH_TIME, "[RetainCtxMgr] remove retain ctx use too much time", K(use_ts), K(remove_count));
       break;
     }
+
+    iter_count++;
   }
 
   if (OB_FAIL(ret)) {
     // do nothing
   } else if (last_remove_iter != retain_ctx_list_.end()) {
     if (OB_FAIL(remove_ctx_func_(last_remove_iter))) {
-      TRANS_LOG(WARN, "[RetainCtxMgr] remove from retain_ctx_list_ failed", K(ret), KPC(*last_remove_iter),
-                KPC(this));
+      TRANS_LOG(WARN, "[RetainCtxMgr] remove from retain_ctx_list_ failed", K(ret),
+                KPC(*last_remove_iter), KPC(this));
     } else {
       remove_count++;
       last_remove_iter = retain_ctx_list_.end();
     }
+  }
+
+  if (OB_FAIL(ret) || retain_ctx_list_.end() == iter) {
+    skip_remove_cnt_ = 0;
+  } else {
+    skip_remove_cnt_ = iter_count - remove_count;
   }
 
   return ret;

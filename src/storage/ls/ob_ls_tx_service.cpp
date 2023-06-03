@@ -154,6 +154,7 @@ int ObLSTxService::get_read_store_ctx(const SCN &snapshot,
 
 int ObLSTxService::get_write_store_ctx(ObTxDesc &tx,
                                        const ObTxReadSnapshot &snapshot,
+                                       const concurrent_control::ObWriteFlag write_flag,
                                        storage::ObStoreCtx &store_ctx) const
 {
   int ret = OB_SUCCESS;
@@ -161,7 +162,7 @@ int ObLSTxService::get_write_store_ctx(ObTxDesc &tx,
     ret = OB_NOT_INIT;
     TRANS_LOG(WARN, "not init", K(ret));
   } else {
-    ret = trans_service_->get_write_store_ctx(tx, snapshot, store_ctx);
+    ret = trans_service_->get_write_store_ctx(tx, snapshot, write_flag, store_ctx);
   }
   return ret;
 }
@@ -421,7 +422,7 @@ SCN ObLSTxService::get_rec_scn()
   SCN min_rec_scn = SCN::max_scn();
   int min_rec_scn_common_checkpoint_type_index = 0;
   char common_checkpoint_type[common::MAX_CHECKPOINT_TYPE_BUF_LENGTH];
-  ObSpinLockGuard guard(lock_);
+  RLockGuard guard(rwlock_);
   for (int i = 1; i < ObCommonCheckpointType::MAX_BASE_TYPE; i++) {
     if (OB_NOT_NULL(common_checkpoints_[i])) {
       SCN rec_scn = common_checkpoints_[i]->get_rec_scn();
@@ -446,7 +447,7 @@ int ObLSTxService::flush(SCN &recycle_scn)
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
-  ObSpinLockGuard guard(lock_);
+  RLockGuard guard(rwlock_);
   for (int i = 1; i < ObCommonCheckpointType::MAX_BASE_TYPE; i++) {
     // only flush the common_checkpoint that whose clog need recycle
     if (OB_NOT_NULL(common_checkpoints_[i]) && recycle_scn >= common_checkpoints_[i]->get_rec_scn()) {
@@ -480,7 +481,7 @@ int ObLSTxService::get_common_checkpoint_info(
 {
   int ret = OB_SUCCESS;
   common_checkpoint_array.reset();
-  ObSpinLockGuard guard(lock_);
+  RLockGuard guard(rwlock_);
   for (int i = 1; i < ObCommonCheckpointType::MAX_BASE_TYPE; i++) {
     ObCommonCheckpoint *common_checkpoint = common_checkpoints_[i];
     if (OB_ISNULL(common_checkpoint)) {
@@ -507,7 +508,7 @@ int ObLSTxService::register_common_checkpoint(const ObCommonCheckpointType &type
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "invalid arguments", K(ret), K(type), K(common_checkpoint));
   } else {
-    ObSpinLockGuard guard(lock_);
+    WLockGuard guard(rwlock_);
     if (OB_NOT_NULL(common_checkpoints_[type])) {
       STORAGE_LOG(WARN, "repeat register common_checkpoint", K(ret), K(type), K(common_checkpoint));
     } else {
@@ -527,7 +528,7 @@ int ObLSTxService::unregister_common_checkpoint(const ObCommonCheckpointType &ty
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "invalid arguments", K(ret), K(type), K(common_checkpoint));
   } else {
-    ObSpinLockGuard guard(lock_);
+    WLockGuard guard(rwlock_);
     if (OB_ISNULL(common_checkpoints_[type])) {
       STORAGE_LOG(WARN, "common_checkpoint is null, no need unregister", K(type),
                   K(common_checkpoint));
@@ -559,7 +560,7 @@ int ObLSTxService::traversal_flush()
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
-  ObSpinLockGuard guard(lock_);
+  RLockGuard guard(rwlock_);
   for (int i = 1; i < ObCommonCheckpointType::MAX_BASE_TYPE; i++) {
     if (OB_NOT_NULL(common_checkpoints_[i]) &&
         OB_SUCCESS != (tmp_ret = common_checkpoints_[i]->flush(SCN::max_scn(), false))) {
@@ -569,8 +570,9 @@ int ObLSTxService::traversal_flush()
   return ret;
 }
 
+
 void ObLSTxService::reset_() {
-  ObSpinLockGuard guard(lock_);
+  WLockGuard guard(rwlock_);
   for (int i = 0; i < ObCommonCheckpointType::MAX_BASE_TYPE; i++) {
     common_checkpoints_[i] = NULL;
   }
@@ -606,13 +608,10 @@ int ObLSTxService::offline()
     TRANS_LOG(WARN, "block tx failed", K_(ls_id));
   } else if (OB_FAIL(mgr_->kill_all_tx(graceful, unused_is_all_tx_clean_up))) {
     TRANS_LOG(WARN, "kill_all_tx failed", K_(ls_id));
-  } else {
-    while (mgr_->get_tx_ctx_count() > 0) {
-      ob_usleep(SLEEP_US); // retry ater 20 ms
-      if (REACH_TIME_INTERVAL(PRINT_LOG_INTERVAL)) {
-        TRANS_LOG(WARN, "transaction not empty, try again", KP(mgr_), K_(ls_id));
-        mgr_->print_all_tx_ctx(ObLSTxCtxMgr::MAX_HASH_ITEM_PRINT, verbose);
-      }
+  } else if (mgr_->get_tx_ctx_count() > 0) {
+    ret = OB_EAGAIN;
+    if (REACH_TIME_INTERVAL(PRINT_LOG_INTERVAL)) {
+      TRANS_LOG(WARN, "transaction not empty, try again", KP(mgr_), K_(ls_id), K(mgr_->get_tx_ctx_count()));
     }
   }
   return ret;

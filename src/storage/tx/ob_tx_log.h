@@ -18,8 +18,9 @@
 #include "storage/tx/ob_trans_define.h"
 #include "storage/tx/ob_tx_data_define.h"
 #include "storage/tx/ob_tx_serialization.h"
+#include "storage/tx/ob_tx_big_segment_buf.h"
 #include "storage/tx/ob_trans_factory.h"
-#include "storage/tx/ob_clog_encrypter.h"
+#include "storage/tx/ob_clog_encrypt_info.h"
 #include "share/ob_admin_dump_helper.h"
 #include "logservice/ob_log_base_type.h"
 #include "logservice/ob_log_base_header.h"
@@ -57,6 +58,7 @@ class ObDataBuffer;
 namespace transaction
 {
 
+// class ObTxLogCb;
 class ObPartTransCtx;
 
 typedef int64_t TxID;
@@ -82,7 +84,8 @@ enum class ObTxLogType : int64_t
 
   // logstream-level log
   TX_START_WORKING_LOG = 0x100000,
-  // TX_KEEP_ALIVE_LOG = 0x200000,
+  // BigSegment log
+  TX_BIG_SEGMENT_LOG = 0x200000,
   TX_LOG_TYPE_LIMIT
 };
 
@@ -157,6 +160,14 @@ public:
   {
     return ObTxLogType::TX_START_WORKING_LOG == log_type; 
   }
+  static bool can_be_spilt(const ObTxLogType log_type)
+  {
+    return ObTxLogType::TX_MULTI_DATA_SOURCE_LOG == log_type
+  #ifdef OB_TX_LOG_TEST
+           || ObTxLogType::TX_COMMIT_INFO_LOG == log_type
+  #endif
+        ;
+  }
   static bool need_pre_replay_barrier(const ObTxLogType log_type, const ObTxDataSourceType data_source_type);
 };
 
@@ -180,23 +191,25 @@ private:
 class ObTxRedoLogTempRef
 {
 public:
-  ObTxRedoLogTempRef() : encrypt_info_() { encrypt_info_.init(); }
+  ObTxRedoLogTempRef() {}
 public:
-  ObCLogEncryptInfo encrypt_info_;
+  // remove member variable ObCLogEncryptInfo encrypt_info_
+  // there may be added other variables in the future
 };
 
 struct ObCtxRedoInfo
 {
-  ObCtxRedoInfo(ObCLogEncryptInfo &encrypt_info, const int64_t cluster_version)
-      : clog_encrypt_info_(encrypt_info), cluster_version_(cluster_version)
+  ObCtxRedoInfo(const int64_t cluster_version)
+      : cluster_version_(cluster_version)
   {
   };
   int before_serialize();
 
   ObTxSerCompatByte compat_bytes_;
   // serialize before mutator_buf by fixed length
-  ObCLogEncryptInfo &clog_encrypt_info_;
   uint64_t cluster_version_;
+  // remove member variable ObCLogEncryptInfo encrypt_info_
+  // there may be added other variables in the future
 
   OB_UNIS_VERSION(1);
 };
@@ -210,14 +223,14 @@ class ObTxRedoLog
 public:
   ObTxRedoLog(ObTxRedoLogTempRef &temp_ref)
       : mutator_buf_(nullptr), replay_mutator_buf_(nullptr), mutator_size_(-1),
-        ctx_redo_info_(temp_ref.encrypt_info_, 0)
+        ctx_redo_info_(0)
         // (ctx_redo_info_.clog_encrypt_info_)(temp_ref.encrypt_info_), (ctx_redo_info_.cluster_version_)(0)
   {
     before_serialize();
   }
-  ObTxRedoLog(ObCLogEncryptInfo &encrypt_info, const int64_t &log_no, const uint64_t &cluster_version)
+  ObTxRedoLog(const int64_t &log_no, const uint64_t &cluster_version)
       : mutator_buf_(nullptr), replay_mutator_buf_(nullptr), mutator_size_(-1),
-        ctx_redo_info_(encrypt_info, cluster_version)
+        ctx_redo_info_(cluster_version)
   // (ctx_redo_info_.clog_encrypt_info_)(encrypt_info),(ctx_redo_info_.cluster_version_)(cluster_version)
   {
     before_serialize();
@@ -226,7 +239,6 @@ public:
   char *get_mutator_buf() { return mutator_buf_; }
   const char *get_replay_mutator_buf() const { return replay_mutator_buf_; }
   const int64_t &get_mutator_size() const { return mutator_size_; }
-  const ObCLogEncryptInfo &get_clog_encrypt_info() const { return ctx_redo_info_.clog_encrypt_info_; }
   const uint64_t &get_cluster_version() const { return ctx_redo_info_.cluster_version_; }
 
   //------------ Only invoke in ObTxLogBlock
@@ -255,8 +267,9 @@ public:
       // K(clog_encrypt_info_),
       K(ctx_redo_info_.cluster_version_));
 
-private:
+public:
   int before_serialize() { return ctx_redo_info_.before_serialize(); }
+private:
   //------------ For ob_admin
   int format_mutator_row_(const memtable::ObMemtableMutatorRow &row, share::ObAdminMutatorStringArg &arg);
   int format_row_data_(const memtable::ObRowData &row_data, share::ObAdminMutatorStringArg &arg);
@@ -298,7 +311,7 @@ public:
   static const ObTxLogType LOG_TYPE;
   TO_STRING_KV(K(LOG_TYPE), K_(data));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -308,12 +321,13 @@ private:
 
 class ObTxActiveInfoLogTempRef {
 public:
-  ObTxActiveInfoLogTempRef() : scheduler_(), app_trace_id_str_(), proposal_leader_() {}
+  ObTxActiveInfoLogTempRef() : scheduler_(), app_trace_id_str_(), proposal_leader_(), xid_() {}
 
 public:
   common::ObAddr scheduler_;
   common::ObString app_trace_id_str_;
   common::ObAddr proposal_leader_;
+  ObXATransID xid_;
 };
 
 class ObTxActiveInfoLog
@@ -325,8 +339,8 @@ public:
       : scheduler_(temp_ref.scheduler_), trans_type_(TransType::SP_TRANS), session_id_(0),
         app_trace_id_str_(temp_ref.app_trace_id_str_), schema_version_(0), can_elr_(false),
         proposal_leader_(temp_ref.proposal_leader_), cur_query_start_time_(0), is_sub2pc_(false),
-        is_dup_tx_(false), tx_expired_time_(0), epoch_(0), last_op_sn_(0), first_scn_(0),
-        last_scn_(0), max_submitted_seq_no_(0), cluster_version_(0)
+        is_dup_tx_(false), tx_expired_time_(0), epoch_(0), last_op_sn_(0), first_sn(0),
+        last_sn(0), max_submitted_seq_no_(0), cluster_version_(0), xid_(temp_ref.xid_)
   {
     before_serialize();
   }
@@ -346,13 +360,15 @@ public:
                     int64_t first_scn,
                     int64_t last_scn,
                     int64_t max_submitted_seq_no,
-                    uint64_t cluster_version)
+                    uint64_t cluster_version,
+                    const ObXATransID &xid)
       : scheduler_(scheduler), trans_type_(trans_type), session_id_(session_id),
         app_trace_id_str_(app_trace_id_str), schema_version_(schema_version), can_elr_(elr),
         proposal_leader_(proposal_leader), cur_query_start_time_(cur_query_start_time),
         is_sub2pc_(is_sub2pc), is_dup_tx_(is_dup_tx), tx_expired_time_(tx_expired_time),
-        epoch_(epoch), last_op_sn_(last_op_sn), first_scn_(first_scn), last_scn_(last_scn),
-        max_submitted_seq_no_(max_submitted_seq_no), cluster_version_(cluster_version)
+        epoch_(epoch), last_op_sn_(last_op_sn), first_sn(first_scn), last_sn(last_scn),
+        max_submitted_seq_no_(max_submitted_seq_no), cluster_version_(cluster_version),
+        xid_(xid)
   {
     before_serialize();
   };
@@ -370,10 +386,11 @@ public:
   int64_t get_tx_expired_time() const { return tx_expired_time_; }
   int64_t get_last_op_sn() const { return last_op_sn_; }
   int64_t get_epoch() const { return epoch_; }
-  int64_t get_first_scn() const { return first_scn_; }
-  int64_t get_last_scn() const { return last_scn_; }
+  int64_t get_first_scn() const { return first_sn; }
+  int64_t get_last_scn() const { return last_sn; }
   int64_t get_max_submitted_seq_no() const { return max_submitted_seq_no_; }
   uint64_t get_cluster_version() const { return cluster_version_; }
+  const ObXATransID &get_xid() const { return xid_; }
   // for ob_admin
   int ob_admin_dump(share::ObAdminMutatorStringArg &arg);
 
@@ -392,12 +409,13 @@ public:
                K(tx_expired_time_),
                K(epoch_),
                K(last_op_sn_),
-               K(first_scn_),
-               K(last_scn_),
+               K(first_sn),
+               K(last_sn),
                K(max_submitted_seq_no_),
-               K(cluster_version_));
+               K(cluster_version_),
+               K(xid_));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -417,13 +435,14 @@ private:
   // sql execution relative
   int64_t epoch_;
   int64_t last_op_sn_;
-  int64_t first_scn_;
-  int64_t last_scn_;
+  int64_t first_sn;
+  int64_t last_sn;
 
   // ctrl savepoint written log
   int64_t max_submitted_seq_no_;
 
   uint64_t cluster_version_;
+  ObXATransID xid_;
 };
 
 class ObTxCommitInfoLogTempRef
@@ -512,7 +531,7 @@ public:
                K(prev_record_lsn_),
                K(redo_lsns_),
                K(xid_))
-private:
+public:
   int before_serialize();
 
 private:
@@ -567,7 +586,7 @@ public:
   static const ObTxLogType LOG_TYPE;
   TO_STRING_KV(K(LOG_TYPE), K(incremental_participants_), K(prev_lsn_));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -584,12 +603,13 @@ class ObTxDataBackup
 
 public:
   ObTxDataBackup();
-  int init(const storage::ObTxData * const tx_data);
+  int init(const share::SCN &start_scn);
   void reset();
 
   share::SCN get_start_log_ts() const { return start_log_ts_; }
 
   TO_STRING_KV(K(start_log_ts_));
+
 private:
   share::SCN start_log_ts_;
 };
@@ -635,7 +655,7 @@ public:
     commit_version_ = commit_version;
     before_serialize();
   }
-  int init_tx_data_backup(const storage::ObTxData *const tx_data);
+  int init_tx_data_backup(const share::SCN &start_scn);
   const ObTxDataBackup &get_tx_data_backup() const { return tx_data_backup_; }
   share::SCN get_commit_version() const { return commit_version_; }
   uint64_t get_checksum() const { return checksum_; }
@@ -645,6 +665,8 @@ public:
   const ObLSLogInfoArray &get_ls_log_info_arr() const { return ls_log_info_arr_; }
   const LogOffSet &get_prev_lsn() const { return prev_lsn_; }
   void set_prev_lsn(const LogOffSet &lsn) { prev_lsn_ = lsn; }
+
+  const share::SCN get_backup_start_scn() { return tx_data_backup_.get_start_log_ts(); }
 
   int ob_admin_dump(share::ObAdminMutatorStringArg &arg);
 
@@ -659,7 +681,7 @@ public:
                K(prev_lsn_),
                K(ls_log_info_arr_));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -711,7 +733,7 @@ public:
   static const ObTxLogType LOG_TYPE;
   TO_STRING_KV(K(LOG_TYPE), K(incremental_participants_));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -744,16 +766,18 @@ public:
   }
   const ObTxBufferNodeArray &get_multi_source_data() const { return multi_source_data_; }
 
-  int init_tx_data_backup(const storage::ObTxData *const tx_data);
+  int init_tx_data_backup(const share::SCN &start_scn);
 
   const ObTxDataBackup &get_tx_data_backup() const { return tx_data_backup_; }
+
+  const share::SCN get_backup_start_scn() { return tx_data_backup_.get_start_log_ts(); }
 
   int ob_admin_dump(share::ObAdminMutatorStringArg &arg);
 
   static const ObTxLogType LOG_TYPE;
   TO_STRING_KV(K(LOG_TYPE), K(multi_source_data_));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -796,7 +820,7 @@ public:
   static const ObTxLogType LOG_TYPE;
   TO_STRING_KV(K(LOG_TYPE), K(prev_record_lsn_), K(redo_lsns_));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -832,7 +856,7 @@ public:
   static const ObTxLogType LOG_TYPE;
   TO_STRING_KV(K(LOG_TYPE), K(leader_epoch_));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -858,7 +882,7 @@ public:
   static const ObTxLogType LOG_TYPE;
   TO_STRING_KV(KP(this), K(LOG_TYPE), K_(from), K_(to));
 
-private:
+public:
   int before_serialize();
 private:
   ObTxSerCompatByte compat_bytes_;
@@ -878,6 +902,7 @@ public:
     org_cluster_id_ = 0;
     log_entry_no_ = 0;
     tx_id_ = 0;
+    scheduler_.reset();
   }
   ObTxLogBlockHeader()
   {
@@ -886,8 +911,10 @@ public:
   };
   ObTxLogBlockHeader(const uint64_t org_cluster_id,
                      const int64_t log_entry_no,
-                     const ObTransID &tx_id)
-      : org_cluster_id_(org_cluster_id), log_entry_no_(log_entry_no), tx_id_(tx_id)
+                     const ObTransID &tx_id,
+                     const common::ObAddr &scheduler)
+      : org_cluster_id_(org_cluster_id), log_entry_no_(log_entry_no), tx_id_(tx_id),
+        scheduler_(scheduler)
   {
     before_serialize();
   }
@@ -895,12 +922,13 @@ public:
   uint64_t get_org_cluster_id() const { return org_cluster_id_; }
   int64_t get_log_entry_no() const { return log_entry_no_; }
   const ObTransID &get_tx_id() const { return tx_id_; }
+  const common::ObAddr &get_scheduler() const { return scheduler_; }
 
   bool is_valid() const { return org_cluster_id_ >= 0; }
 
-  TO_STRING_KV(K_(org_cluster_id), K_(log_entry_no), K_(tx_id));
+  TO_STRING_KV(K_(org_cluster_id), K_(log_entry_no), K_(tx_id), K_(scheduler));
 
-private:
+public:
   int before_serialize();
 
 private:
@@ -908,6 +936,67 @@ private:
   uint64_t org_cluster_id_;
   int64_t log_entry_no_;
   ObTransID tx_id_;
+  common::ObAddr scheduler_;
+};
+
+class ObTxAdaptiveLogBuf
+{
+public:
+  ObTxAdaptiveLogBuf() : buf_(NULL), use_default_buf_(false)
+  {
+    default_buf_[0]='\0';
+  }
+  ~ObTxAdaptiveLogBuf() { reset(); }
+  int init(const bool use_local_buf)
+  {
+    int ret = OB_SUCCESS;
+
+    if (use_local_buf) {
+      // for performance optimization
+      use_default_buf_ = true;
+    } else {
+      if (OB_ISNULL(buf_ = ClogBufFactory::alloc())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        TRANS_LOG(ERROR, "alloc clog buffer error", KR(ret));
+      } else {
+        use_default_buf_ = false;
+      }
+    }
+
+    return ret;
+  }
+  void reset()
+  {
+    if (NULL != buf_) {
+      ClogBufFactory::release(buf_);
+      buf_ = NULL;
+    }
+    default_buf_[0]='\0';
+    use_default_buf_ = false;
+  }
+  char *get_buf()
+  {
+    char *buf = NULL;
+
+    if (use_default_buf_) {
+      buf = default_buf_;
+    } else if (NULL != buf_) {
+      buf = buf_->get_buf();
+    }
+    return buf;
+  }
+  int64_t get_length() const
+  {
+    return use_default_buf_ ? DEFAULT_MIN_LOG_BUF_SIZE : common::OB_MAX_LOG_ALLOWED_SIZE;
+  }
+  bool is_use_local_buf() const { return use_default_buf_; }
+  TO_STRING_KV(KP_(buf), K_(use_default_buf));
+public:
+  static const int64_t DEFAULT_MIN_LOG_BUF_SIZE = 2048;
+private:
+  ClogBuf *buf_;
+  char default_buf_[DEFAULT_MIN_LOG_BUF_SIZE];
+  bool use_default_buf_;
 };
 
 class ObTxLogBlock
@@ -920,25 +1009,26 @@ public:
   NEED_SERIALIZE_AND_DESERIALIZE;
   ObTxLogBlock();
   void reset();
-  void reuse(const int64_t replay_hint, const ObTxLogBlockHeader &block_header);
-  int init(const int64_t replay_hint, const ObTxLogBlockHeader &block_header); // init before fill
-  int init_with_header(
-      const char *buf,
-      const int64_t &size,
-      int64_t &replay_hint,
-      ObTxLogBlockHeader &block_header); // init before replay , unused , only for test
+  int reuse(const int64_t replay_hint, const ObTxLogBlockHeader &block_header);
+  int init(const int64_t replay_hint,
+           const ObTxLogBlockHeader &block_header,
+           const bool use_local_buf = false);
+  int init_with_header(const char *buf,
+                       const int64_t &size,
+                       int64_t &replay_hint,
+                       ObTxLogBlockHeader &block_header);
   int init(const char *buf,
            const int64_t &size,
            int skip_pos,
            ObTxLogBlockHeader &block_header); // init before replay
-  ~ObTxLogBlock();
-  int get_next_log(ObTxLogHeader &header);
+  ~ObTxLogBlock() { reset(); }
+  int get_next_log(ObTxLogHeader &header, ObTxBigSegmentBuf * big_segment_buf = nullptr);
   const ObTxCbArgArray &get_cb_arg_array() const { return cb_arg_array_; }
   template <typename T>
   int deserialize_log_body(T &tx_log_body); // make cur_log_type_ is UNKNOWN
   // fill log except RedoLog
   template <typename T>
-  int add_new_log(T &tx_log_body);
+  int add_new_log(T &tx_log_body, ObTxBigSegmentBuf * big_segment_buf = nullptr);
   // fill RedoLog and mutator_buf
   int prepare_mutator_buf(ObTxRedoLog &redo);
   int finish_mutator_buf(ObTxRedoLog &redo, const int64_t &mutator_size);
@@ -948,30 +1038,44 @@ public:
   int rewrite_barrier_log_block(int64_t replay_hint,
                                 const enum logservice::ObReplayBarrierType barrier_type);
 
-  TO_STRING_KV(KP(fill_buf_),
+  bool is_use_local_buf() const { return fill_buf_.is_use_local_buf(); }
+  TO_STRING_KV(K(fill_buf_),
                KP(replay_buf_),
                K(len_),
                K(pos_),
                K(cur_log_type_),
-               K(cb_arg_array_));
+               K(cb_arg_array_),
+               KPC(big_segment_buf_));
 
 public:
   // get fill buf for submit log
-  char *get_buf();
+  char *get_buf() { return fill_buf_.get_buf(); }
   const int64_t &get_size() { return pos_; }
+
+  int set_prev_big_segment_scn(const share::SCN prev_scn);
+  int acquire_segment_log_buf(const char *&submit_buf,
+                              int64_t &submit_buf_len,
+                              const ObTxLogBlockHeader &block_header,
+                              const ObTxLogType big_segment_log_type,
+                              ObTxBigSegmentBuf *big_segment_buf = nullptr);
 private:
-  int serialize_log_block_header_(const int64_t replay_hint, const ObTxLogBlockHeader &block_header);
+  int serialize_log_block_header_(const int64_t replay_hint,
+                                  const ObTxLogBlockHeader &block_header,
+                                  const logservice::ObReplayBarrierType barrier_type =
+                                      logservice::ObReplayBarrierType::NO_NEED_BARRIER);
   int deserialize_log_block_header_(int64_t &replay_hint, ObTxLogBlockHeader &block_header);
   int update_next_log_pos_(); // skip log body if  cur_log_type_ is UNKNOWN (depend on
                               // DESERIALIZE_HEADER in ob_unify_serialize.h)
   DISALLOW_COPY_AND_ASSIGN(ObTxLogBlock);
 
-  ClogBuf *fill_buf_;
+  ObTxAdaptiveLogBuf fill_buf_;
   const char *replay_buf_;
   int64_t len_;
   int64_t pos_;
   ObTxLogType cur_log_type_;
   ObTxCbArgArray cb_arg_array_;
+
+  ObTxBigSegmentBuf *big_segment_buf_;
 };
 
 template <typename T>
@@ -979,53 +1083,85 @@ int ObTxLogBlock::deserialize_log_body(T &tx_log_body)
 {
   int ret = OB_SUCCESS;
   int64_t tmp_pos = pos_;
-  if (OB_ISNULL(replay_buf_) || OB_NOT_NULL(fill_buf_)) {
+  if (OB_ISNULL(replay_buf_)) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(*this));
   } else if (T::LOG_TYPE != cur_log_type_) {
     ret = OB_INVALID_ARGUMENT;
-    TRANS_LOG(ERROR, "invalid log_body type",K(T::LOG_TYPE), K(cur_log_type_));
-  } else if (OB_FAIL(tx_log_body.deserialize(replay_buf_, len_, tmp_pos))) {
-    TRANS_LOG(WARN, "desrialize tx_log_body error", K(ret), K(*this));
+    TRANS_LOG(ERROR, "invalid log_body type", K(T::LOG_TYPE), K(cur_log_type_));
   } else {
-    pos_ = tmp_pos;
-    cur_log_type_ = ObTxLogType::UNKNOWN;
+    if (OB_NOT_NULL(big_segment_buf_)) {
+      if (OB_FAIL(big_segment_buf_->deserialize_object(tx_log_body))) {
+        TRANS_LOG(WARN, "deserialize log body from big segment buf failed", K(ret), K(tx_log_body),
+                  KPC(this));
+      } else {
+        big_segment_buf_->reset();
+        big_segment_buf_ = nullptr;
+      }
+    } else if (OB_FAIL(tx_log_body.deserialize(replay_buf_, len_, tmp_pos))) {
+      TRANS_LOG(WARN, "desrialize tx_log_body error", K(ret), K(*this));
+    }
+    if (OB_SUCC(ret)) {
+      pos_ = tmp_pos;
+      cur_log_type_ = ObTxLogType::UNKNOWN;
+    }
   }
   return ret;
 }
 
 template <typename T>
-int ObTxLogBlock::add_new_log(T &tx_log_body)
+int ObTxLogBlock::add_new_log(T &tx_log_body, ObTxBigSegmentBuf *big_segment_buf)
 {
   int ret = OB_SUCCESS;
   int64_t tmp_pos = pos_;
   ObTxLogHeader header(T::LOG_TYPE);
-  if (OB_NOT_NULL(replay_buf_) || (OB_ISNULL(fill_buf_))) {
+  if ((OB_ISNULL(fill_buf_.get_buf()))) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(ERROR, "invalid argument", K(*this));
-  } else if (T::LOG_TYPE == ObTxLogType::TX_REDO_LOG) {
-    // ret = OB_EAGAIN;
-    TRANS_LOG(DEBUG, "RedoLogBody does not require add_new_log()");
-  // } else if (OB_FAIL(tx_log_body.before_serialize())) {
-  //   TRANS_LOG(WARN, "before serialize failed", K(ret), K(tx_log_body), K(*this));
-  } else if (len_ < header.get_serialize_size() + tx_log_body.get_serialize_size() + tmp_pos) {
-    ret = OB_BUF_NOT_ENOUGH;
   } else if (ObTxLogType::TX_REDO_LOG == cur_log_type_) {
     ret = OB_EAGAIN;
     TRANS_LOG(WARN, "MutatorBuf is using");
-  } else if (OB_FAIL(header.serialize(fill_buf_->get_buf(), len_, tmp_pos))) {
+  } else if (OB_NOT_NULL(big_segment_buf_) && big_segment_buf_->is_active()) {
+    ret = OB_NOT_SUPPORTED;
+    TRANS_LOG(WARN, "big segment is not empty, can not add new log", K(ret), KPC(this));
+  } else if (T::LOG_TYPE == ObTxLogType::TX_REDO_LOG) {
+    // ret = OB_EAGAIN;
+    TRANS_LOG(DEBUG, "insert redo_log type into cb_arg_array_", K(tx_log_body), KPC(this));
+  } else if (OB_FAIL(tx_log_body.before_serialize())) {
+    TRANS_LOG(WARN, "before serialize failed", K(ret), K(tx_log_body), K(*this));
+  } else if (len_ < header.get_serialize_size() + tx_log_body.get_serialize_size() + tmp_pos) {
+    ret = OB_BUF_NOT_ENOUGH;
+  } else if (OB_FAIL(header.serialize(fill_buf_.get_buf(), len_, tmp_pos))) {
     TRANS_LOG(WARN, "serialize log header error", K(ret), K(header), K(*this));
-  } else if (OB_FAIL(tx_log_body.serialize(fill_buf_->get_buf(), len_, tmp_pos))) {
+  } else if (OB_FAIL(tx_log_body.serialize(fill_buf_.get_buf(), len_, tmp_pos))) {
     TRANS_LOG(WARN, "serialize tx_log_body error", K(ret), K(tx_log_body), K(*this));
   } else {
     // do nothing
   }
+
   if (OB_SUCC(ret)) {
     // it should be not failed
     if (OB_FAIL(cb_arg_array_.push_back(ObTxCbArg(T::LOG_TYPE, NULL)))) {
       TRANS_LOG(ERROR, "push log cb arg failed", K(ret), K(*this));
     } else {
       pos_ = tmp_pos;
+    }
+  } else if (OB_BUF_NOT_ENOUGH == ret && !is_use_local_buf() && cb_arg_array_.empty()
+             && ObTxLogTypeChecker::can_be_spilt(T::LOG_TYPE)) {
+    // use big segment
+    if (OB_ISNULL(big_segment_buf)) {
+      ret = OB_INVALID_ARGUMENT;
+      TRANS_LOG(WARN, "invalid argument", K(ret), KPC(big_segment_buf));
+    } else if (OB_FALSE_IT(big_segment_buf_ = big_segment_buf)) {
+    } else if (OB_FAIL(big_segment_buf_->init_for_serialize(header.get_serialize_size()
+                                                            + tx_log_body.get_serialize_size()))) {
+      TRANS_LOG(WARN, "init big segment buf failed", K(ret), KPC(big_segment_buf_));
+    } else if (OB_FAIL(big_segment_buf_->serialize_object(header))) {
+      TRANS_LOG(WARN, "serialize log header error", K(ret), K(header), K(*this));
+    } else if (OB_FAIL(big_segment_buf_->serialize_object(tx_log_body))) {
+      TRANS_LOG(WARN, "serialize tx_log_body error", K(ret), K(tx_log_body), K(*this));
+    } else {
+      ret = OB_LOG_TOO_LARGE;
     }
   }
 

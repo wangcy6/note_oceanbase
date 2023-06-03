@@ -89,8 +89,7 @@ typedef common::LinkHashValue<share::ObLSID> ObLSTxCtxMgrHashValue;
 
 struct ObTxCreateArg
 {
-  ObTxCreateArg(const bool can_elr,
-                const bool for_replay,
+  ObTxCreateArg(const bool for_replay,
                 const uint64_t tenant_id,
                 const ObTransID &trans_id,
                 const share::ObLSID &ls_id,
@@ -100,8 +99,7 @@ struct ObTxCreateArg
                 const common::ObAddr &scheduler,
                 const int64_t trans_expired_time,
                 ObTransService *trans_service)
-      : can_elr_(can_elr),
-        for_replay_(for_replay),
+      : for_replay_(for_replay),
         tenant_id_(tenant_id),
         tx_id_(trans_id),
         ls_id_(ls_id),
@@ -118,11 +116,10 @@ struct ObTxCreateArg
         && trans_expired_time_ > 0
         && NULL != trans_service_;
   }
-  TO_STRING_KV(K_(can_elr), K_(for_replay),
+  TO_STRING_KV(K_(for_replay),
                  K_(tenant_id), K_(tx_id),
                  K_(ls_id), K_(cluster_id), K_(cluster_version),
                  K_(session_id), K_(scheduler), K_(trans_expired_time), KP_(trans_service));
-  bool can_elr_;
   bool for_replay_;
   uint64_t tenant_id_;
   ObTransID tx_id_;
@@ -140,7 +137,7 @@ const static char OB_SIMPLE_ITERATOR_LABEL_FOR_TX_ID[] = "ObTxCtxMgr";
 typedef common::ObSimpleIterator<ObTransID, OB_SIMPLE_ITERATOR_LABEL_FOR_TX_ID, 16> ObTxIDIterator;
 
 // LogStream Transaction Context Manager
-class ObLSTxCtxMgr: public ObLSTxCtxMgrHashValue
+class ObLSTxCtxMgr: public ObTransHashLink<ObLSTxCtxMgr>
 {
 // ut
   friend class unittest::TestTxCtxTable;
@@ -319,6 +316,12 @@ public:
   // @param [in] fd
   int dump_single_tx_data_2_text(const int64_t tx_id, FILE *fd);
 
+  // check this ObLSTxCtxMgr contains the specified ObLSID
+  bool contain(const share::ObLSID &ls_id)
+  {
+    return ls_id_ == ls_id;
+  }
+
 public:
   // Increase this ObLSTxCtxMgr's total_tx_ctx_count
   void inc_total_tx_ctx_count() { (void)ATOMIC_AAF(&total_tx_ctx_count_, 1); }
@@ -372,7 +375,8 @@ public:
   // When the memtable has mini-merged, the commit_version of its associated
   // transaction may be undecided;
   // @param [in] mt: the memtable point which is going to be deleted;
-  int remove_callback_for_uncommited_tx(memtable::ObMemtable* mt);
+  int remove_callback_for_uncommited_tx(
+    const memtable::ObMemtableSet *memtable_set);
 
   // Find the TxCtx and execute the check functor with the tx_data retained on the TxCtx;
   // Called by the ObTxCtxTable
@@ -476,6 +480,11 @@ public:
   // Update aggre_log_ts without lock, because we canot lock using the order of
   // ObPartTransCtx -> ObLSTxCtxMgr, It will be a deadlock with normal order.
   int update_aggre_log_ts_wo_lock(share::SCN rec_log_ts);
+<<<<<<< HEAD
+=======
+
+  int get_max_decided_scn(share::SCN & scn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   TO_STRING_KV(KP(this),
                K_(ls_id),
@@ -487,7 +496,7 @@ public:
                K_(aggre_rec_scn),
                K_(prev_aggre_rec_scn),
                "uref",
-               (!is_inited_ ? -1 : get_uref()));
+               (!is_inited_ ? -1 : get_ref()));
 private:
   DISALLOW_COPY_AND_ASSIGN(ObLSTxCtxMgr);
 
@@ -779,8 +788,8 @@ public:
   }
 };
 
-typedef common::ObLinkHashMap<share::ObLSID, ObLSTxCtxMgr,
-        ObLSTxCtxMgrAlloc, common::RefHandle> ObLSTxCtxMgrMap;
+typedef transaction::ObTransHashMap<share::ObLSID, ObLSTxCtxMgr,
+        ObLSTxCtxMgrAlloc, common::ObQSyncLock> ObLSTxCtxMgrMap;
 
 class ObTxCtxMgr
 {
@@ -923,7 +932,9 @@ public:
   // transaction may be undecided;
   // @param [in] ls_id: the specified ls_id;
   // @param [in] mt: the memtable point which will be deleted;
-  int remove_callback_for_uncommited_tx(const share::ObLSID &ls_id, memtable::ObMemtable* mt);
+  int remove_callback_for_uncommited_tx(
+    const ObLSID ls_id,
+    const memtable::ObMemtableSet *memtable_set);
 
   TO_STRING_KV(K(is_inited_), K(tenant_id_), KP(this));
 
@@ -939,6 +950,8 @@ public:
 
   // @param [in] ls_id: the specified ls_id
   int check_scheduler_status(share::ObLSID ls_id);
+
+  int get_max_decided_scn(const share::ObLSID &ls_id, share::SCN & scn);
 
 private:
   int create_ls_(const int64_t tenant_id,

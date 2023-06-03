@@ -141,22 +141,22 @@ int ObHKVTable::Entity::get_rowkey_value(int64_t idx, ObObj &value) const
   return ret;
 }
 
-ObRowkey ObHKVTable::Entity::get_rowkey()
+ObRowkey ObHKVTable::Entity::get_rowkey() const
 {
-  ObRowkey rk(key_objs_, 3);
-  (void)get_rowkey_value(0, key_objs_[0]);
-  (void)get_rowkey_value(1, key_objs_[1]);
-  (void)get_rowkey_value(2, key_objs_[2]);
+  ObRowkey rk(const_cast<ObObj*>(key_objs_), 3);
+  (void)get_rowkey_value(0, const_cast<ObObj&>(key_objs_[0]));
+  (void)get_rowkey_value(1, const_cast<ObObj&>(key_objs_[1]));
+  (void)get_rowkey_value(2, const_cast<ObObj&>(key_objs_[2]));
   return rk;
 }
 
 int64_t ObHKVTable::Entity::hash_rowkey() const
 {
-  int64_t hash_value = 0;
+  uint64_t hash_value = 0;
   ObObj value;
   for (int64_t i = 0; i < 3; ++i) {
     (void)get_rowkey_value(i, value);
-    hash_value = value.hash(hash_value);
+    (void)value.hash(hash_value, hash_value);
   }
   return hash_value;
 }

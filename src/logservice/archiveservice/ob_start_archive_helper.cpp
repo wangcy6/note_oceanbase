@@ -135,8 +135,13 @@ int StartArchiveHelper::fetch_exist_archive_progress_(bool &record_exist)
     ARCHIVE_LOG(WARN, "cal archive file id offset failed", K(ret), K(id_), K(persist_info));
   } else {
     record_exist = true;
+<<<<<<< HEAD
     piece_min_lsn_ = persist_info.start_lsn_;
     start_offset_ = persist_info.lsn_;
+=======
+    piece_min_lsn_ = LSN(persist_info.start_lsn_);
+    start_offset_ = LSN(persist_info.lsn_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     max_archived_scn_ = persist_info.checkpoint_scn_;
     piece_.set(persist_info.key_.piece_id_, piece_interval_, genesis_scn_, base_piece_id_);
     ARCHIVE_LOG(INFO, "fetch exist archive progress succ", KPC(this));
@@ -218,7 +223,7 @@ int StartArchiveHelper::get_local_base_lsn_(palf::LSN &lsn, bool &log_gap)
   }
 #ifdef ERRSIM
   if (OB_SUCC(ret)) {
-    ret = E(EventTable::EN_START_ARCHIVE_LOG_GAP) OB_SUCCESS;
+    ret = OB_E(EventTable::EN_START_ARCHIVE_LOG_GAP) OB_SUCCESS;
   }
   if (OB_FAIL(ret)) {
     log_gap = true;

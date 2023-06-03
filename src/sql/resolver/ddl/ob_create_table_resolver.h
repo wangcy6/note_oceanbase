@@ -48,6 +48,12 @@ public:
   virtual ~ObCreateTableResolver();
 
   virtual int resolve(const ParseNode &parse_tree);
+  static int set_nullable_for_cta_column(ObSelectStmt *select_stmt,
+                                  share::schema::ObColumnSchemaV2& column,
+                                  const ObRawExpr *expr,
+                                  const ObString &table_name,
+                                  common::ObIAllocator &allocator,
+                                  ObStmt *stmt);
 private:
   enum ResolveRule
     {
@@ -61,10 +67,17 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObCreateTableResolver);
   // function members
   uint64_t gen_column_id();
+  uint64_t gen_column_group_id();
   int64_t get_primary_key_size() const;
   int add_primary_key_part(const common::ObString &column_name, common::ObArray<ObColumnResolveStat> &stats, int64_t &pk_data_length);
   int add_hidden_tablet_seq_col();
+  int add_hidden_external_table_pk_col();
 
+  int add_generated_hidden_column_for_udt(ObTableSchema &table_schema,
+                                          ObSEArray<ObColumnSchemaV2, SEARRAY_INIT_NUM> &resolved_cols,
+                                          ObColumnSchemaV2 &udt_column);
+  int add_generated_hidden_column_for_udt(ObTableSchema &table_schema,
+                                          ObColumnSchemaV2 &udt_column);
   int check_column_name_duplicate(const ParseNode *node);
   int resolve_primary_key_node(const ParseNode &pk_node, common::ObArray<ObColumnResolveStat> &stats);
   int resolve_table_elements(const ParseNode *node,
@@ -73,9 +86,6 @@ private:
                              common::ObArray<int> &table_level_constraint_list,
                              const int resolve_rule);
   int resolve_table_elements_from_select(const ParseNode &parse_tree);
-  int set_nullable_for_cta_column(ObSelectStmt *select_stmt,
-                                  share::schema::ObColumnSchemaV2& column,
-                                  const ObRawExpr *expr);
   int set_temp_table_info(share::schema::ObTableSchema &table_schema, ParseNode *commit_option_node);
 
   int set_table_option_to_schema(share::schema::ObTableSchema &table_schema);
@@ -138,6 +148,8 @@ private:
 
   common::ObSEArray<GenColExpr, 5> gen_col_exprs_;//store generated column and dependent exprs
   common::ObSEArray<ObRawExpr *, 5> constraint_exprs_;//store constraint exprs
+
+  uint64_t cur_column_group_id_;
 };
 
 } // end namespace sql

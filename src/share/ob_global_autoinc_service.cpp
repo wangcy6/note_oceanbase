@@ -116,16 +116,20 @@ int ObAutoIncCacheNode::update_sync_value(const uint64_t sync_value)
 int ObGlobalAutoIncService::init(const ObAddr &addr, ObMySQLProxy *mysql_proxy)
 {
   int ret = OB_SUCCESS;
+  ObMemAttr attr(MTL_ID(), ObModIds::OB_AUTOINCREMENT);
   if (OB_ISNULL(mysql_proxy)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), KP(mysql_proxy));
   } else if (OB_FAIL(inner_table_proxy_.init(mysql_proxy))) {
     LOG_WARN("init inner table proxy failed", K(ret));
   } else if (OB_FAIL(autoinc_map_.create(ObGlobalAutoIncService::INIT_HASHMAP_SIZE,
-                                         ObModIds::OB_AUTOINCREMENT,
-                                         ObModIds::OB_AUTOINCREMENT))) {
+                                         attr,
+                                         attr))) {
     LOG_WARN("init autoinc_map_ failed", K(ret));
   } else {
+    for (int64_t i = 0; i < MUTEX_NUM; ++i) {
+      op_mutex_[i].set_latch_id(common::ObLatchIds::AUTO_INCREMENT_GAIS_LOCK);
+    }
     self_ = addr;
     is_inited_ = true;
   }
@@ -255,9 +259,6 @@ int ObGlobalAutoIncService::handle_curr_autoinc_request(const ObGAISAutoIncKeyAr
     LOG_WARN("invalid argument", K(ret), K(request));
   } else if (OB_FAIL(check_leader_(key.tenant_id_, is_leader))) {
     LOG_WARN("check leader failed", K(ret), K(request.sender_), K(self_));
-  } else if (OB_UNLIKELY(!is_leader)) {
-    ret = OB_NOT_MASTER;
-    LOG_WARN("gais service is not leader", K(ret));
   } else if (OB_FAIL(mutex.lock())) {
     LOG_WARN("fail to get lock", K(ret));
   } else {
@@ -267,11 +268,12 @@ int ObGlobalAutoIncService::handle_curr_autoinc_request(const ObGAISAutoIncKeyAr
     if (OB_UNLIKELY(OB_SUCCESS != err && OB_HASH_NOT_EXIST != err)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("failed to get seq value", K(ret), K(key));
-    } else if (OB_LIKELY(cache_node.is_valid())) {
+    } else if (is_leader && OB_LIKELY(cache_node.is_valid())) {
       // get autoinc values from cache
       sequence_value = cache_node.sequence_value_;
       sync_value = cache_node.sync_value_;
-      // hash not exist or cache node is non-valid, read value from inner table
+      // hash not exist, cache node is non-valid or service is not leader,
+      // read value from inner table
     } else if (OB_FAIL(read_value_from_inner_table_(key, sequence_value, sync_value))) {
       LOG_WARN("fail to read value from inner table", K(ret));
     }
@@ -312,14 +314,10 @@ int ObGlobalAutoIncService::handle_push_autoinc_request(
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("failed to get seq value", K(ret), K(key));
     } else if (OB_UNLIKELY(OB_HASH_NOT_EXIST == err || cache_node.need_sync(request.base_value_))) {
-      const bool is_valid_before_sync = cache_node.is_valid();
       if (OB_FAIL(sync_value_to_inner_table_(request, cache_node, sync_value))) {
         LOG_WARN("sync to inner table failed", K(ret));
-      } else {
-        bool need_update_node_map = cache_node.is_valid() || is_valid_before_sync;
-        if (need_update_node_map && OB_FAIL(autoinc_map_.set_refactored(key, cache_node, 1))) {
-          LOG_WARN("set autoinc_map_ failed", K(ret));
-        }
+      } else if (OB_FAIL(autoinc_map_.set_refactored(key, cache_node, 1))) {
+        LOG_WARN("set autoinc_map_ failed", K(ret));
       }
     } else {
       sync_value = cache_node.sync_value_;
@@ -443,6 +441,7 @@ int ObGlobalAutoIncService::sync_value_to_inner_table_(
     if (seq_value > node.last_available_value_) {
       // the node is expired.
       node.reset();
+      node.sync_value_ = sync_value; // update sync value for next sync
     } else if (sync_value == request.max_value_) {
       if (node.last_available_value_ != request.max_value_) {
         ret = OB_ERR_UNEXPECTED;
@@ -456,7 +455,8 @@ int ObGlobalAutoIncService::sync_value_to_inner_table_(
       LOG_WARN("fail to update sync value", K(ret), K(sync_value));
     }
   } else {
-    // do nothing for non-valid node.
+    node.reset();
+    node.sync_value_ = sync_value; // update sync value for next sync
   }
   return ret;
 }

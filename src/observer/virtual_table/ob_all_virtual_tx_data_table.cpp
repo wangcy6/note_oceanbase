@@ -13,6 +13,7 @@
 #include "observer/virtual_table/ob_all_virtual_tx_data_table.h"
 #include "observer/ob_server.h"
 #include "storage/tx_storage/ob_ls_service.h"
+#include "storage/tablet/ob_tablet.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::memtable;
@@ -213,7 +214,7 @@ void ObAllVirtualTxDataTable::prepare_row_data_(ObITable *tx_data_table, RowData
     row_data.min_tx_scn_ = tx_data_sstable->get_filled_tx_scn();
     row_data.max_tx_scn_ = tx_data_sstable->get_key().scn_range_.end_scn_;
   } else {
-    STORAGE_LOG(WARN, "Iterate an invalid table while select virtual tx data table.");
+    STORAGE_LOG_RET(WARN, OB_ERR_UNEXPECTED, "Iterate an invalid table while select virtual tx data table.");
   }
 }
 

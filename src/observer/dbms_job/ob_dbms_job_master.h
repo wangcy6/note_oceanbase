@@ -29,7 +29,6 @@
 #include "share/schema/ob_schema_service.h"
 #include "share/schema/ob_multi_version_schema_service.h"
 
-#include "rootserver/ob_server_manager.h"
 #include "rootserver/ob_ddl_service.h"
 
 
@@ -116,7 +115,8 @@ public:
     : inited_(false),
       job_key_(NULL),
       ready_queue_(NULL),
-      wait_vector_(0, NULL, ObModIds::VECTOR) {}
+      wait_vector_(0, NULL, ObModIds::VECTOR),
+      lock_(common::ObLatchIds::DBMS_JOB_TASK_LOCK) {}
 
   virtual ~ObDBMSJobTask() {}
 
@@ -158,10 +158,10 @@ public:
       running_(false),
       trace_id_(NULL),
       rand_(),
-      server_mgr_(NULL),
       schema_service_(NULL),
       job_rpc_proxy_(NULL),
       self_addr_(),
+      lock_(common::ObLatchIds::DBMS_JOB_MASTER_LOCK),
       alive_jobs_() {}
 
   virtual ~ObDBMSJobMaster() { alive_jobs_.destroy(); };
@@ -170,8 +170,7 @@ public:
 
   bool is_inited() { return inited_; }
 
-  int init(rootserver::ObServerManager *server_mgr,
-           common::ObISQLClient *sql_client,
+  int init(common::ObISQLClient *sql_client,
            share::schema::ObMultiVersionSchemaService *schema_service);
 
   int start();
@@ -209,7 +208,6 @@ private:
   const uint64_t *trace_id_;
 
   common::ObRandom rand_; // for random pick server
-  rootserver::ObServerManager *server_mgr_;
   share::schema::ObMultiVersionSchemaService *schema_service_; // for got all tenant info
   obrpc::ObDBMSJobRpcProxy *job_rpc_proxy_;
 

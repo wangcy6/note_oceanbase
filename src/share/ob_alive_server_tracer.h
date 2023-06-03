@@ -18,6 +18,7 @@
 #include "lib/lock/ob_latch.h"
 #include "lib/net/ob_addr.h"
 #include "lib/task/ob_timer.h"
+#include "lib/container/ob_se_array.h"
 
 namespace oceanbase
 {
@@ -61,13 +62,13 @@ public:
   virtual int is_alive(const common::ObAddr &addr, bool &alive, int64_t &trace_time) const;
   virtual int get_server_status(const common::ObAddr &addr, bool &alive,
                                 bool &is_server_exist, int64_t &trace_time) const;
-  virtual int refresh(common::ObIArray<common::ObAddr> &active_server_list,
-                      common::ObIArray<common::ObAddr> &inactive_server_list);
+  virtual int refresh();
   virtual int get_active_server_list(common::ObIArray<common::ObAddr> &addrs) const;
 
 private:
   virtual int refresh_server_list(const common::ObIArray<common::ObAddr> &server_list,
-                                  common::hash::ObHashSet<common::ObAddr, common::hash::NoPthreadDefendMode> &servers);
+                                  common::hash::ObHashSet<common::ObAddr, common::hash::NoPthreadDefendMode> &servers,
+                                  const char *server_list_type);
 private:
   bool is_inited_;
   mutable common::ObLatch lock_;

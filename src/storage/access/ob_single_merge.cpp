@@ -26,7 +26,7 @@ namespace storage
 {
 
 ObSingleMerge::ObSingleMerge()
-  : rowkey_(NULL), fuse_row_cache_fetcher_()
+  : rowkey_(NULL), full_row_(), handle_(), fuse_row_cache_fetcher_()
 {
   type_ = ObQRIterType::T_SINGLE_GET;
 }
@@ -46,7 +46,21 @@ int ObSingleMerge::open(const ObDatumRowkey &rowkey)
     LOG_WARN("ObSingleMerge has not been inited", K(ret), K_(get_table_param));
   } else {
     const ObTabletMeta &tablet_meta = get_table_param_.tablet_iter_.tablet_handle_.get_obj()->get_tablet_meta();
+<<<<<<< HEAD
     if (OB_FAIL(fuse_row_cache_fetcher_.init(access_param_->iter_param_.tablet_id_, access_param_->iter_param_.get_read_info(), tablet_meta.clog_checkpoint_scn_.get_val_for_tx()))) {
+=======
+    if (!full_row_.is_valid()) {
+      if (OB_FAIL(full_row_.init(*access_ctx_->stmt_allocator_, access_param_->get_max_out_col_cnt()))) {
+        STORAGE_LOG(WARN, "Failed to init datum row", K(ret));
+      } else {
+        full_row_.count_ = access_param_->get_max_out_col_cnt();
+      }
+    } else if (OB_FAIL(full_row_.reserve(access_param_->get_max_out_col_cnt()))) {
+      STORAGE_LOG(WARN, "Failed to reserve full row", K(ret));
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(fuse_row_cache_fetcher_.init(access_param_->iter_param_.tablet_id_, access_param_->iter_param_.get_read_info(), tablet_meta.clog_checkpoint_scn_.get_val_for_tx()))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       STORAGE_LOG(WARN, "fail to init fuse row cache fetcher", K(ret));
     } else {
       rowkey_ = &rowkey;
@@ -60,12 +74,14 @@ void ObSingleMerge::reset()
 {
   ObMultipleMerge::reset();
   rowkey_ = nullptr;
+  full_row_.reset();
   handle_.reset();
 }
 
 void ObSingleMerge::reuse()
 {
   ObMultipleMerge::reuse();
+  full_row_.row_flag_.reset();
   rowkey_ = NULL;
   handle_.reset();
 }
@@ -241,6 +257,7 @@ int ObSingleMerge::inner_get_next_row(ObDatumRow &row)
     access_ctx_->query_flag_.set_not_use_row_cache();
     nop_pos_.reset();
     full_row_.count_ = 0;
+    full_row_.row_flag_.reset();
     full_row_.row_flag_.set_flag(ObDmlFlag::DF_NOT_EXIST);
     full_row_.snapshot_version_ = 0L;
     access_ctx_->use_fuse_row_cache_ = enable_fuse_row_cache;
@@ -304,6 +321,7 @@ int ObSingleMerge::inner_get_next_row(ObDatumRow &row)
         } else {
           row.row_flag_ = full_row_.row_flag_;
           row.group_idx_ = rowkey_->get_group_idx();
+          row.trans_info_ = full_row_.trans_info_;
           STORAGE_LOG(TRACE, "succ to do single get", K(full_row_), K(row), K(have_uncommited_row), K(cols_index), K(access_param_->iter_param_.table_id_));
         }
         if (OB_FAIL(ret)) {
@@ -320,23 +338,45 @@ int ObSingleMerge::inner_get_next_row(ObDatumRow &row)
       }
     }
 #ifdef ENABLE_DEBUG_LOG
+    /*
     if (OB_SUCC(ret)) {
       access_ctx_->defensive_check_record_.query_flag_ = access_ctx_->query_flag_;
       transaction::ObTransService *trx = MTL(transaction::ObTransService *);
       bool trx_id_valid = (NULL != access_ctx_->store_ctx_
-                          && access_ctx_->store_ctx_->mvcc_acc_ctx_.tx_id_.is_valid());
+                          && access_ctx_->store_ctx_->mvcc_acc_ctx_.snapshot_.tx_id_.is_valid());
       if (OB_NOT_NULL(trx)
           && trx_id_valid
           && NULL != trx->get_defensive_check_mgr()) {
         (void)trx->get_defensive_check_mgr()->put(tablet_meta.tablet_id_,
-                                                  access_ctx_->store_ctx_->mvcc_acc_ctx_.tx_id_,
+                                                  access_ctx_->store_ctx_->mvcc_acc_ctx_.snapshot_.tx_id_,
                                                   row,
                                                   *rowkey_,
                                                   access_ctx_->defensive_check_record_);
       }
     }
     access_ctx_->defensive_check_record_.reset();
+    */
 #endif
+
+    // When the index lookups the rowkeys from the main table, it should exists
+    // and if we find that it does not exist, there must be an anomaly
+    if (GCONF.enable_defensive_check()
+        && access_ctx_->query_flag_.is_lookup_for_4377()
+        && OB_ITER_END == ret) {
+      ret = OB_ERR_DEFENSIVE_CHECK;
+      ObString func_name = ObString::make_string("[index lookup]ObSingleMerge::inner_get_next_row");
+      LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
+      LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg", "Fatal Error!!! Catch a defensive error!", K(ret),
+                    K(have_uncommited_row),
+                    K(enable_fuse_row_cache),
+                    K(read_snapshot_version),
+                    KPC(read_info),
+                    KPC(access_ctx_->store_ctx_),
+                    K(tables_));
+      dump_table_statistic_for_4377();
+      dump_tx_statistic_for_4377(access_ctx_->store_ctx_);
+    }
+
     rowkey_ = NULL;
   } else {
     ret = OB_ITER_END;

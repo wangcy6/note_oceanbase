@@ -31,7 +31,11 @@ public:
   bool is_valid_and_not_min() const;
   bool is_max() const;
   bool is_min() const;
+<<<<<<< HEAD
   bool is_base_scn() const { return *this == base_scn(); }
+=======
+  bool is_base_scn() const;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   void set_invalid();
   void set_max();
   void set_min();
@@ -96,7 +100,11 @@ public:
   uint64_t get_val_for_sql() const;
 
   //only for tx, include transform from SCN_MAX to INT64_MAX
+<<<<<<< HEAD
   int64_t get_val_for_tx() const;
+=======
+  int64_t get_val_for_tx(const bool ignore_invalid_scn = false) const;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // compare function
   bool operator==(const SCN &scn) const;
@@ -109,6 +117,11 @@ public:
 
   //fixed length serialization
   int fixed_serialize(char* buf, const int64_t buf_len, int64_t& pos) const;
+<<<<<<< HEAD
+=======
+  //used for checksum with old value of INT64_MAX, if transforming max value, checksum will change;
+  int fixed_deserialize_without_transform(const char* buf, const int64_t data_len, int64_t& pos);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int fixed_deserialize(const char* buf, const int64_t data_len, int64_t& pos);
   int64_t get_fixed_serialize_size(void) const;
 

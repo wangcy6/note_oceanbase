@@ -24,21 +24,21 @@
 #include "share/backup/ob_backup_struct.h"     // ObBackupPathString
 #include "share/ob_define.h"
 #include "share/ob_ls_id.h"
-#include "share/restore/ob_log_archive_source.h"  // ObLogArchiveSourceType
+#include "share/restore/ob_log_restore_source.h"  // ObLogRestoreSourceType
 #include "ob_log_archive_piece_mgr.h"           // ObLogArchivePieceContext
-#include "ob_log_restore_define.h"              // ObLogRestoreErrorContext
 namespace oceanbase
 {
 namespace logservice
 {
-using oceanbase::share::ObLogArchiveSourceType;
+using oceanbase::share::ObLogRestoreSourceType;
 //using oceanbase::share::DirArray;
 typedef common::ObSEArray<std::pair<share::ObBackupPathString, share::ObBackupPathString>, 1> DirArray;
+typedef share::ObRestoreSourceServiceAttr RestoreServiceAttr;
 // The management of remote log source, three types are supported, LOCATION/SERVICE/RAWPATH
 class ObRemoteLogParent
 {
 public:
-  explicit ObRemoteLogParent(const ObLogArchiveSourceType &type, const share::ObLSID &ls_id);
+  explicit ObRemoteLogParent(const ObLogRestoreSourceType &type, const share::ObLSID &ls_id);
   virtual ~ObRemoteLogParent();
 
 public:
@@ -47,11 +47,19 @@ public:
   virtual int64_t to_string(char *buf, const int64_t buf_len) const = 0;
   virtual int update_locate_info(ObRemoteLogParent &source) = 0;
   bool to_end() const { return to_end_; }
+<<<<<<< HEAD
   void set_to_end(const bool is_to_end, const share::SCN &scn);
   void get_end_scn(share::SCN &scn) const { scn = end_fetch_scn_;}
   void get_upper_limit_scn(share::SCN &scn) const { scn = upper_limit_scn_; }
   ObLogArchiveSourceType get_source_type() const { return type_; }
   const char *get_source_type_str(const ObLogArchiveSourceType &type) const;
+=======
+  bool set_to_end(const share::SCN &scn);
+  void get_end_scn(share::SCN &scn) const { scn = end_fetch_scn_;}
+  void get_upper_limit_scn(share::SCN &scn) const { scn = upper_limit_scn_; }
+  ObLogRestoreSourceType get_source_type() const { return type_; }
+  const char *get_source_type_str(const ObLogRestoreSourceType &type) const;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   void mark_error(share::ObTaskId &trace_id, const int ret_code);
   void get_error_info(share::ObTaskId &trace_id, int &ret_code, bool &error_exist);
 
@@ -61,7 +69,11 @@ protected:
 
 protected:
   share::ObLSID ls_id_;
+<<<<<<< HEAD
   ObLogArchiveSourceType type_;
+=======
+  ObLogRestoreSourceType type_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   share::SCN upper_limit_scn_;
   bool to_end_;
   share::SCN end_fetch_scn_;
@@ -79,16 +91,25 @@ public:
   virtual ~ObRemoteSerivceParent();
 
 public:
+<<<<<<< HEAD
   int set(const ObAddr &addr, const share::SCN &end_scn);
   void get(ObAddr &addr, share::SCN &end_scn);
   int deep_copy_to(ObRemoteLogParent &other) override;
   bool is_valid() const override;
   int update_locate_info(ObRemoteLogParent &source) override { UNUSED(source); return OB_SUCCESS; }
   TO_STRING_KV("ObRemoteLogParent", get_source_type_str(type_), K_(ls_id), K_(server),
+=======
+  int set(const RestoreServiceAttr &attr, const share::SCN &end_scn);
+  void get(RestoreServiceAttr *&attr, share::SCN &end_scn);
+  int deep_copy_to(ObRemoteLogParent &other) override;
+  bool is_valid() const override;
+  int update_locate_info(ObRemoteLogParent &source) override { UNUSED(source); return OB_SUCCESS; }
+  TO_STRING_KV("ObRemoteLogParent", get_source_type_str(type_), K_(ls_id), K_(attr),
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
       K_(upper_limit_scn), K_(to_end), K_(end_fetch_scn), K_(end_lsn));
 
 private:
-  ObAddr server_;
+  RestoreServiceAttr attr_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObRemoteSerivceParent);
@@ -156,6 +177,7 @@ public:
 
   ObRemoteLogParent *get_source() const { return source_; }
   int set_source(ObRemoteLogParent *source);
+  void reset();
 private:
   ObRemoteLogParent *source_;
 

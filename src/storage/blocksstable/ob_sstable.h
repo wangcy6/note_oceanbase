@@ -17,6 +17,7 @@
 #include "storage/blocksstable/ob_macro_block_meta.h"
 #include "share/scn.h"
 #include "ob_datum_range.h"
+#include "storage/ddl/ob_ddl_struct.h"
 
 namespace oceanbase
 {
@@ -121,18 +122,39 @@ public:
   {
     return meta_.basic_meta_.recycle_version_;
   }
+<<<<<<< HEAD
+=======
+  int16_t get_sstable_seq() const
+  {
+    return meta_.basic_meta_.sstable_logic_seq_;
+  }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   share::SCN get_filled_tx_scn() const
   {
     return meta_.basic_meta_.filled_tx_scn_;
   }
+<<<<<<< HEAD
 
+=======
+  int64_t get_data_version() const
+  {
+    return is_major_sstable() ? get_snapshot_version() :
+      is_ddl_sstable() ? get_upper_trans_version() :
+      get_key().get_end_scn().get_val_for_tx();
+  }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   virtual int get_frozen_schema_version(int64_t &schema_version) const override;
   int add_disk_ref();
   int dec_disk_ref();
   int pre_transform_root_block(const ObTableReadInfo &index_read_info);
   int set_status_for_read(const ObSSTableStatus status);
+  OB_INLINE int64_t get_macro_offset() const { return meta_.get_macro_info().get_nested_offset(); }
   OB_INLINE bool is_valid() const { return valid_for_reading_; }
   OB_INLINE const blocksstable::ObSSTableMeta &get_meta() const { return meta_; }
+  OB_INLINE int64_t get_macro_read_size() const { return meta_.get_macro_info().get_nested_size(); }
+  OB_INLINE bool is_small_sstable() const {
+      return OB_DEFAULT_MACRO_BLOCK_SIZE > meta_.get_macro_info().get_nested_size()
+             && 0 < meta_.get_macro_info().get_nested_size(); }
   OB_INLINE int get_index_tree_root(
       const ObTableReadInfo &index_read_info,
       blocksstable::ObMicroBlockData &index_data,
@@ -149,11 +171,15 @@ public:
       const ObTableReadInfo &index_read_info,
       common::ObIAllocator &allocator,
       common::ObStoreRowkey &endkey);
+  bool is_empty() const override
+  {
+    return meta_.is_empty();
+  }
 
 public:
   int dump2text(
       const char *dir_name,
-      const share::schema::ObMergeSchema &schema,
+      const ObStorageSchema &schema,
       const char *fname)
   {
     // TODO: print sstable
@@ -174,6 +200,8 @@ public:
 private:
   int check_valid_for_reading();
   int add_macro_ref();
+  int add_used_size();
+  int dec_used_size();
   int build_exist_iterator(
       const ObTableIterParam &iter_param,
       const ObDatumRowkey &rowkey,
@@ -183,7 +211,7 @@ private:
   void dec_macro_ref();
   int get_last_rowkey(const ObTableReadInfo &index_read_info, const ObDatumRowkey *&sstable_endkey);
 
-private:
+protected:
   blocksstable::ObSSTableMeta meta_;
   bool valid_for_reading_;
   bool hold_macro_ref_;

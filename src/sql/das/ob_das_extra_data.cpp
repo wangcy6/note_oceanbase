@@ -51,7 +51,6 @@ int ObDASExtraData::init(const int64_t task_id,
 int ObDASExtraData::fetch_result()
 {
   int ret = OB_SUCCESS;
-  NG_TRACE(fetch_das_extra_result_begin);
   FLTSpanGuard(fetch_das_extra_result);
   ObDASDataFetchReq req;
   int64_t tenant_id = MTL_ID();
@@ -74,7 +73,6 @@ int ObDASExtraData::fetch_result()
     LOG_TRACE("das fetch task result", KR(ret), K(req), K(result_));
     has_more_ = result_.has_more();
   }
-  NG_TRACE(fetch_das_extra_result_end);
   return ret;
 }
 
@@ -89,7 +87,7 @@ int ObDASExtraData::get_next_row()
     }
   }
   while (!got_row && OB_SUCC(ret)) {
-    if (OB_FAIL(result_iter_.get_next_row_skip_const<false>(*eval_ctx_, *output_exprs_))) {
+    if (OB_FAIL(result_iter_.get_next_row<false>(*eval_ctx_, *output_exprs_))) {
       if (OB_ITER_END != ret) {
         LOG_WARN("get next row from result iter failed", KR(ret));
       } else if (has_more_) {
@@ -119,10 +117,10 @@ int ObDASExtraData::get_next_rows(int64_t &count, int64_t capacity)
   }
   while (!got_row && OB_SUCC(ret)) {
     if (OB_UNLIKELY(need_check_output_datum_)) {
-      ret = result_iter_.get_next_batch_skip_const<true>(*output_exprs_, *eval_ctx_,
+      ret = result_iter_.get_next_batch<true>(*output_exprs_, *eval_ctx_,
                                                          capacity, count);
     } else {
-      ret = result_iter_.get_next_batch_skip_const<false>(*output_exprs_, *eval_ctx_,
+      ret = result_iter_.get_next_batch<false>(*output_exprs_, *eval_ctx_,
                                                           capacity, count);
     }
     if (OB_FAIL(ret)) {
@@ -136,8 +134,7 @@ int ObDASExtraData::get_next_rows(int64_t &count, int64_t capacity)
       }
     } else {
       got_row = true;
-      LOG_DEBUG("get next batch from result iter", KR(ret),
-                "output", ROWEXPR2STR(*eval_ctx_, *output_exprs_));
+      PRINT_VECTORIZED_ROWS(SQL, DEBUG, *eval_ctx_, *output_exprs_, count, KR(ret));
     }
   }
   return ret;

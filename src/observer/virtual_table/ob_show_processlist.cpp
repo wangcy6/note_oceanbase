@@ -161,7 +161,7 @@ bool ObShowProcesslist::FillScanner::operator()(sql::ObSQLSessionMgr::Key key, O
               // this is a tmp solution to avoid core when we execute 'show processlist'
               // before we finally find the reason and resolve the bug. otherwise we cannot
               // use this command in on-line cluster.
-              // see https://code.aone.alibaba-inc.com/oceanbase/oceanbase/codereview/1775519
+              // see
               cur_row_->cells_[cell_idx].set_null();
             } else {
               cur_row_->cells_[cell_idx].set_varchar(sess_info->get_user_name());
@@ -365,6 +365,18 @@ bool ObShowProcesslist::FillScanner::operator()(sql::ObSQLSessionMgr::Key key, O
           }
           case SQL_TRACE: {
             cur_row_->cells_[cell_idx].set_bool(sess_info->get_control_info().is_valid());
+            break;
+          }
+          case PLAN_ID: {
+            cur_row_->cells_[cell_idx].set_int(sess_info->get_current_plan_id());
+            break;
+          }
+          case TENANT_ID: {
+            cur_row_->cells_[cell_idx].set_int(sess_info->get_priv_tenant_id());
+            break;
+          }
+          case EFFECTIVE_TENANT_ID: {
+            cur_row_->cells_[cell_idx].set_int(sess_info->get_effective_tenant_id());
             break;
           }
           default: {

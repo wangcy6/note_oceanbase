@@ -31,8 +31,6 @@ class ObISQLClient;
 
 namespace rootserver
 {
-
-class ObServerManager;
 class ObSysTenantBackupJobMgr;
 class ObBackupSetTaskMgr;
 class ObIBackupJobMgr;
@@ -53,7 +51,11 @@ public:
   virtual int get_need_reload_task(common::ObIAllocator &allocator, common::ObIArray<ObBackupScheduleTask *> &tasks) override; 
 public:
   // common func used by backup
+<<<<<<< HEAD
   static int get_scn(common::ObISQLClient &sql_proxy, const uint64_t tenant_id, share::SCN &scn);
+=======
+  static int get_backup_scn(common::ObISQLClient &sql_proxy, const uint64_t tenant_id, const bool is_start, share::SCN &scn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   static int check_tenant_status(share::schema::ObMultiVersionSchemaService &schema_service, uint64_t tenant_id, bool &is_valid);
   static int get_backup_path(common::ObISQLClient &sql_proxy, const uint64_t tenant_id, share::ObBackupPathString &backup_path);
   static int get_next_job_id(common::ObISQLClient &trans, const uint64_t tenant_id, int64_t &job_id);
@@ -91,6 +93,7 @@ private:
       const share::ObBackupLSTaskAttr &ls_task,
       ObIAllocator &allocator, ObBackupScheduleTask *&task);
 
+  int persist_backup_version_(common::ObISQLClient &sql_proxy, const uint64_t tenant_id, const uint64_t &cluster_version);
   template <typename T>
   int do_build_task_(const share::ObBackupJobAttr &job, const share::ObBackupSetTaskAttr &set_task_attr, 
       const share::ObBackupLSTaskAttr &ls_task,

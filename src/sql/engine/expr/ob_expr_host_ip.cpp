@@ -27,7 +27,7 @@ namespace sql
 
 
 ObExprHostIP::ObExprHostIP(ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_HOST_IP, N_HOST_IP, 0, NOT_ROW_DIMENSION)
+    : ObFuncExprOperator(alloc, T_FUN_SYS_HOST_IP, N_HOST_IP, 0, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -71,7 +71,7 @@ int ObExprHostIP::eval_host_ip(const ObExpr &expr, ObEvalCtx &ctx,
     ret = OB_ERR_UNEXPECTED;
     SERVER_LOG(WARN, "buff is null", K(ret));
   } else {
-    //see https://code.aone.alibaba-inc.com/oceanbase/oceanbase/codereview/4074657
+    //see
     ObAddr addr = ObCurTraceId::get_addr();
     MEMSET(buf, 0, OB_IP_STR_BUFF);
     if (!addr.ip_to_string(buf, OB_IP_STR_BUFF)) {

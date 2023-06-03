@@ -15,7 +15,6 @@
 #include "lib/utility/ob_defer.h"
 #include "lib/hash/ob_hashmap.h"
 #include "lib/alloc/alloc_struct.h"
-#include "lib/utility/ob_simple_rate_limiter.h"
 
 
 namespace oceanbase
@@ -32,6 +31,11 @@ class ObMemLeakChecker
     {
       return murmurhash(&ptr_, sizeof(ptr_), 0);
     }
+    int hash(uint64_t &res) const
+    {
+      res = hash();
+      return OB_SUCCESS;
+    }
     bool operator==(const PtrKey &other) const
     {
       return (other.ptr_ == this->ptr_);
@@ -47,6 +51,11 @@ class ObMemLeakChecker
     uint64_t hash() const
     {
       return murmurhash(bt_, static_cast<int32_t> (strlen(bt_)), 0);
+    }
+    int hash(uint64_t &res) const
+    {
+      res = hash();
+      return OB_SUCCESS;
     }
     bool operator==(const Info &other) const
     {
@@ -161,7 +170,6 @@ public:
 
   void on_alloc(lib::AObject &obj, const ObMemAttr &attr)
   {
-    obj.on_leak_check_ = false;
     if (is_label_check() &&
         label_match(obj) &&
         (tenant_id_ == UINT64_MAX || tenant_id_ == attr.tenant_id_) &&
@@ -188,6 +196,7 @@ public:
     if (is_label_check() &&
         obj.on_leak_check_ &&
         label_match(obj)) {
+      obj.on_leak_check_ = false;
       PtrKey ptr_key;
       ptr_key.ptr_ = obj.data_;
       int ret = OB_SUCCESS;
@@ -282,7 +291,7 @@ private:
   int len_;
   mod_alloc_info_t malloc_info_;
 private:
-  static lib::ObSimpleRateLimiter rl_;
+  static ObSimpleRateLimiter rl_;
 };
 }; // end namespace common
 }; // end namespace oceanbase

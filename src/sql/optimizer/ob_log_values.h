@@ -15,6 +15,7 @@
 #include "common/row/ob_row_store.h"
 #include "sql/optimizer/ob_logical_operator.h"
 #include "sql/resolver/ob_stmt.h"
+#include "sql/optimizer/ob_log_plan.h"
 namespace oceanbase
 {
 namespace sql
@@ -25,7 +26,7 @@ namespace sql
 class ObLogValues : public ObLogicalOperator
   {
   public:
-    static const int64_t MAX_EXPLAIN_BUFFER_SIZE = 1024 * 1024;
+    static const int64_t MAX_EXPLAIN_BUFFER_SIZE = 10 * 1024 * 1024;
     ObLogValues(ObLogPlan &plan)
         : ObLogicalOperator(plan),
           explain_plan_(NULL),
@@ -58,7 +59,16 @@ class ObLogValues : public ObLogicalOperator
       return ret;
     }
     int64_t get_col_count() const { return row_store_.get_col_count(); }
-
+    virtual int compute_op_parallel_and_server_info() override
+    {
+      int ret = common::OB_SUCCESS;
+      if (get_num_of_child() == 0) {
+        ret = set_parallel_and_server_info_for_match_all();
+      } else {
+        ret = ObLogicalOperator::compute_op_parallel_and_server_info();
+      }
+      return ret;
+    }
   private:
     ObLogPlan *explain_plan_;
     common::ObRowStore row_store_;

@@ -73,7 +73,7 @@ void ObCDCTabletChangeInfo::reset(const TabletChangeCmd cmd)
 }
 
 int ObCDCTabletChangeInfo::parse_from_multi_data_source_buf(
-    const TenantLSID &tls_id,
+    const logservice::TenantLSID &tls_id,
     const transaction::ObTxBufferNode &multi_data_source_node)
 {
   int ret = OB_SUCCESS;
@@ -124,7 +124,7 @@ int ObCDCTabletChangeInfo::parse_from_multi_data_source_buf(
 }
 
 int ObCDCTabletChangeInfo::parse_create_tablet_op_(
-    const TenantLSID &tls_id,
+    const logservice::TenantLSID &tls_id,
     const obrpc::ObBatchCreateTabletArg &create_tablet_arg)
 {
   int ret = OB_SUCCESS;
@@ -173,7 +173,7 @@ int ObCDCTabletChangeInfo::parse_create_tablet_op_(
 }
 
 int ObCDCTabletChangeInfo::parse_remove_tablet_op_(
-    const TenantLSID &tls_id,
+    const logservice::TenantLSID &tls_id,
     const obrpc::ObBatchRemoveTabletArg &remove_tablet_arg)
 {
   int ret = OB_SUCCESS;
@@ -321,7 +321,18 @@ int TabletToTableInfo::insert_tablet_table_info(const common::ObTabletID &tablet
     LOG_ERROR("invalid arguments", KR(ret), K_(tenant_id), K(tablet_id), K(table_info));
   } else if (OB_FAIL(tablet_to_table_map_.insert(tablet_id, table_info))) {
     if (OB_ENTRY_EXIST == ret) {
-      LOG_ERROR("found duplicate tablet while insert_tablet_table_info", KR(ret), K_(tenant_id), K(tablet_id), K(table_info));
+      ObCDCTableInfo dup_table_info;
+      if (OB_FAIL(tablet_to_table_map_.get(tablet_id, dup_table_info))) {
+        LOG_ERROR("tablet_to_table_map failed to get dup_table_info while the same tablet id is found",
+            K(tablet_id), K(table_info));
+      } else if (dup_table_info == table_info) {
+        ret = OB_SUCCESS;
+        LOG_INFO("found duplicate tablet while insert_tablet_table_info, ignore when table_info is same",
+            K_(tenant_id), K(tablet_id), K(table_info));
+      } else {
+        LOG_ERROR("found duplicate tablet while insert_tablet_table_info", KR(ret),
+            K_(tenant_id), K(tablet_id), K(table_info), K(dup_table_info));
+      }
     } else {
       LOG_ERROR("tablet_to_table_map_ insert tablet failed", KR(ret), K_(tenant_id), K(tablet_id), K(table_info));
     }

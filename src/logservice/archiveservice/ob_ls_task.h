@@ -113,6 +113,11 @@ public:
                            int64_t &file_offset,
                            LogFileTuple &tuple);
 
+  // get send task count in send_task_status
+  // @param[in] station, the archive work station of ls
+  // @param[out] count, the count of send_tasks in task_status
+  int get_send_task_count(const ArchiveWorkStation &station, int64_t &count);
+
   // 获取归档参数
   int get_archive_send_arg(const ArchiveWorkStation &station,
                            ObArchiveSendDestArg &arg);
@@ -145,7 +150,7 @@ private:
     ~ArchiveDest();
 
   public:
-    void init(const LSN &piece_min_lsn, const LSN &lsn, const int64_t file_id,
+    int init(const LSN &piece_min_lsn, const LSN &lsn, const int64_t file_id,
         const int64_t file_offset, const share::ObArchivePiece &piece,
         const share::SCN &max_archived_scn, const bool is_log_gap_exist,
         ObArchiveAllocator *allocator);
@@ -163,6 +168,7 @@ private:
         int64_t &file_id, int64_t &file_offset, bool &error_exist);
     int update_archive_progress(const share::SCN &round_start_scn, const int64_t file_id, const int64_t file_offset, const LogFileTuple &tuple);
     void get_archive_progress(int64_t &file_id, int64_t &file_offset, LogFileTuple &tuple);
+    void get_send_task_count(int64_t &count);
     void get_archive_send_arg(ObArchiveSendDestArg &arg);
     void mark_error();
     void print_tasks_();
@@ -186,7 +192,6 @@ private:
     LogFileTuple       max_fetch_info_;
     ObArchiveLogFetchTask *wait_send_task_array_[MAX_FETCH_TASK_NUM];
     int64_t             wait_send_task_count_;
-    int64_t            seq_no_;
     ObArchiveTaskStatus *send_task_queue_;
 
     ObArchiveAllocator *allocator_;
@@ -197,7 +202,7 @@ private:
 
 private:
   bool is_task_stale_(const ArchiveWorkStation &station) const;
-  void update_unlock_(const StartArchiveHelper &helper, ObArchiveAllocator *allocator);
+  int update_unlock_(const StartArchiveHelper &helper, ObArchiveAllocator *allocator);
 
 private:
   ObLSID id_;

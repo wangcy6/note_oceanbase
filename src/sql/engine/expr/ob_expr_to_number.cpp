@@ -28,7 +28,7 @@ namespace sql
 ObExprToNumberBase::ObExprToNumberBase(common::ObIAllocator &alloc,
                                        const ObExprOperatorType type,
                                        const char *name)
-    : ObFuncExprOperator(alloc, type, name, MORE_THAN_ZERO, NOT_ROW_DIMENSION)
+    : ObFuncExprOperator(alloc, type, name, MORE_THAN_ZERO, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -110,7 +110,7 @@ int ObExprToNumber::calc_tonumber_expr(const ObExpr &expr, ObEvalCtx &ctx,
   } else if (OB_UNLIKELY(expr.arg_cnt_ == 2 && fmt->get_string().length() >= MAX_FMT_STR_LEN)) {
     ret = OB_ERR_INVALID_NUMBER_FORMAT_MODEL;
   } else if (ori->is_null()) {
-    // bug here: https://work.aone.alibaba-inc.com/issue/25171375
+    // bug here:
     res_datum.set_null();
   } else {
     const ObObjType &ori_type = expr.args_[0]->datum_meta_.type_;

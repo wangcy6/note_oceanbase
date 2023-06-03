@@ -111,7 +111,7 @@ public:
   void *alloc_object(const int64_t size);
   void free_object(void *ptr);
 
-  int push_retain_ctx(ObIRetainCtxCheckFunctor *retain_func);
+  int push_retain_ctx(ObIRetainCtxCheckFunctor *retain_func, int64_t timeout_us);
   int try_gc_retain_ctx(storage::ObLS *ls);
   int print_retain_ctx_info(share::ObLSID ls_id);
   int force_gc_retain_ctx();
@@ -122,7 +122,10 @@ public:
 
   void try_advance_retain_ctx_gc(share::ObLSID ls_id);
 
-  TO_STRING_KV(K(retain_ctx_list_.size()));
+  TO_STRING_KV(K(retain_ctx_list_.size()),
+               K(max_wait_ckpt_ts_),
+               K(last_push_gc_task_ts_),
+               K(skip_remove_cnt_));
 
 private:
   int remove_ctx_func_(RetainCtxList::iterator remove_iter);
@@ -136,6 +139,8 @@ private:
 
   share::SCN max_wait_ckpt_ts_;
   int64_t last_push_gc_task_ts_;
+
+  int64_t skip_remove_cnt_;
 
   TransModulePageAllocator reserve_allocator_;
 };

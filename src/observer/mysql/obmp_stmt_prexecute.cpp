@@ -77,7 +77,6 @@ ObMPStmtPrexecute::ObMPStmtPrexecute(const ObGlobalContext &gctx)
 int ObMPStmtPrexecute::before_process()
 {
   int ret = OB_SUCCESS;
-  bool use_sess_trace = false;
 
   if (OB_FAIL(ObMPBase::before_process())) {
     LOG_WARN("fail to call before process", K(ret));
@@ -103,33 +102,42 @@ int ObMPStmtPrexecute::before_process()
     }
     const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
     const char* pos = pkt.get_cdata();
+    analysis_checker_.init(pos, pkt.get_clen());
     // stmt_id
     int32_t stmt_id = -1;
-    ObMySQLUtil::get_int4(pos, stmt_id);
-    stmt_id_ = stmt_id;
+    PS_DEFENSE_CHECK(9) // stmt_id(4) + flag(1) + iteration_count(4)
+    {
+      ObMySQLUtil::get_int4(pos, stmt_id);
+      stmt_id_ = stmt_id;
 
-    // flags
-    int8_t flag = 0;
-    ObMySQLUtil::get_int1(pos, flag);
+      // flags
+      int8_t flag = 0;
+      ObMySQLUtil::get_int1(pos, flag);
 
-    // iteration_count
-    ObMySQLUtil::get_int4(pos, iteration_count_);
+      // iteration_count
+      ObMySQLUtil::get_int4(pos, iteration_count_);
+    }
 
     // sql
     if (OB_SUCC(ret) && OB_FAIL(ObMySQLUtil::get_length(pos, sql_len_))) {
       LOG_WARN("failed to get length", K(ret));
     } else {
-      sql_.assign_ptr(pos, static_cast<ObString::obstr_size_t>(sql_len_));
-      pos += sql_len_;
+      PS_DEFENSE_CHECK(sql_len_)
+      {
+        sql_.assign_ptr(pos, static_cast<ObString::obstr_size_t>(sql_len_));
+        pos += sql_len_;
+      }
       LOG_DEBUG("get sql in prexecute protocol.", K(stmt_id_), K(sql_));
     }
 
     // params_num
     int32_t num = 0;
-    ObMySQLUtil::get_int4(pos, num);
-    set_param_num(num);
-
     ObSQLSessionInfo *session = NULL;
+    PS_DEFENSE_CHECK(4) // params_num
+    {
+      ObMySQLUtil::get_int4(pos, num);
+      set_param_num(num);
+    }
     if (OB_FAIL(ret)) {
       // do nothing
     } else if (OB_FAIL(get_session(session))) {
@@ -180,8 +188,7 @@ int ObMPStmtPrexecute::before_process()
             THIS_WORKER.set_timeout_ts(get_receive_timestamp() + query_timeout);
             retry_ctrl_.set_tenant_global_schema_version(tenant_version);
             retry_ctrl_.set_sys_global_schema_version(sys_version);
-            if (OB_FAIL(init_process_var(get_ctx(), ObMultiStmtItem(false, 0, ObString()), *session,
-                                         use_sess_trace))) {
+            if (OB_FAIL(init_process_var(get_ctx(), ObMultiStmtItem(false, 0, ObString()), *session))) {
               LOG_WARN("init process var faield.", K(ret));
             } else if (OB_FAIL(check_and_refresh_schema(session->get_login_tenant_id(),
                                                         session->get_effective_tenant_id()))) {
@@ -221,7 +228,7 @@ int ObMPStmtPrexecute::before_process()
                   get_ctx().is_prepare_stage_ = true;
                   if (OB_FAIL(result.init())) {
                     LOG_WARN("result set init failed", K(ret));
-                  } else if (OB_FAIL(ObMPBase::set_session_active(sql_, *session,
+                  } else if (OB_FAIL(ObMPBase::set_session_active(sql_, *session, ObTimeUtil::current_time(),
                                   obmysql::ObMySQLCmd::COM_STMT_PREPARE))) {
                     LOG_WARN("fail to set session active", K(ret));
                   }
@@ -240,15 +247,6 @@ int ObMPStmtPrexecute::before_process()
                       LOG_WARN("run stmt_query failed, check if need retry",
                                K(ret), K(cli_ret), K(get_retry_ctrl().need_retry()), K(sql_));
                       ret = cli_ret;
-                    } else {
-                      if (session->get_in_transaction()) {
-                        if (ObStmt::is_write_stmt(result.get_stmt_type(),
-                                                  result.has_global_variable())) {
-                          session->set_has_exec_write_stmt(true);
-                        }
-                      } else {
-                        session->set_has_exec_write_stmt(false);
-                      }
                     }
                     session->set_session_in_retry(retry_ctrl_.need_retry());
                   }
@@ -279,6 +277,10 @@ int ObMPStmtPrexecute::before_process()
             stmt_type_ = ps_session_info->get_stmt_type();
             if (is_arraybinding_has_result_type(stmt_type_) && iteration_count_ > 1) {
               set_arraybounding(true);
+              if (get_ctx().can_reroute_sql_) {
+                get_ctx().can_reroute_sql_ = false;
+                LOG_INFO("arraybinding not support reroute sql.");
+              }
               // only init param_store
               // array_binding_row_ and array_binding_columns_ will init later
               OZ (init_arraybinding_paramstore(*allocator_));
@@ -291,49 +293,61 @@ int ObMPStmtPrexecute::before_process()
             if (OB_FAIL(request_params(session, pos, ps_stmt_checksum, *allocator_, params_num_))) {
               LOG_WARN("prepare-execute protocol get params request failed", K(ret));
             } else {
-              ObMySQLUtil::get_uint4(pos, exec_mode_);
-              // https://yuque.antfin.com/docs/share/a5705d97-1d74-4b90-8be2-6e500249345f?#
-              // is_commit_on_success_ is not use yet
-              // other exec_mode set use ==
-              is_commit_on_success_ = exec_mode_ & OB_OCI_COMMIT_ON_SUCCESS;
-              exec_mode_ = exec_mode_ & (0xffffffff - OB_OCI_COMMIT_ON_SUCCESS);
-              if (OB_OCI_BATCH_ERRORS == exec_mode_ && !is_pl_stmt(stmt_type_)) {
-                set_save_exception(true);
-              }
-              if (OB_SUCC(ret)) {
-                ObMySQLUtil::get_uint4(pos, close_stmt_count_);
-                int tmp_ret = OB_SUCCESS;
-                if (0 != close_stmt_count_) {
-                  LOG_INFO("close stmt count:", K(close_stmt_count_), K(stmt_id_));
-                  // OCI not support close_stmt_count_ is not 0 yet.
-                  // for (int64_t i = 0; i < close_stmt_count_; i++) {
-                  //   int32_t close_stmt_id = -1;
-                  //   ObMySQLUtil::get_int4(pos, close_stmt_id);
-                  //   if (OB_NOT_NULL(session->get_cursor(close_stmt_id))) {
-                  //     if (OB_FAIL(session->close_cursor(close_stmt_id))) {
-                  //       tmp_ret = ret;
-                  //       LOG_WARN("fail to close cursor", K(ret), K(stmt_id_), K(close_stmt_id), K(session->get_sessid()));
-                  //     }
-                  //   }
-                  //   if (OB_FAIL(session->close_ps_stmt(close_stmt_id))) {
-                  //     LOG_WARN("close ps stmt fail in prepare-execute.", K(stmt_id_), K(close_stmt_id));
-                  //   }
-                  //   if (OB_SUCCESS != tmp_ret) {
-                  //     ret = tmp_ret;
-                  //   }
-                  // }
+              PS_DEFENSE_CHECK(4) // exec_mode
+              {
+                ObMySQLUtil::get_uint4(pos, exec_mode_);
+                //
+                // is_commit_on_success_ is not use yet
+                // other exec_mode set use ==
+                is_commit_on_success_ = exec_mode_ & OB_OCI_COMMIT_ON_SUCCESS;
+                exec_mode_ = exec_mode_ & (0xffffffff - OB_OCI_COMMIT_ON_SUCCESS);
+                if (OB_OCI_BATCH_ERRORS == exec_mode_ && !is_pl_stmt(stmt_type_)) {
+                  set_save_exception(true);
                 }
               }
               if (OB_SUCC(ret)) {
-                ObMySQLUtil::get_uint4(pos, ps_stmt_checksum);
-                if (DEFAULT_ITERATION_COUNT == ps_stmt_checksum
-                      || (OB_NOT_NULL(ps_session_info)
-                          && ps_stmt_checksum != ps_session_info->get_ps_stmt_checksum())) {
-                    ret = OB_ERR_PREPARE_STMT_CHECKSUM;
-                    LOG_ERROR("ps stmt checksum fail", K(ret), "session_id", session->get_sessid(),
-                                                    K(ps_stmt_checksum), K(*ps_session_info));
-                } else {
-                    ObMySQLUtil::get_uint4(pos, extend_flag_);
+                PS_DEFENSE_CHECK(4) // close stmt count
+                {
+                  ObMySQLUtil::get_uint4(pos, close_stmt_count_);
+                  int tmp_ret = OB_SUCCESS;
+                  if (0 != close_stmt_count_) {
+                    LOG_INFO("close stmt count:", K(close_stmt_count_), K(stmt_id_));
+                    // OCI not support close_stmt_count_ is not 0 yet.
+                    // for (int64_t i = 0; i < close_stmt_count_; i++) {
+                    //   int32_t close_stmt_id = -1;
+                    //   ObMySQLUtil::get_int4(pos, close_stmt_id);
+                    //   if (OB_NOT_NULL(session->get_cursor(close_stmt_id))) {
+                    //     if (OB_FAIL(session->close_cursor(close_stmt_id))) {
+                    //       tmp_ret = ret;
+                    //       LOG_WARN("fail to close cursor", K(ret), K(stmt_id_), K(close_stmt_id), K(session->get_sessid()));
+                    //     }
+                    //   }
+                    //   if (OB_FAIL(session->close_ps_stmt(close_stmt_id))) {
+                    //     LOG_WARN("close ps stmt fail in prepare-execute.", K(stmt_id_), K(close_stmt_id));
+                    //   }
+                    //   if (OB_SUCCESS != tmp_ret) {
+                    //     ret = tmp_ret;
+                    //   }
+                    // }
+                  }
+                }
+              }
+              if (OB_SUCC(ret)) {
+                PS_DEFENSE_CHECK(4) // checksum
+                {
+                  ObMySQLUtil::get_uint4(pos, ps_stmt_checksum);
+                  if (DEFAULT_ITERATION_COUNT == ps_stmt_checksum
+                        || (OB_NOT_NULL(ps_session_info)
+                            && ps_stmt_checksum != ps_session_info->get_ps_stmt_checksum())) {
+                      ret = OB_ERR_PREPARE_STMT_CHECKSUM;
+                      LOG_ERROR("ps stmt checksum fail", K(ret), "session_id", session->get_sessid(),
+                                                      K(ps_stmt_checksum), K(*ps_session_info));
+                  } else {
+                    PS_DEFENSE_CHECK(4) // extend_flag
+                    {
+                      ObMySQLUtil::get_uint4(pos, extend_flag_);
+                    }
+                  }
                 }
               }
               if (OB_FAIL(ret)) {
@@ -395,7 +409,8 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
                                         bool &is_diagnostics_stmt,
                                         int64_t &execution_id,
                                         const bool force_sync_resp,
-                                        bool &async_resp_used)
+                                        bool &async_resp_used,
+                                        ObPsStmtId &inner_stmt_id)
 {
   int ret = OB_SUCCESS;
   if (OB_OCI_EXACT_FETCH != exec_mode_ && stmt::T_SELECT == stmt_type_) {
@@ -403,6 +418,7 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
     set_ps_cursor_type(ObPrexecutePsCursorType);
     ObDbmsCursorInfo *cursor = NULL;
     bool use_stream = false;
+    inner_stmt_id = OB_INVALID_ID;
     // 1.创建cursor
     ObPsStmtId inner_stmt_id = OB_INVALID_ID;
     if (OB_NOT_NULL(session.get_cursor(stmt_id_))) {
@@ -414,7 +430,7 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
     CK (OB_NOT_NULL(cursor));
     OX (cursor->set_stmt_type(stmt::T_SELECT));
     OZ (session.get_inner_ps_stmt_id(stmt_id_, inner_stmt_id));
-    OX (cursor->set_stmt_id(inner_stmt_id));
+    OX (cursor->set_ps_sql(sql_));
     OZ (session.ps_use_stream_result_set(use_stream));
     if (use_stream) {
       OX (cursor->set_streaming());
@@ -427,9 +443,8 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
     OZ (cursor->init_params(params.count()));
     OZ (cursor->get_exec_params().assign(params));
     OZ (gctx_.sql_engine_->init_result_set(ctx, result));
-    if (OB_SUCCESS != ret || enable_perf_event) {
-      set_exec_start_timestamp(ObTimeUtility::current_time());
-    }
+    //监控项统计开始
+    set_exec_start_timestamp(ObTimeUtility::current_time());
     if (OB_SUCC(ret)) {
       ObPLExecCtx pl_ctx(cursor->get_allocator(), &result.get_exec_context(), NULL/*params*/,
                         NULL/*result*/, &ret, NULL/*func*/, true);
@@ -621,10 +636,8 @@ int ObMPStmtPrexecute::execute_response(ObSQLSessionInfo &session,
     }
     int8_t has_result = 0;
     if (OB_SUCC(ret)) {
-      if (enable_perf_event) {
-        //监控项统计开始
-        set_exec_start_timestamp(ObTimeUtility::current_time());
-      }
+      //监控项统计开始
+      set_exec_start_timestamp(ObTimeUtility::current_time());
       // 本分支内如果出错, 全部会在response_result内部处理妥当, 无需再额外处理回复错误包
       need_response_error = false;
       is_diagnostics_stmt = ObStmt::is_diagnostic_stmt(result.get_literal_stmt_type());

@@ -37,7 +37,7 @@ namespace share
 {
 
 OB_SERIALIZE_MEMBER(ObSimpleFrozenStatus, frozen_scn_,
-                    schema_version_, cluster_version_);
+                    schema_version_, data_version_);
 
 int ObFreezeInfoProxy::get_freeze_info(
     ObISQLClient &sql_proxy,
@@ -165,6 +165,43 @@ int ObFreezeInfoProxy::get_freeze_info_larger_or_equal_than(
       }
     }
   }
+  LOG_INFO("finish load_freeze_info", KR(ret), K_(tenant_id), K(sql));
+  return ret;
+}
+
+int ObFreezeInfoProxy::get_max_frozen_scn_smaller_or_equal_than(
+    ObISQLClient &sql_proxy,
+    const SCN &compaction_scn,
+    SCN &max_frozen_scn)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  if (OB_UNLIKELY(!compaction_scn.is_valid() || (compaction_scn < SCN::base_scn()))) {
+    LOG_WARN("invalid argument", KR(ret), K(compaction_scn));
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = nullptr;
+      const uint64_t compaction_scn_val = compaction_scn.get_val_for_inner_table_field();
+      if (OB_FAIL(sql.assign_fmt("SELECT MAX(frozen_scn) as value FROM %s WHERE frozen_scn <= %lu",
+          OB_ALL_FREEZE_INFO_TNAME, compaction_scn_val))) {
+        LOG_WARN("fail to append sql", KR(ret), K_(tenant_id), K(compaction_scn));
+      } else if (OB_FAIL(sql_proxy.read(res, tenant_id_, sql.ptr()))) {
+        LOG_WARN("fail to execute sql", KR(ret), K(sql), K_(tenant_id));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("fail to get sql result", KR(ret), K(sql), K_(tenant_id));
+      } else if (OB_FAIL(result->next())) {
+        LOG_WARN("get next result failed", KR(ret), K_(tenant_id), K(sql));
+      } else {
+        uint64_t max_frozen_scn_val = UINT64_MAX;
+        EXTRACT_UINT_FIELD_MYSQL(*result, "value", max_frozen_scn_val, uint64_t);
+        if (FAILEDx(max_frozen_scn.convert_for_inner_table_field(max_frozen_scn_val))) {
+          LOG_WARN("fail to convert uint64_t to SCN", KR(ret), K(max_frozen_scn_val));
+        }
+      }
+    }
+  }
+  LOG_INFO("finish to get freeze_info", KR(ret), K_(tenant_id), K(sql));
   return ret;
 }
 
@@ -181,7 +218,11 @@ int ObFreezeInfoProxy::set_freeze_info(
     ret = OB_INVALID_ARGUMENT;
     LOG_ERROR("invalid argument", KR(ret), K(frozen_status), K_(tenant_id));
   } else if (OB_FAIL(dml.add_uint64_pk_column("frozen_scn", frozen_status.frozen_scn_.get_val_for_inner_table_field()))
+<<<<<<< HEAD
             || OB_FAIL(dml.add_column("cluster_version", frozen_status.cluster_version_))
+=======
+            || OB_FAIL(dml.add_column("cluster_version", frozen_status.data_version_))
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
             || OB_FAIL(dml.add_column("schema_version", frozen_status.schema_version_))) {
     LOG_WARN("fail to add column", KR(ret), K(frozen_status), K_(tenant_id));
   } else if (OB_FAIL(exec.exec_insert(OB_ALL_FREEZE_INFO_TNAME, dml, affected_rows))) {
@@ -388,7 +429,11 @@ int ObFreezeInfoProxy::construct_frozen_status_(
   int ret = OB_SUCCESS;
   uint64_t frozen_scn_val = OB_INVALID_SCN_VAL;
   EXTRACT_UINT_FIELD_MYSQL(result, "frozen_scn", frozen_scn_val, uint64_t);
+<<<<<<< HEAD
   EXTRACT_INT_FIELD_MYSQL(result, "cluster_version", frozen_status.cluster_version_, int64_t);
+=======
+  EXTRACT_INT_FIELD_MYSQL(result, "cluster_version", frozen_status.data_version_, int64_t);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   EXTRACT_INT_FIELD_MYSQL(result, "schema_version", frozen_status.schema_version_, int64_t);
   if (FAILEDx(frozen_status.frozen_scn_.convert_for_inner_table_field(frozen_scn_val))) {
     LOG_WARN("fail to convert val to SCN", KR(ret), K(frozen_scn_val));

@@ -24,9 +24,11 @@
 #include "sql/session/ob_sql_session_info.h"
 #include "sql/ob_sql.h"
 #include "observer/ob_req_time_service.h"
+#include "observer/mysql/obmp_utils.h"
 #include "observer/mysql/obmp_stmt_send_piece_data.h"
 #include "rpc/obmysql/packet/ompk_piece.h"
 #include "observer/omt/ob_tenant.h"
+#include "sql/plan_cache/ob_ps_cache.h"
 
 namespace oceanbase
 {
@@ -87,6 +89,7 @@ int ObMPStmtGetPieceData::process()
   int ret = OB_SUCCESS;
   ObSQLSessionInfo *sess = NULL;
   bool need_response_error = true;
+  bool need_disconnect = true;
   bool async_resp_used = false; // 由事务提交线程异步回复客户端
   int64_t query_timeout = 0;
   ObSMConnection *conn = get_conn();
@@ -142,7 +145,12 @@ int ObMPStmtGetPieceData::process()
                && OB_FAIL(session.update_sys_variable(SYS_VAR_OB_TRACE_INFO,
                                                       pkt.get_trace_info()))) {
       LOG_WARN("fail to update trace info", K(ret));
+    } else if (FALSE_IT(session.set_txn_free_route(pkt.txn_free_route()))) {
+    } else if (OB_FAIL(process_extra_info(session, pkt, need_response_error))) {
+      LOG_WARN("fail get process extra info", K(ret));
+    } else if (FALSE_IT(session.post_sync_session_info())) {
     } else {
+      need_disconnect = false;
       THIS_WORKER.set_timeout_ts(get_receive_timestamp() + query_timeout);
       session.partition_hit().reset();
       if (OB_FAIL(process_get_piece_data_stmt(session))) {
@@ -154,6 +162,15 @@ int ObMPStmtGetPieceData::process()
     THIS_WORKER.set_session(NULL);
     revert_session(sess); //current ignore revert session ret
   }
+
+  if (OB_FAIL(ret) && need_response_error && is_conn_valid()) {
+    send_error_packet(ret, NULL);
+  }
+
+  if (OB_FAIL(ret) && need_disconnect && is_conn_valid()) {
+    force_disconnect();
+    LOG_WARN("disconnect connection when process query", K(ret));
+  }
   return ret;
 }
 
@@ -161,7 +178,6 @@ int ObMPStmtGetPieceData::process_get_piece_data_stmt(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
   bool need_response_error = true;
-  bool use_sess_trace = false;
   int64_t tenant_version = 0;
   int64_t sys_version = 0;
   setup_wb(session);
@@ -180,7 +196,7 @@ int ObMPStmtGetPieceData::process_get_piece_data_stmt(ObSQLSessionInfo &session)
   //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
   int tmp_ret = OB_SUCCESS;
   //清空WARNING BUFFER
-  tmp_ret = do_after_process(session, use_sess_trace, ctx_, false);
+  tmp_ret = do_after_process(session, ctx_, false);
   UNUSED(tmp_ret);
   return ret;
 }
@@ -203,11 +219,12 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
                                     ? &audit_record.exec_record_.max_wait_event_ 
                                     : NULL, di);
     ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
-    if (enable_sql_audit) {
+    if (enable_perf_event) {
       audit_record.exec_record_.record_start(di);
     }
     int64_t execution_id = 0;
     ObString sql = "get piece info";
+    //监控项统计开始
     exec_start_timestamp_ = ObTimeUtility::current_time();
     if (FALSE_IT(execution_id = gctx_.sql_engine_->get_execution_id())) {
       //nothing to do
@@ -217,25 +234,24 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
     } else if (OB_FAIL(response_result(session))) {
       exec_end_timestamp_ = ObTimeUtility::current_time();
     } else {
-      //监控项统计开始
-      if (enable_perf_event) {
-        exec_end_timestamp_ = ObTimeUtility::current_time();
-      }
       session.set_current_execution_id(execution_id);
+
+      //监控项统计结束
+      exec_end_timestamp_ = ObTimeUtility::current_time();
+
+      // some statistics must be recorded for plan stat, even though sql audit disabled
+      bool first_record = (1 == audit_record.try_cnt_);
+      ObExecStatUtils::record_exec_timestamp(*this, first_record, audit_record.exec_timestamp_);
+      audit_record.exec_timestamp_.update_stage_time();
+
       if (enable_perf_event) {
-        exec_end_timestamp_ = ObTimeUtility::current_time();
-        if (lib::is_diagnose_info_enabled()) {
-          const int64_t time_cost = exec_end_timestamp_ - get_receive_timestamp();
-          EVENT_INC(SQL_PS_PREPARE_COUNT);
-          EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
-        }
-      }
-      if (enable_sql_audit) {
         audit_record.exec_record_.record_end(di);
-        bool first_record = (1 == audit_record.try_cnt_);
-        ObExecStatUtils::record_exec_timestamp(*this,
-            first_record,
-            audit_record.exec_timestamp_);
+        audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
+        audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
+        audit_record.update_event_stage_state();
+        const int64_t time_cost = exec_end_timestamp_ - get_receive_timestamp();
+        EVENT_INC(SQL_PS_PREPARE_COUNT);
+        EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
       }
     }
   } // diagnose end
@@ -249,9 +265,7 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
   }
 
   //set read_only
-  if (OB_SUCC(ret)) {
-    session.set_has_exec_write_stmt(false);
-  } else {
+  if (OB_FAIL(ret)) {
     bool is_partition_hit = session.partition_hit().get_bool();
     int err = send_error_packet(ret, NULL, is_partition_hit);
     if (OB_SUCCESS != err) {  // 发送error包
@@ -263,11 +277,10 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
     audit_record.client_addr_ = session.get_peer_addr();
     audit_record.user_client_addr_ = session.get_user_client_addr();
     audit_record.user_group_ = THIS_WORKER.get_group_id();
-    audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
-    audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
     audit_record.ps_stmt_id_ = stmt_id_;
     audit_record.plan_id_ = column_id_;
     audit_record.return_rows_ = piece_size_;
+    audit_record.is_perf_event_closed_ = !lib::is_diagnose_info_enabled();
     if (OB_NOT_NULL(session.get_ps_cache())) {
       ObPsStmtInfoGuard guard;
       ObPsStmtInfo *ps_info = NULL;
@@ -275,15 +288,15 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
       if (OB_SUCC(session.get_inner_ps_stmt_id(stmt_id_, inner_stmt_id))
             && OB_SUCC(session.get_ps_cache()->get_stmt_info_guard(inner_stmt_id, guard))
             && OB_NOT_NULL(ps_info = guard.get_stmt_info())) {
+        audit_record.ps_inner_stmt_id_ = inner_stmt_id;
         audit_record.sql_ = const_cast<char *>(ps_info->get_ps_sql().ptr());
         audit_record.sql_len_ = min(ps_info->get_ps_sql().length(), OB_MAX_SQL_LENGTH);
       } else {
-        LOG_INFO("get sql fail in fetch", K(stmt_id_));
+        LOG_WARN("get sql fail in get piece data", K(stmt_id_));
       }
     }
-    audit_record.update_stage_stat();
-    ObSQLUtils::handle_audit_record(false, EXECUTE_PS_GET_PIECE, session);
   }
+  ObSQLUtils::handle_audit_record(false, EXECUTE_PS_GET_PIECE, session, ctx_.is_sensitive_);
 
   clear_wb_content(session);
   return ret;

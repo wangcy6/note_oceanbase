@@ -37,6 +37,24 @@ class ObIMemtableCtx;
 class ObMemtableKey;
 class ObMvccRowCallback;
 
+#define ATOMIC_ADD_TAG(tag)                           \
+  while (true) {                                      \
+    const uint8_t old = ATOMIC_LOAD(&(flag_));        \
+    const uint8_t tmp = (old | (tag));                \
+    if (ATOMIC_BCAS(&(flag_), old, tmp)) {            \
+      break;                                          \
+    }                                                 \
+  }
+
+#define ATOMIC_SUB_TAG(tag)                     \
+  while (true) {                                \
+    const uint8_t old = ATOMIC_LOAD(&(flag_));  \
+    const uint8_t tmp = (old & (~(tag)));       \
+    if (ATOMIC_BCAS(&(flag_), old, tmp)) {      \
+      break;                                    \
+    }                                           \
+  }
+
 // ObMvccTransNode is the multi-version data used for mvcc and stored on
 // memtable. It only saves updated columns for write and write by aggregating tx
 // nodes to data contains all columns.
@@ -94,25 +112,63 @@ public:
   void remove_callback();
 
   // ===================== ObMvccTransNode Tx Node Meta =====================
-  // ObMvccRow records safe_read_barrier and snapshot_version_barrier to detect
-  // unexpected behaviors. The safe_read_barrier means the type of the last read
-  // operation performed on the row. And the snapshot_version_barrier means the
-  // version of the read operation,
+  // ObMvccRow records snapshot_version_barrier to detect unexpected concurrency
+  // control behaviors. The snapshot_version_barrier means the snapshot of the
+  // latest read operation, and if a commit version appears after the read
+  // operation with the commit version smaller than the snapshot version, we
+  // should report the unexpected bahavior.
   void set_safe_read_barrier(const bool is_weak_consistent_read);
   void clear_safe_read_barrier();
   bool is_safe_read_barrier() const;
+<<<<<<< HEAD
   void set_snapshot_version_barrier(const share::SCN version);
+=======
+  void set_snapshot_version_barrier(const share::SCN version,
+                                    const int64_t flag);
+  void get_snapshot_version_barrier(int64_t &version, int64_t &flag);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // ===================== ObMvccTransNode Flag Interface =====================
-  void set_committed();
-  bool is_committed() const { return ATOMIC_LOAD(&flag_) & F_COMMITTED; }
-  void set_elr();
-  bool is_elr() const { return ATOMIC_LOAD(&flag_) & F_ELR; }
-  void set_aborted();
-  void clear_aborted();
-  bool is_aborted() const { return ATOMIC_LOAD(&flag_) & F_ABORTED; }
-  void set_delayed_cleanout(const bool delayed_cleanout);
-  bool is_delayed_cleanout() const;
+  OB_INLINE void set_committed()
+  {
+    ATOMIC_ADD_TAG(F_COMMITTED);
+  }
+  OB_INLINE bool is_committed() const
+  {
+    return ATOMIC_LOAD(&flag_) & F_COMMITTED;
+  }
+  OB_INLINE void set_elr()
+  {
+    ATOMIC_ADD_TAG(F_ELR);
+  }
+  OB_INLINE bool is_elr() const
+  {
+    return ATOMIC_LOAD(&flag_) & F_ELR;
+  }
+  OB_INLINE void set_aborted()
+  {
+    ATOMIC_ADD_TAG(F_ABORTED);
+  }
+  OB_INLINE void clear_aborted()
+  {
+    ATOMIC_SUB_TAG(F_ABORTED);
+  }
+  OB_INLINE bool is_aborted() const
+  {
+    return ATOMIC_LOAD(&flag_) & F_ABORTED;
+  }
+  OB_INLINE void set_delayed_cleanout(const bool delayed_cleanout)
+  {
+    if (OB_LIKELY(delayed_cleanout)) {
+      ATOMIC_ADD_TAG(F_DELAYED_CLEANOUT);
+    } else {
+      ATOMIC_SUB_TAG(F_DELAYED_CLEANOUT);
+    }
+  }
+  OB_INLINE bool is_delayed_cleanout() const
+  {
+    return ATOMIC_LOAD(&flag_) & F_DELAYED_CLEANOUT;
+  }
 
   // ===================== ObMvccTransNode Setter/Getter =====================
   blocksstable::ObDmlFlag get_dml_flag() const;
@@ -130,9 +186,16 @@ public:
       tx_end_scn_.atomic_store(tx_end_scn);
     }
   }
+<<<<<<< HEAD
   share::SCN get_tx_end_scn() { return tx_end_scn_.atomic_load(); }
+=======
+  share::SCN get_tx_end_scn() const { return tx_end_scn_.atomic_load(); }
+  share::SCN get_tx_version() const { return trans_version_.atomic_load(); }
+  share::SCN get_scn() const { return scn_.atomic_load(); }
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
 private:
+  // the row flag of the mvcc tx node
   static const uint8_t F_INIT;
   static const uint8_t F_WEAK_CONSISTENT_READ_BARRIER;
   static const uint8_t F_STRONG_CONSISTENT_READ_BARRIER;
@@ -141,6 +204,13 @@ private:
   static const uint8_t F_ABORTED;
   static const uint8_t F_DELAYED_CLEANOUT;
   static const uint8_t F_MUTEX;
+
+public:
+  // the snapshot flag of the snapshot version barrier
+  static const int64_t NORMAL_READ_BIT =              0x0L;
+  static const int64_t WEAK_READ_BIT =                0x1L << 62;
+  static const int64_t COMPACT_READ_BIT =             0x2L << 62;
+  static const int64_t SNAPSHOT_VERSION_BARRIER_BIT = 0x3L << 62;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -215,7 +285,12 @@ struct ObMvccRow
   // is_new_locked returns whether node represents the first lock for the operation
   // conflict_tx_id if write failed this field indicate the txn-id which hold the lock of current row
   int mvcc_write(ObIMemtableCtx &ctx,
+<<<<<<< HEAD
                  const share::SCN snapshot_version,
+=======
+                 const concurrent_control::ObWriteFlag write_flag,
+                 const transaction::ObTxSnapshot &snapshot,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                  ObMvccTransNode &node,
                  ObMvccWriteResult &res);
 
@@ -253,7 +328,10 @@ struct ObMvccRow
   // snapshot_version is the version for row compact
   // node_alloc is the allocator for compact node allocation
   int row_compact(ObMemtable *memtable,
+<<<<<<< HEAD
                   const bool for_replay,
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                   const share::SCN snapshot_version,
                   common::ObIAllocator *node_alloc);
 
@@ -310,21 +388,43 @@ struct ObMvccRow
                                     const transaction::ObTransID &tx_id);
   int64_t get_total_trans_node_cnt() const { return total_trans_node_cnt_; }
   int64_t get_last_compact_cnt() const { return last_compact_cnt_; }
-  // ===================== ObMvccRow Event Statistic =====================
-  void lock_begin(ObIMemtableCtx &ctx) const;
-  void mvcc_write_end(ObIMemtableCtx &ctx, int64_t ret) const;
-
   // ===================== ObMvccRow Flag Interface =====================
-  bool is_btree_indexed() { return flag_ & F_BTREE_INDEX; }
-  void set_btree_indexed() { flag_ |= F_BTREE_INDEX; }
-  void clear_btree_indexed() { flag_ &= static_cast<uint8_t>(~F_BTREE_INDEX); }
-  bool is_btree_tag_del() { return flag_ & F_BTREE_TAG_DEL; }
-  void set_btree_tag_del() { flag_ |= F_BTREE_TAG_DEL; }
-  void clear_btree_tag_del() { flag_ &= static_cast<uint8_t>(~F_BTREE_TAG_DEL); }
-  void set_hash_indexed() { flag_ |= F_HASH_INDEX; }
-  bool is_lower_lock_scaned() const { return flag_ & F_LOWER_LOCK_SCANED; }
-  void set_lower_lock_scaned() { flag_ |= F_LOWER_LOCK_SCANED; }
-
+  OB_INLINE bool is_btree_indexed() const
+  {
+    return ATOMIC_LOAD(&flag_) & F_BTREE_INDEX;
+  }
+  OB_INLINE void set_btree_indexed()
+  {
+    ATOMIC_ADD_TAG(F_BTREE_INDEX);
+  }
+  OB_INLINE void clear_btree_indexed()
+  {
+    ATOMIC_SUB_TAG(F_BTREE_INDEX);
+  }
+  OB_INLINE bool is_btree_tag_del() const
+  {
+    return ATOMIC_LOAD(&flag_) & F_BTREE_TAG_DEL;
+  }
+  OB_INLINE void set_btree_tag_del()
+  {
+    ATOMIC_ADD_TAG(F_BTREE_TAG_DEL);
+  }
+  OB_INLINE void clear_btree_tag_del()
+  {
+    ATOMIC_SUB_TAG(F_BTREE_TAG_DEL);
+  }
+  OB_INLINE void set_hash_indexed()
+  {
+    ATOMIC_ADD_TAG(F_HASH_INDEX);
+  }
+  OB_INLINE bool is_lower_lock_scaned() const
+  {
+    return ATOMIC_LOAD(&flag_) & F_LOWER_LOCK_SCANED;
+  }
+  OB_INLINE void set_lower_lock_scaned()
+  {
+    ATOMIC_ADD_TAG(F_LOWER_LOCK_SCANED);
+  }
   // ===================== ObMvccRow Helper Function =====================
   int64_t to_string(char *buf, const int64_t buf_len) const;
   int64_t to_string(char *buf, const int64_t buf_len, const bool verbose) const;
@@ -332,8 +432,13 @@ struct ObMvccRow
 
   // ===================== ObMvccRow Private Function =====================
   int mvcc_write_(ObIMemtableCtx &ctx,
+                  const concurrent_control::ObWriteFlag write_flag,
                   ObMvccTransNode &node,
+<<<<<<< HEAD
                   const share::SCN snapshot_version,
+=======
+                  const transaction::ObTxSnapshot &snapshot,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                   ObMvccWriteResult &res);
 
   // ===================== ObMvccRow Protection Code =====================

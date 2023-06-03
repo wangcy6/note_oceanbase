@@ -48,7 +48,10 @@ ObPxFifoCoordOp::ObPxFifoCoordOp(ObExecContext &exec_ctx, const ObOpSpec &spec, 
     interrupt_proc_(exec_ctx, msg_proc_),
     sample_piece_msg_proc_(exec_ctx, msg_proc_),
     rollup_key_piece_msg_proc_(exec_ctx, msg_proc_),
-    rd_wf_piece_msg_proc_(exec_ctx, msg_proc_)
+    rd_wf_piece_msg_proc_(exec_ctx, msg_proc_),
+    init_channel_piece_msg_proc_(exec_ctx, msg_proc_),
+    reporting_wf_piece_msg_proc_(exec_ctx, msg_proc_),
+    opt_stats_gather_piece_msg_proc_(exec_ctx, msg_proc_)
   {}
 
 int ObPxFifoCoordOp::inner_open()
@@ -96,6 +99,9 @@ int ObPxFifoCoordOp::setup_loop_proc()
       .register_processor(sample_piece_msg_proc_)
       .register_processor(rollup_key_piece_msg_proc_)
       .register_processor(rd_wf_piece_msg_proc_)
+      .register_processor(init_channel_piece_msg_proc_)
+      .register_processor(reporting_wf_piece_msg_proc_)
+      .register_processor(opt_stats_gather_piece_msg_proc_)
       .register_interrupt_processor(interrupt_proc_);
   return ret;
 }
@@ -132,6 +138,17 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
     first_row_fetched_ = true; // 控制不再主动调用 startup_msg_loop，后继 loop 都消息触发
   }
 
+#ifdef ERRSIM
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  int64_t query_timeout = 0;
+  session->get_query_timeout(query_timeout);
+  if (OB_FAIL(OB_E(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout) OB_SUCCESS)) {
+    LOG_WARN("fifo qc not interrupt qc by design", K(ret), K(query_timeout));
+    sleep(14);
+    return ret;
+  }
+#endif
+
   while (OB_SUCC(ret)) {
     // rows must received by coord op instead of receive op, otherwise we will
     // trap in receive op and lose control.
@@ -141,11 +158,13 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
       clear_dynamic_const_parent_flag();
       metric_.mark_interval_start();
       if (!is_vectorized()) {
-        ret = row_reader_.get_next_row(MY_SPEC.child_exprs_, eval_ctx_);
+        ret = row_reader_.get_next_row(MY_SPEC.child_exprs_,
+                                       MY_SPEC.dynamic_const_exprs_,
+                                       eval_ctx_);
       } else {
         int64_t read_rows = 0;
-        ret = row_reader_.get_next_batch(MY_SPEC.child_exprs_, eval_ctx_,
-                                         row_cnt, read_rows, stored_rows_);
+        ret = row_reader_.get_next_batch(MY_SPEC.child_exprs_, MY_SPEC.dynamic_const_exprs_,
+                                         eval_ctx_,  row_cnt, read_rows, stored_rows_);
         brs_.size_ = read_rows;
       }
       metric_.mark_interval_end(&time_recorder_);
@@ -205,6 +224,9 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
         case ObDtlMsgType::DH_DYNAMIC_SAMPLE_PIECE_MSG:
         case ObDtlMsgType::DH_ROLLUP_KEY_PIECE_MSG:
         case ObDtlMsgType::DH_RANGE_DIST_WF_PIECE_MSG:
+        case ObDtlMsgType::DH_INIT_CHANNEL_PIECE_MSG:
+        case ObDtlMsgType::DH_SECOND_STAGE_REPORTING_WF_PIECE_MSG:
+        case ObDtlMsgType::DH_OPT_STATS_GATHER_PIECE_MSG:
           // all message processed in callback
           break;
         default:

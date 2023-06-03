@@ -40,6 +40,7 @@ class ObDBMSJobRpcProxy;
 class ObBatchRpc;
 class ObInnerSQLRpcProxy;
 class ObDBMSSchedJobRpcProxy;
+class ObExtenralTableRpcProxy;
 } // end of namespace rpc
 
 namespace share
@@ -106,6 +107,7 @@ namespace logservice
 class ObServerLogBlockMgr;
 }
 
+
 namespace observer
 {
 class ObService;
@@ -131,10 +133,11 @@ public:
       appname_(NULL),
       cluster_id_(common::OB_INVALID_CLUSTER_ID),
       data_dir_(NULL),
-      mode_(NULL),
+      startup_mode_(NULL),
       log_level_(0),
       use_ipv6_(false),
-      flashback_scn_(0)
+      flashback_scn_(0),
+      local_ip_(NULL)
   {
   }
   ObServerOptions(int rpc_port,
@@ -152,7 +155,8 @@ public:
                   int8_t log_level,
                   const char *mode,
                   bool use_ipv6,
-                  int64_t flashback_scn)
+                  int64_t flashback_scn,
+                  const char *local_ip)
   {
     rpc_port_ = rpc_port;
     elect_port_ = elect_port;
@@ -166,10 +170,11 @@ public:
     appname_ = appname;
     cluster_id_ = cluster_id;
     data_dir_ = data_dir;
-    mode_ = mode;
+    startup_mode_ = mode;
     log_level_ = log_level;
     use_ipv6_ = use_ipv6;
     flashback_scn_ = flashback_scn;
+    local_ip_ = local_ip;
   }
   virtual ~ObServerOptions() {}
 
@@ -185,10 +190,11 @@ public:
   const char *appname_;
   int64_t cluster_id_;
   const char *data_dir_;
-  const char *mode_;
+  const char *startup_mode_;
   int8_t log_level_;
   bool use_ipv6_;
   int64_t flashback_scn_;
+  const char *local_ip_;
 };
 
 enum ObServerMode {
@@ -198,6 +204,7 @@ enum ObServerMode {
   PHY_FLASHBACK_VERIFY_MODE,
   DISABLED_CLUSTER_MODE,
   DISABLED_WITH_READONLY_CLUSTER_MODE,
+  ARBITRATION_MODE,
 };
 
 enum ObServiceStatus {
@@ -234,6 +241,7 @@ struct ObGlobalContext
   share::ObRsMgr *rs_mgr_;
   common::ObInOutBandwidthThrottle *bandwidth_throttle_;
   common::ObITabletScan *vt_par_ser_;
+  common::ObITabletScan *et_access_service_;
   sql::ObSQLSessionMgr *session_mgr_;
   sql::ObSql *sql_engine_;
   pl::ObPL *pl_engine_;
@@ -244,7 +252,7 @@ struct ObGlobalContext
   int64_t *warm_up_start_time_;
   uint64_t server_id_;
   ObServiceStatus status_;
-  ObServerMode mode_;
+  ObServerMode startup_mode_;
   share::RSServerStatus rs_server_status_;
   int64_t start_service_time_;
   obmysql::ObDiag *diag_;
@@ -265,13 +273,14 @@ struct ObGlobalContext
   int64_t ssl_key_expired_time_;
   sql::ObConnectResourceMgr* conn_res_mgr_;
   storage::ObLocalityManager *locality_manager_;
+  obrpc::ObExtenralTableRpcProxy *external_table_proxy_;
 
   ObGlobalContext() { MEMSET(this, 0, sizeof(*this)); init(); }
   ObGlobalContext &operator = (const ObGlobalContext &other);
   void init();
   bool is_inited() const { return inited_; }
   // Refer to the high availability zone design document
-  // https://lark.alipay.com/ob/1.x/read_zone_v2
+  //
   bool is_observer() const;
   bool is_standby_cluster_and_started() { return is_observer() && is_standby_cluster() && has_start_service(); }
   bool is_started_and_can_weak_read() { return is_observer() && has_start_service(); }

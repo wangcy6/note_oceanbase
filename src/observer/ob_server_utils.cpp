@@ -15,6 +15,8 @@
 #include "observer/ob_server_utils.h"
 #include "observer/ob_server_struct.h"
 #include "storage/ob_file_system_router.h"
+#include <sys/utsname.h>
+#include "share/ob_version.h"
 
 namespace oceanbase
 {
@@ -89,8 +91,9 @@ int ObServerUtils::cal_all_part_disk_size(const int64_t suggested_data_disk_size
 {
   int ret = OB_SUCCESS;
 
-// background information about default disk percentage
-// https://yuque.antfin-inc.com/ob/rootservice/buzmfz
+// background information about default disk percentage:
+// If not in shared mode, disk will be used up to 90%.
+// If in shared mode, data and clog disk usage will be up to 60% and 30%
   const int64_t DEFAULT_DISK_PERCENTAGE_IN_SEPRATE_MODE = 90;
   const int64_t DEFAULT_DATA_DISK_PERCENTAGE_IN_SHARED_MODE = 60;
   const int64_t DEFAULT_CLOG_DISK_PERCENTAGE_IN_SHARED_MODE = 30;
@@ -227,6 +230,102 @@ int ObServerUtils::check_slog_data_binding(
   return ret;
 }
 
+const char *ObServerUtils::build_syslog_file_info(const common::ObAddr &addr)
+{
+  int ret = OB_SUCCESS;
+  const static int64_t max_info_len = 512;
+  static char info[max_info_len];
+
+  // self address
+  const char *self_addr = addr.is_valid() ? to_cstring(addr) : "";
+
+  // OS info
+  struct utsname uts;
+  if (0 != ::uname(&uts)) {
+    ret = OB_ERR_SYS;
+    LOG_WARN("call uname failed");
+  }
+
+  // time zone info
+  int gmtoff_hour = 0;
+  int gmtoff_minute = 0;
+  if (OB_SUCC(ret)) {
+    time_t t = time(NULL);
+    struct tm lt;
+    if (NULL == localtime_r(&t, &lt)) {
+      ret = OB_ERR_SYS;
+      LOG_WARN("call localtime failed");
+    } else {
+      gmtoff_hour = (std::abs(lt.tm_gmtoff) / 3600) * (lt.tm_gmtoff < 0 ? -1 : 1);
+      gmtoff_minute = std::abs(lt.tm_gmtoff) % 3600 / 60;
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    int n = snprintf(info, max_info_len,
+                     "address: %s, observer version: %s, revision: %s, "
+                     "sysname: %s, os release: %s, machine: %s, tz GMT offset: %02d:%02d",
+                     self_addr, PACKAGE_STRING, build_version(),
+                     uts.sysname, uts.release, uts.machine, gmtoff_hour, gmtoff_minute);
+    if (n <= 0) {
+      ret = OB_ERR_SYS;
+      LOG_WARN("snprintf failed");
+    }
+  }
+
+  return OB_SUCCESS == ret ? info : nullptr;
+}
+
+/*
+ * calc actual_extend_size, following the rules:
+ *  1. if datafile_next less than 1G, actual_extend_size equal to min(1G, datafile_maxsize * 10%)
+ *  2. if datafile_next large than 1G, actual_extend_size equal to min(datafile_next, max_extend_file)
+*/
+int ObServerUtils::calc_auto_extend_size(int64_t &actual_extend_size)
+{
+  int ret = OB_SUCCESS;
+
+  const int64_t datafile_maxsize = GCONF.datafile_maxsize;
+  const int64_t datafile_next = GCONF.datafile_next;
+  const int64_t datafile_size =
+    OB_SERVER_BLOCK_MGR.get_total_macro_block_count() * OB_SERVER_BLOCK_MGR.get_macro_block_size();
+
+  if (OB_UNLIKELY(datafile_maxsize <= 0) ||
+      OB_UNLIKELY(datafile_size) <= 0 ||
+      OB_UNLIKELY(datafile_next) <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Invalid argument",
+      K(ret), K(datafile_maxsize), K(datafile_size), K(datafile_next));
+  } else {
+    // attention: max_extend_file maybe equal to zero in the following situations:
+    // 1. alter datafile_size as A, alter datafile_maxsize as B, and A < B
+    // 2. auto extend to size to C ( A < C < B )
+    // 3. alter datafile_maxsize as D ( A < D < C )
+    int64_t max_extend_file = datafile_maxsize - datafile_size;
+    const int64_t datafile_next_minsize = 1 * 1024 * 1024 * 1024; // 1G
+    if (datafile_next < datafile_next_minsize) {
+      int64_t min_extend_size = datafile_maxsize * 10 / 100;
+      actual_extend_size =
+        min_extend_size < datafile_next_minsize ? min_extend_size : datafile_next_minsize;
+      if (actual_extend_size > max_extend_file) { // take the smaller
+        actual_extend_size = max_extend_file;
+      }
+    } else {
+      actual_extend_size =
+        datafile_next < max_extend_file ? datafile_next : max_extend_file;
+    }
+    if (actual_extend_size <= 0) {
+      ret = OB_SERVER_OUTOF_DISK_SPACE;
+      if (REACH_TIME_INTERVAL(300 * 1000 * 1000L)) { // 5 min
+        LOG_INFO("No more disk space to extend, is full",
+          K(ret), K(datafile_maxsize), K(datafile_size));
+      }
+    } else {
+      actual_extend_size += datafile_size; // suggest block file size
+    }
+  }
+  return ret;
+}
 
 } // namespace observer
 } // namespace oceanbase

@@ -42,6 +42,8 @@ int ObPLVar::deep_copy(const ObPLVar &var, ObIAllocator &allocator)
       is_default_construct_ = var.is_default_construct();
       default_ = var.get_default();
       is_dup_declare_ = var.is_dup_declare();
+      is_formal_param_ = var.is_formal_param();
+      is_referenced_ = var.is_referenced();
     }
   }
   return ret;
@@ -259,24 +261,28 @@ int ObPLConditionTable::add_condition(const common::ObString &name, const ObPLCo
 
 int ObPLCursor::set(const ObString &sql,
                const ObIArray<int64_t> &expr_idxs,
-               ObPsStmtId id,
+               const ObString &ps_sql,
                sql::stmt::StmtType type,
                bool for_update,
                ObRecordType *record_type,
                const ObPLDataType &cursor_type,
                CursorState state,
                const ObIArray<share::schema::ObSchemaObjVersion> &ref_objects,
-               const common::ObIArray<int64_t> &params
+               const common::ObIArray<int64_t> &params,
+               bool has_dup_column_name
                )
 {
   int ret = OB_SUCCESS;
   set_sql(sql);
   set_sql_params(expr_idxs);
-  set_ps(id, type);
+  set_ps_sql(ps_sql, type);
   set_for_update(for_update);
   set_row_desc(record_type);
   set_cursor_type(cursor_type);
   set_state(state);
+  if (has_dup_column_name) {
+    set_dup_column();
+  }
   OZ (set_ref_objects(ref_objects));
   OZ (set_formal_params(params));
   return ret;
@@ -287,7 +293,7 @@ int ObPLCursorTable::add_cursor(uint64_t pkg_id,
                                 int64_t idx,
                                 const ObString &sql,
                                 const ObIArray<int64_t> &sql_params,
-                                ObPsStmtId ps_id,
+                                const ObString &ps_sql,
                                 sql::stmt::StmtType stmt_type,
                                 bool for_update,
                                 bool has_hidden_rowid,
@@ -296,7 +302,8 @@ int ObPLCursorTable::add_cursor(uint64_t pkg_id,
                                 const ObRecordType* row_desc, //sql返回的行描述(record)
                                 const ObPLDataType& cursor_type, // cursor返回值类型(record)
                                 const common::ObIArray<int64_t> &formal_params, //cursor的形参
-                                ObPLCursor::CursorState state)
+                                ObPLCursor::CursorState state,
+                                bool has_dup_column_name)
 {
   int ret = OB_SUCCESS;
   // CK (OB_LIKELY(cursors_.count() < FUNC_MAX_CURSORS));
@@ -312,13 +319,16 @@ int ObPLCursorTable::add_cursor(uint64_t pkg_id,
       cursor->set_index(idx);
       cursor->set_sql(sql);
       cursor->set_sql_params(sql_params);
-      cursor->set_ps(ps_id, stmt_type);
+      cursor->set_ps_sql(ps_sql, stmt_type);
       cursor->set_for_update(for_update);
       cursor->set_hidden_rowid(has_hidden_rowid);
       cursor->set_row_desc(row_desc);
       cursor->set_cursor_type(cursor_type);
       cursor->set_state(state);
       cursor->set_rowid_table_id(rowid_table_id);
+      if (has_dup_column_name) {
+        cursor->set_dup_column();
+      }
       OZ (cursor->set_ref_objects(ref_objects));
       OZ (cursor->set_formal_params(formal_params));
       OZ (cursors_.push_back(cursor));
@@ -515,7 +525,7 @@ bool ObPLRoutineInfo::has_self_param() const
   for (int64_t i = 0; !bret && i < params_.count(); ++i) {
     param = params_.at(i);
     if (OB_ISNULL(param)) {
-      LOG_WARN("get unexpected null param", K(i));
+      LOG_WARN_RET(OB_ERR_UNEXPECTED, "get unexpected null param", K(i));
       break;
     } else {
       bret = bret || param->get_is_self_param();
@@ -532,7 +542,7 @@ int64_t ObPLRoutineInfo::get_self_param_pos() const
   for (int64_t i = 0; !stop && i < params_.count(); ++i) {
     param = params_.at(i);
     if (OB_ISNULL(param)) {
-      LOG_WARN("get unexpected null param", K(i));
+      LOG_WARN_RET(OB_ERR_UNEXPECTED, "get unexpected null param", K(i));
       break;
     } else if (param->get_is_self_param()) {
       pos = i;
@@ -993,7 +1003,7 @@ int ObPLBlockNS::add_label(const ObString &name,
     LOG_USER_ERROR(OB_ERR_IDENTIFIER_TOO_LONG, name.length(), name.ptr());
   } else {
     bool is_dup = false;
-    if (OB_FAIL(check_dup_label(name, is_dup, true))) {
+    if (OB_FAIL(check_dup_label(name, is_dup))) {
       LOG_INFO("check dup label fail. ", K(ret), K(name));
     } else if (is_dup) {
       ret = OB_ERR_REDEFINE_LABEL;
@@ -1062,7 +1072,7 @@ int ObPLBlockNS::add_questionmark_cursor(const int64_t symbol_idx)
 {
   int ret = OB_SUCCESS;
   ObArray<int64_t> dummy_params;
-  ObPsStmtId dummy_ps_id = OB_INVALID_ID;
+  ObString dummy_sql;
   sql::stmt::StmtType dummy_stmt_type = sql::stmt::T_NONE;
   bool dummy_for_update = false;
   bool dummy_hidden_rowid = false;
@@ -1076,7 +1086,7 @@ int ObPLBlockNS::add_questionmark_cursor(const int64_t symbol_idx)
                                                     symbol_idx,
                                                     "?",
                                                     dummy_params,
-                                                    dummy_ps_id,
+                                                    dummy_sql,
                                                     dummy_stmt_type,
                                                     false,
                                                     false,
@@ -1085,7 +1095,8 @@ int ObPLBlockNS::add_questionmark_cursor(const int64_t symbol_idx)
                                                     NULL,
                                                     dummy_return_type,
                                                     dummy_formal_params,
-                                                    ObPLCursor::PASSED_IN))) {
+                                                    ObPLCursor::PASSED_IN,
+                                                    false))) {
     LOG_WARN("failed to add condition to condition table", K(ret));
   }
   return ret;
@@ -1095,7 +1106,7 @@ int ObPLBlockNS::add_cursor(const ObString &name,
                             const ObPLDataType &type,
                             const ObString &sql,
                             const ObIArray<int64_t> &sql_params,
-                            ObPsStmtId ps_id,
+                            const ObString &ps_sql,
                             sql::stmt::StmtType stmt_type,
                             bool for_update,
                             bool has_hidden_rowid,
@@ -1105,6 +1116,7 @@ int ObPLBlockNS::add_cursor(const ObString &name,
                             const ObPLDataType &cursor_type, // cursor返回值类型(record)
                             const common::ObIArray<int64_t> &formal_params,
                             ObPLCursor::CursorState state,
+                            bool has_dup_column_name,
                             int64_t &index)
 {
   int ret = OB_SUCCESS;
@@ -1127,7 +1139,7 @@ int ObPLBlockNS::add_cursor(const ObString &name,
                                                       get_symbol_table()->get_count() - 1,
                                                       sql,
                                                       sql_params,
-                                                      ps_id,
+                                                      ps_sql,
                                                       stmt_type,
                                                       for_update,
                                                       has_hidden_rowid,
@@ -1136,7 +1148,8 @@ int ObPLBlockNS::add_cursor(const ObString &name,
                                                       row_desc,
                                                       cursor_type,
                                                       formal_params,
-                                                      state))) {
+                                                      state,
+                                                      has_dup_column_name))) {
       LOG_WARN("failed to add condition to condition table", K(ret));
     } else {
       index = cursors_.at(cursors_.count() - 1);
@@ -1218,29 +1231,29 @@ int ObPLBlockNS::check_dup_symbol(const ObString &name, const ObPLDataType &type
   return ret;
 }
 
-int ObPLBlockNS::check_dup_label(const ObString &name, bool &is_dup, bool check_parent) const
+int ObPLBlockNS::check_dup_label(const ObString &name, bool &is_dup) const
 {
   int ret = OB_SUCCESS;
   is_dup = false;
   if (lib::is_oracle_mode()) {
     // do nothing
-  } else if (OB_ISNULL(label_table_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("label table is NULL", K(ret));
   } else {
-    const ObPLBlockNS *ns = check_parent ? pre_ns_ : this;
-    while (NULL != ns && !is_dup && !ns->stop_search_label()) {
+    const ObPLBlockNS *ns = this;
+    while (NULL != ns && !is_dup) {
       for (int64_t i = 0; OB_SUCC(ret) && !is_dup && i < ns->get_labels().count(); ++i) {
-        if (OB_ISNULL(ns->get_label_table()->get_label(ns->get_labels().at(i)))) {
+        if (OB_ISNULL(ns->get_label_table())
+            || OB_ISNULL(ns->get_label_table()->get_label(ns->get_labels().at(i)))) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("label is NULL", K(i), K(ns->get_labels().at(i)), K(ret));
-        } else if (*ns->get_label_table()->get_label(ns->get_labels().at(i)) == name &&
-                   ns->get_label_table()->is_ended(ns->get_labels().at(i)) == false) {
+        } else if (*ns->get_label_table()->get_label(ns->get_labels().at(i)) == name
+                    && ns->get_label_table()->is_ended(ns->get_labels().at(i)) == false) {
           is_dup = true;
-        } else { /*do nothing*/ }
+        }
       }
-      if (!is_dup && check_parent) {
+      if (!is_dup && !ns->stop_search_label()) {
         ns = ns->get_pre_ns();
+      } else {
+        break;
       }
     }
   }
@@ -1489,8 +1502,11 @@ int ObPLExternalNS::resolve_external_symbol(const common::ObString &name,
         uint64_t package_id = OB_INVALID_ID;
         if (parent_id != OB_INVALID_INDEX) {
           db_id = parent_id;
-        } else {
-          OZ (session_info.get_database_id(db_id));
+        } else if (OB_FAIL(session_info.get_database_id(db_id))) {
+          LOG_WARN("failed to get session database id", K(ret), K(db_id));
+        } else if (OB_INVALID_ID == db_id) {
+          ret = OB_ERR_NO_DB_SELECTED;
+          LOG_WARN("No database selected", K(ret));
         }
         if (OB_SUCC(ret)) {
           if (OB_FAIL(schema_guard.get_package_id(
@@ -1669,7 +1685,9 @@ int ObPLExternalNS::resolve_external_symbol(const common::ObString &name,
   }
     break;
   case PKG_VAR: {
-    if (lib::is_mysql_mode()) {
+    if (lib::is_mysql_mode()
+        && get_tenant_id_by_object_id(parent_id) != OB_SYS_TENANT_ID
+        && session_info.get_effective_tenant_id() != OB_SYS_TENANT_ID) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("package is not supported in Mysql mode", K(type), K(ret));
     } else {
@@ -2064,7 +2082,7 @@ int ObPLExternalNS::resolve_external_routine(const ObString &db_name,
       // todo: dependency on udt functions
       ObSchemaObjVersion obj_version;
       obj_version.object_id_ = schema_routine_info->get_routine_id();
-      obj_version.object_type_ = DEPENDENCY_PROCEDURE;
+      obj_version.object_type_ = is_procedure(routine_type) ? DEPENDENCY_PROCEDURE : DEPENDENCY_FUNCTION;
       obj_version.version_ = schema_routine_info->get_schema_version();
       if (OB_FAIL(add_dependency_object(obj_version))) {
         LOG_WARN("add dependency object failed", "package_id", schema_routine_info->get_package_id(), K(ret));
@@ -2141,8 +2159,8 @@ int ObPLBlockNS::find_sub_attr_by_name(const ObUserDefinedType &user_type,
       LOG_WARN("PLS-00302: component 'A' must be declared", K(ret), K(access_ident), K(user_type));
     }
   } else {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpected user type in find_sub_attr_by_name", K(ret), K(user_type));
+    ret = OB_ERR_COMPONENT_UNDECLARED;
+    LOG_USER_ERROR(OB_ERR_COMPONENT_UNDECLARED, attr_name.length(), attr_name.ptr());
   }
   return ret;
 }
@@ -2715,6 +2733,13 @@ int ObPLBlockNS::resolve_routine(const ObPLResolveCtx &resolve_ctx,
     }
     if (OB_SUCC(ret) && routine_infos.empty()) {
       if (OB_NOT_NULL(external_ns_)) {
+        bool need_clear = false;
+        if (OB_ISNULL(external_ns_->get_resolve_ctx().params_.secondary_namespace_)
+            && OB_NOT_NULL(resolve_ctx.params_.secondary_namespace_)) {
+          need_clear = true;
+          (const_cast<ObPLResolveCtx &>(external_ns_->get_resolve_ctx())).params_.secondary_namespace_
+          = resolve_ctx.params_.secondary_namespace_;
+        }
         if (OB_FAIL(SMART_CALL(external_ns_->resolve_external_routine(
                                                         db_name,
                                                         package_name,
@@ -2724,6 +2749,9 @@ int ObPLBlockNS::resolve_routine(const ObPLResolveCtx &resolve_ctx,
                                                         routine_infos)))) {
           LOG_WARN("resolve routine failed", K(db_name), K(package_name), K(routine_name),
                    K(expr_params), K(ret));
+        }
+        if (need_clear) {
+          (const_cast<ObPLResolveCtx &>(external_ns_->get_resolve_ctx())).params_.secondary_namespace_ = NULL;
         }
       }
     }
@@ -3057,16 +3085,21 @@ int ObPLBlockNS::get_cursor_by_name(const ObExprResolveContext &ctx,
     CK (OB_NOT_NULL(get_symbol_table()));
     for (int64_t i = 0; OB_SUCC(ret) && i < get_cursor_table()->get_count() && !found; i++) {
       const ObPLCursor *cur = get_cursor_table()->get_cursor(i);
-      CK (OB_NOT_NULL(cur));
-      CK (OB_NOT_NULL(get_symbol_table()->get_symbol(cur->get_index())));
-      if (OB_SUCC(ret) && 0 == get_symbol_table()->get_symbol(cur->get_index())
-                                ->get_name().case_compare(cursor_name)) {
-        cursor = cur;
-        found = true;
+      if (OB_NOT_NULL(cur)) {
+        const ObPLVar *var = get_symbol_table()->get_symbol(cur->get_index());
+        if (OB_NOT_NULL(var) && 0 == var->get_name().case_compare(cursor_name)) {
+          cursor = cur;
+          found = true;
+        }
       }
     }
     if (OB_SUCC(ret) && !found && NULL != pre_ns_) {
-      pre_ns_->get_cursor_by_name(ctx, database_name, package_name, cursor_name, cursor);
+      OZ (pre_ns_->get_cursor_by_name(ctx, database_name, package_name, cursor_name, cursor));
+    }
+    // maybe local package cursor
+    if (OB_SUCC(ret) && !found && NULL != external_ns_ && NULL != external_ns_->get_parent_ns()) {
+      OZ (external_ns_->get_parent_ns()->get_cursor_by_name(
+            ctx, database_name, package_name, cursor_name, cursor));
     }
   } else {
     // package cursor
@@ -3109,6 +3142,43 @@ int ObPLBlockNS::get_cursor_by_name(const ObExprResolveContext &ctx,
       }
       OZ (package_manager.get_package_cursor(
             resolve_ctx, package_info->get_package_id(), cursor_name, cursor, idx));
+    }
+  }
+  return ret;
+}
+
+int ObPLBlockNS::expand_data_type_once(const ObUserDefinedType *user_type,
+                                      ObIArray<ObDataType> &types,
+                                      ObIArray<bool> *not_null_flags,
+                                      ObIArray<int64_t> *pls_ranges) const
+{
+  int ret = OB_SUCCESS;
+  CK (OB_NOT_NULL(user_type));
+  for (int64_t i = 0; OB_SUCC(ret) && i < user_type->get_member_count(); ++i) {
+    const ObPLDataType *member = user_type->get_member(i);
+    CK (OB_NOT_NULL(member));
+    if (OB_FAIL(ret)) {
+    } else if (member->is_obj_type()) {
+      CK (OB_NOT_NULL(member->get_data_type()));
+      OZ (types.push_back(*member->get_data_type()), i);
+      if (OB_NOT_NULL(not_null_flags)) {
+        OZ (not_null_flags->push_back(member->get_not_null()));
+      }
+      if (OB_NOT_NULL(pls_ranges)) {
+        ObPLIntegerRange range;
+        OZ (pls_ranges->push_back(member->is_pl_integer_type() ? member->get_range() : range.range_));
+      }
+    } else {
+      ObDataType ext_type;
+      ext_type.set_obj_type(ObExtendType);
+      OZ (types.push_back(ext_type), i);
+      if (OB_NOT_NULL(not_null_flags)) {
+        OZ (not_null_flags->push_back(false));
+      }
+      if (OB_NOT_NULL(pls_ranges)) {
+        ObPLIntegerRange range;
+        OZ (pls_ranges->push_back(range.range_));
+      }
     }
   }
   return ret;
@@ -3367,82 +3437,123 @@ int64_t ObPLBlockNS::to_string(char* buf, const int64_t buf_len) const
   return pos;
 }
 
+int ObPLInto::generate_into_variable_info(ObPLBlockNS &ns, const ObRawExpr &expr)
+{
+  int ret = OB_SUCCESS;
+
+  pl::ObPLDataType final_type;
+  pl::ObPLDataType pl_data_type;
+  // T_OBJ_ACCESS_REF expr, access obj type (not user defined type)
+  bool access_obj_type = false;
+  if (expr.is_obj_access_expr()) {
+    // case:
+    //   type num_table is table of number;
+    //   ...
+    //   num_table nums;
+    //   ...
+    //   fetch c_cursor into nums(1);
+    //
+    // We got `num(1)` by T_OBJ_ACCESS_REF expression for write. T_OBJ_ACCESS_REF return
+    // the address of ObObj by extend value in execution, so %expr's result type is set to
+    // ObExtendType. We get the obj type from final type of T_OBJ_ACCESS_REF here.
+    const auto &access_expr = static_cast<const ObObjAccessRawExpr &>(expr);
+    OZ(access_expr.get_final_type(final_type));
+    OX(access_obj_type = !final_type.is_user_type());
+    if (bulk_ && !access_obj_type && final_type.is_collection_type()) {
+      const pl::ObUserDefinedType *user_type = NULL;
+      OZ (ns.get_pl_data_type_by_id(final_type.get_user_type_id(), user_type));
+      CK (OB_NOT_NULL(user_type));
+      if (OB_SUCC(ret)) {
+        const ObCollectionType *coll_type = static_cast<const ObCollectionType*>(user_type);
+        CK (OB_NOT_NULL(coll_type));
+        OX (final_type = coll_type->get_element_type());
+        OX(access_obj_type = !final_type.is_user_type());
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (expr.get_result_type().is_ext() && !access_obj_type) {
+    const pl::ObUserDefinedType *user_type = NULL;
+    if (expr.is_obj_access_expr()) {
+      // do nothing, %final_type already fetched
+    } else if (T_QUESTIONMARK == expr.get_expr_type()) {
+      CK (OB_NOT_NULL(ns.get_symbol_table()));
+      int64_t var_index = static_cast<const ObConstRawExpr&>(expr).get_value().get_int();
+      const ObPLVar *var = ns.get_symbol_table()->get_symbol(var_index);
+      CK (OB_NOT_NULL(var));
+      OX (final_type = var->get_pl_data_type());
+    } else {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("Invalid expr type used in INTO clause", K(expr), K(ret));
+    }
+
+    if (OB_SUCC(ret)) {
+      if (final_type.is_cursor_type() || final_type.is_opaque_type()) {
+        ObDataType ext_type;
+        ext_type.set_obj_type(ObExtendType);
+        ext_type.set_udt_id(final_type.get_user_type_id());
+        OZ (data_type_.push_back(ext_type));
+        OZ (not_null_flags_.push_back(false));
+        ObPLIntegerRange range;
+        OZ (pl_integer_ranges_.push_back(range.range_));
+        OX (pl_data_type.set_data_type(ext_type));
+        OX (pl_data_type.set_type(PL_OBJ_TYPE));
+        OZ (into_data_type_.push_back(pl_data_type));
+      } else {
+        if (final_type.is_type_record()) {
+          ObArray<ObDataType> basic_types;
+          ObArray<bool> not_null_flags;
+          ObArray<int64_t> pls_ranges;
+          is_type_record_ = true;
+          OZ (ns.get_pl_data_type_by_id(final_type.get_user_type_id(), user_type));
+          CK (OB_NOT_NULL(user_type));
+          // 只能展一层
+          OZ (ns.expand_data_type_once(user_type, basic_types, &not_null_flags, &pls_ranges));
+          OZ (append(data_type_, basic_types));
+          OZ (append(not_null_flags_, not_null_flags));
+          OZ (append(pl_integer_ranges_, pls_ranges));
+        } else {
+          ObDataType ext_type;
+          ObDataType type;
+          ObPLIntegerRange range;
+          ext_type.set_obj_type(ObExtendType);
+          OZ (data_type_.push_back(ext_type));
+          OZ (not_null_flags_.push_back(false));
+          OZ (pl_integer_ranges_.push_back(range.range_));
+        }
+        OZ (into_data_type_.push_back(final_type));
+      }
+    }
+  } else {
+    ObDataType type;
+    ObPLIntegerRange range;
+    bool flag = false;
+    if (access_obj_type) {
+      type.set_meta_type(final_type.get_data_type()->get_meta_type());
+      type.set_accuracy(final_type.get_data_type()->get_accuracy());
+    } else {
+      type.set_meta_type(expr.get_result_type().get_obj_meta());
+      type.set_accuracy(expr.get_result_type().get_accuracy());
+    }
+    OZ (calc_type_constraint(expr, ns, flag, range), expr);
+    OZ (data_type_.push_back(type), type);
+    OZ (not_null_flags_.push_back(flag), type, flag);
+    OZ (pl_integer_ranges_.push_back(range.range_));
+    OX (pl_data_type.set_data_type(type));
+    OX (pl_data_type.set_type(PL_OBJ_TYPE));
+    OZ (into_data_type_.push_back(pl_data_type));
+  }
+
+  return ret;
+}
+
 int ObPLInto::add_into(int64_t idx, ObPLBlockNS &ns, const ObRawExpr &expr)
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(into_.push_back(idx))) {
     LOG_WARN("Failed to add into", K(idx), K(ret));
   } else {
-    pl::ObPLDataType final_type;
-    // T_OBJ_ACCESS_REF expr, access obj type (not user defined type)
-    bool access_obj_type = false;
-    if (expr.is_obj_access_expr()) {
-      // case:
-      //   type num_table is table of number;
-      //   ...
-      //   num_table nums;
-      //   ...
-      //   fetch c_cursor into nums(1);
-      //
-      // We got `num(1)` by T_OBJ_ACCESS_REF expression for write. T_OBJ_ACCESS_REF return
-      // the address of ObObj by extend value in execution, so %expr's result type is set to
-      // ObExtendType. We get the obj type from final type of T_OBJ_ACCESS_REF here.
-      const auto &access_expr = static_cast<const ObObjAccessRawExpr &>(expr);
-      OZ(access_expr.get_final_type(final_type));
-      OX(access_obj_type = !final_type.is_user_type());
-    }
-    if (OB_FAIL(ret)) {
-    } else if (expr.get_result_type().is_ext() && !access_obj_type) {
-      const pl::ObUserDefinedType *user_type = NULL;
-      if (expr.is_obj_access_expr()) {
-        // do nothing, %final_type already fetched
-      } else if (T_QUESTIONMARK == expr.get_expr_type()) {
-        CK (OB_NOT_NULL(ns.get_symbol_table()));
-        int64_t var_index = static_cast<const ObConstRawExpr&>(expr).get_value().get_int();
-        const ObPLVar *var = ns.get_symbol_table()->get_symbol(var_index);
-        CK (OB_NOT_NULL(var));
-        OX (final_type = var->get_pl_data_type());
-      } else {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("Invalid expr type used in INTO clause", K(idx), K(expr), K(ret));
-      }
-
-      if (OB_SUCC(ret)) {
-        if (final_type.is_cursor_type() || final_type.is_opaque_type()) {
-          ObDataType ext_type;
-          ext_type.set_obj_type(ObExtendType);
-          OZ (data_type_.push_back(ext_type));
-          OZ (not_null_flags_.push_back(false));
-          ObPLIntegerRange range;
-          OZ (pl_integer_ranges_.push_back(range.range_));
-        } else {
-          ObArray<ObDataType> basic_types;
-          ObArray<bool> not_null_flags;
-          ObArray<int64_t> pls_ranges;
-          OZ (ns.get_pl_data_type_by_id(final_type.get_user_type_id(), user_type));
-          CK (OB_NOT_NULL(user_type));
-          OZ (ns.expand_data_type(user_type, basic_types, &not_null_flags, &pls_ranges));
-          OZ (append(data_type_, basic_types));
-          OZ (append(not_null_flags_, not_null_flags));
-          OZ (append(pl_integer_ranges_, pls_ranges));
-        }
-      }
-    } else {
-      ObDataType type;
-      ObPLIntegerRange range;
-      bool flag = false;
-      if (access_obj_type) {
-        type.set_meta_type(final_type.get_data_type()->get_meta_type());
-        type.set_accuracy(final_type.get_data_type()->get_accuracy());
-      } else {
-        type.set_meta_type(expr.get_result_type().get_obj_meta());
-        type.set_accuracy(expr.get_result_type().get_accuracy());
-      }
-      OZ (calc_type_constraint(expr, ns, flag, range), expr);
-      OZ (data_type_.push_back(type), type);
-      OZ (not_null_flags_.push_back(flag), type, flag);
-      OZ (pl_integer_ranges_.push_back(range.range_));
-    }
+    OZ (generate_into_variable_info(ns, expr));
   }
   return ret;
 }
@@ -3574,9 +3685,7 @@ int ObPLInto::check_into(ObPLFunctionAST &func, ObPLBlockNS &ns, bool is_bulk)
       }
     }
   }
-  if (OB_SUCC(ret) && is_bulk) {
-    set_bulk();
-  }
+
   return ret;
 }
 
@@ -4032,7 +4141,6 @@ int ObPLFunctionAST::add_argument(const common::ObString &name,
     } else if (type.is_cursor_type()) {
       ObString dummy_sql;
       ObArray<int64_t> dummy_params;
-      ObPsStmtId dummy_ps_id = OB_INVALID_ID;
       sql::stmt::StmtType dummy_stmt_type = sql::stmt::T_NONE;
       bool dummy_for_update = false;
       bool dummy_hidden_rowid = false;
@@ -4044,7 +4152,7 @@ int ObPLFunctionAST::add_argument(const common::ObString &name,
                                         get_symbol_table().get_count() -1,
                                         dummy_sql,
                                         dummy_params,
-                                        dummy_ps_id,
+                                        dummy_sql,
                                         dummy_stmt_type,
                                         dummy_for_update,
                                         dummy_hidden_rowid,
@@ -4053,7 +4161,8 @@ int ObPLFunctionAST::add_argument(const common::ObString &name,
                                         NULL, /*ref cursor的row desc不确定*/
                                         dummy_return_type,
                                         dummy_formal_params,
-                                        ObPLCursor::PASSED_IN));
+                                        ObPLCursor::PASSED_IN,
+                                        false));
     } else { /*do nothing*/ }
   }
   OX (set_arg_count(get_arg_count() + 1));
@@ -4337,6 +4446,13 @@ int ObPLStmtFactory::allocate(ObPLStmtType type, const ObPLStmtBlock *block, ObP
     }
   }
     break;
+  case PL_CASE: {
+    stmt = static_cast<ObPLStmt *>(allocator_.alloc(sizeof(ObPLCaseStmt)));
+    if (NULL != stmt) {
+      stmt = new(stmt)ObPLCaseStmt(allocator_);
+    }
+  }
+    break;
   default:{
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("Unexpected stmt type", K(ret), K(type));
@@ -4497,6 +4613,10 @@ int ObPLTrimStmt::accept(ObPLStmtVisitor &visitor) const
   return visitor.visit(*this);
 }
 int ObPLDoStmt::accept(ObPLStmtVisitor &visitor) const
+{
+  return visitor.visit(*this);
+}
+int ObPLCaseStmt::accept(ObPLStmtVisitor &visitor) const
 {
   return visitor.visit(*this);
 }

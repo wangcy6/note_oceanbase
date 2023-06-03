@@ -49,7 +49,7 @@ struct BloomFilterIndex
   int64_t begin_idx_; // join filter begin position in full bloom filter
   int64_t end_idx_;   // join filter end position in full bloom filter
   ObArray<int64_t> channel_ids_;
-  TO_STRING_KV(K_(begin_idx), K_(end_idx));
+  TO_STRING_KV(K_(begin_idx), K_(end_idx), K_(channel_id), K_(channel_ids));
 };
 
 class ObPxBloomFilter
@@ -59,7 +59,7 @@ public:
   ObPxBloomFilter();
   virtual ~ObPxBloomFilter() {};
   int init(int64_t data_length, common::ObIAllocator &allocator, double fpp = 0.01);
-  int init(ObPxBloomFilter *filter);
+  int init(const ObPxBloomFilter *filter);
   void reset_filter();
   inline int might_contain(uint64_t hash, bool &is_match) {
     return (this->*might_contain_)(hash, is_match);
@@ -81,14 +81,17 @@ public:
   void dec_merge_filter_count() { ATOMIC_DEC(&px_bf_merge_filter_count_); }
   bool is_merge_filter_finish() const { return 0 == px_bf_merge_filter_count_; }
   int64_t get_bits_array_length() const { return bits_array_length_; }
+  int64_t get_bits_count() const { return bits_count_; }
   void set_begin_idx(int64_t idx) { begin_idx_ = idx; }
   void set_end_idx(int64_t idx) { end_idx_ = idx; }
-  int64_t get_begin_idx() { return begin_idx_; }
-  int64_t get_end_idx() { return end_idx_; }
+  int64_t get_begin_idx() const { return begin_idx_; }
+  int64_t get_end_idx() const { return end_idx_; }
   void prefetch_bits_block(uint64_t hash);
   typedef int (ObPxBloomFilter::*GetFunc)(uint64_t hash, bool &is_match);
-  int generate_receive_count_array();
+  int generate_receive_count_array(int64_t piece_size);
   void reset();
+  int assign(const ObPxBloomFilter &filter);
+  int regenerate();
   TO_STRING_KV(K_(data_length), K_(bits_count), K_(fpp), K_(hash_func_count), K_(is_inited),
       K_(bits_array_length), K_(true_count));
 private:
@@ -111,9 +114,8 @@ private:
   int64_t begin_idx_;            // join filter begin position
   int64_t end_idx_;              // join filter end position
   GetFunc might_contain_;       // function pointer for might contain
-private:
+public:
   common::ObArenaAllocator allocator_;
-  mutable common::ObSpinLock lock_;
 public:
   //无需序列化
    int64_t px_bf_recieve_count_;  // 当前收到bloom filter的个数
@@ -130,18 +132,24 @@ public:
   ObPxBFStaticInfo()
   : is_inited_(false), tenant_id_(common::OB_INVALID_TENANT_ID),
     filter_id_(common::OB_INVALID_ID), server_id_(common::OB_INVALID_ID),
-    is_shared_(false), skip_subpart_(false)
+    is_shared_(false), skip_subpart_(false),
+    p2p_dh_id_(OB_INVALID_ID), is_shuffle_(false)
   {}
   int init(int64_t tenant_id, int64_t filter_id,
-           int64_t server_id, bool is_shared, bool skip_subpart);
+           int64_t server_id, bool is_shared,
+           bool skip_subpart, int64_t p2p_dh_id,
+           bool is_shuffle);
   bool is_inited_;
   int64_t tenant_id_;
   int64_t filter_id_;
   int64_t server_id_;
   bool is_shared_;    // 执行期join filter内存是否共享, false代表线程级, true代表sqc级.
   bool skip_subpart_; // 是否忽略二级分区
+  int64_t p2p_dh_id_;
+  bool is_shuffle_;
   TO_STRING_KV(K(is_inited_), K(tenant_id_), K(filter_id_),
-               K(server_id_), K(is_shared_), K(skip_subpart_));
+              K(server_id_), K(is_shared_), K(skip_subpart_),
+              K(is_shuffle_), K(p2p_dh_id_));
 };
 
 class ObPXBloomFilterHashWrapper
@@ -150,19 +158,19 @@ class ObPXBloomFilterHashWrapper
 public:
   ObPXBloomFilterHashWrapper() : tenant_id_(common::OB_INVALID_TENANT_ID),
      filter_id_(common::OB_INVALID_ID), server_id_(common::OB_INVALID_ID),
-     execution_id_(common::OB_INVALID_ID), task_id_(common::OB_INVALID_ID) {}
+     px_sequence_id_(common::OB_INVALID_ID), task_id_(common::OB_INVALID_ID) {}
   explicit ObPXBloomFilterHashWrapper(int64_t tenant_id, int64_t filter_id,
-      int64_t server_id, int64_t execution_id, int64_t task_id) :
+      int64_t server_id, int64_t px_sequence_id, int64_t task_id) :
       tenant_id_(tenant_id), filter_id_(filter_id),
-      server_id_(server_id), execution_id_(execution_id), task_id_(task_id)   {}
+      server_id_(server_id), px_sequence_id_(px_sequence_id), task_id_(task_id)   {}
   ~ObPXBloomFilterHashWrapper(){}
   void init(int64_t tenant_id, int64_t filter_id,
-      int64_t server_id, int64_t execution_id, int64_t task_id = 0)
+      int64_t server_id, int64_t px_sequence_id, int64_t task_id = 0)
   {
     tenant_id_ = tenant_id;
     filter_id_ = filter_id;
     server_id_ = server_id;
-    execution_id_ = execution_id;
+    px_sequence_id_ = px_sequence_id;
     task_id_ = task_id;
   }
   inline bool operator==(const ObPXBloomFilterHashWrapper &other) const
@@ -170,16 +178,17 @@ public:
     return (tenant_id_ == other.tenant_id_ &&
             filter_id_ == other.filter_id_ &&
             server_id_ == other.server_id_ &&
-            execution_id_ == other.execution_id_ &&
+            px_sequence_id_ == other.px_sequence_id_ &&
             task_id_ == other.task_id_);
   }
   inline uint64_t hash() const;
+  inline int hash(uint64_t &hash_ret) const;
   int64_t tenant_id_;
   int64_t filter_id_;
   int64_t server_id_;
-  int64_t execution_id_;
+  int64_t px_sequence_id_;
   int64_t task_id_;
-  TO_STRING_KV(K_(tenant_id), K_(filter_id), K_(server_id), K_(execution_id), K_(task_id))
+  TO_STRING_KV(K_(tenant_id), K_(filter_id), K_(server_id), K_(px_sequence_id), K_(task_id))
 };
 
 
@@ -190,9 +199,14 @@ inline uint64_t ObPXBloomFilterHashWrapper::hash() const
   hash_ret = common::murmurhash(&tenant_id_, sizeof(uint64_t), 0);
   hash_ret = common::murmurhash(&filter_id_, sizeof(uint64_t), hash_ret);
   hash_ret = common::murmurhash(&server_id_, sizeof(uint64_t), hash_ret);
-  hash_ret = common::murmurhash(&execution_id_, sizeof(uint64_t), hash_ret);
+  hash_ret = common::murmurhash(&px_sequence_id_, sizeof(uint64_t), hash_ret);
   hash_ret = common::murmurhash(&task_id_, sizeof(uint64_t), hash_ret);
   return hash_ret;
+}
+inline int ObPXBloomFilterHashWrapper::hash(uint64_t &hash_ret) const
+{
+  hash_ret = hash();
+  return OB_SUCCESS;
 }
 
 class ObPxReadAtomicGetBFCall

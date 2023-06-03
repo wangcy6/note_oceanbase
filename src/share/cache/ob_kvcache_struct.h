@@ -150,6 +150,7 @@ struct ObKVCacheInstKey
   int64_t cache_id_;
   uint64_t tenant_id_;
   inline uint64_t hash() const { return cache_id_ + tenant_id_; }
+  inline int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
   inline bool operator==(const ObKVCacheInstKey &other) const
   {
     return cache_id_ == other.cache_id_ && tenant_id_ == other.tenant_id_;
@@ -213,6 +214,47 @@ struct ObKVCacheInfo
   TO_STRING_KV(K_(inst_key), K_(status));
 };
 
+struct ObKVCacheStoreMemblockInfo
+{
+public:
+  ObKVCacheStoreMemblockInfo()
+    : tenant_id_(OB_INVALID_TENANT_ID),
+      cache_id_(-1),
+      ref_count_(-1),
+      using_status_(-1),
+      policy_(-1),
+      kv_cnt_(-1),
+      get_cnt_(-1),
+      recent_get_cnt_(-1),
+      priority_(0),
+      score_(0),
+      align_size_(-1),
+      cache_name_(),
+      memblock_ptr_()
+  {
+    memset(cache_name_, 0, MAX_CACHE_NAME_LENGTH);
+    memset(memblock_ptr_, 0, 32);
+  }
+  ~ObKVCacheStoreMemblockInfo() = default;
+  bool is_valid() const;
+  TO_STRING_KV(K_(tenant_id), K_(cache_id), K_(ref_count), K_(using_status), K_(policy), K_(kv_cnt), K_(get_cnt),
+          K_(recent_get_cnt), K_(priority), K_(score), K_(align_size), KP_(cache_name), KP_(memblock_ptr));
+public:
+  uint64_t tenant_id_;
+  int64_t cache_id_;
+  int64_t ref_count_;
+  int64_t using_status_;
+  int64_t policy_;
+  int64_t kv_cnt_;
+  int64_t get_cnt_;
+  int64_t recent_get_cnt_;
+  int64_t priority_;
+  double score_;
+  int64_t align_size_;
+  char cache_name_[MAX_CACHE_NAME_LENGTH];
+  char memblock_ptr_[32];  // store memblock address by char[]
+};
+
 class ObIMBHandleAllocator
 {
 public:
@@ -220,12 +262,12 @@ public:
                              ObKVMemBlockHandle *&mb_handle) = 0;
   virtual int alloc_mbhandle(ObKVCacheInst &inst, ObKVMemBlockHandle *&mb_handle) = 0;
   virtual int alloc_mbhandle(const ObKVCacheInstKey &inst_key, ObKVMemBlockHandle *&mb_handle) = 0;
-  virtual int free_mbhandle(ObKVMemBlockHandle *mb_handle) = 0;
+  virtual int free_mbhandle(ObKVMemBlockHandle *mb_handle, const bool do_retire) = 0;
   virtual int mark_washable(ObKVMemBlockHandle *mb_handle) = 0;
 
   virtual bool add_handle_ref(ObKVMemBlockHandle *mb_handle, const uint32_t seq_num) = 0;
   virtual bool add_handle_ref(ObKVMemBlockHandle *mb_handle) = 0;
-  virtual void de_handle_ref(ObKVMemBlockHandle *mb_handle) = 0;
+  virtual void de_handle_ref(ObKVMemBlockHandle *mb_handle, const bool do_retire = true) = 0;
 
   virtual int64_t get_block_size() const = 0;
 };

@@ -49,6 +49,15 @@ namespace oceanbase
 using namespace common;
 using namespace share;
 using namespace omt;
+
+namespace storage
+{
+int64_t ObTenantMetaMemMgr::cal_adaptive_bucket_num()
+{
+  return 1000;
+}
+}
+
 namespace unittest
 {
 
@@ -108,7 +117,7 @@ class ObBasicDag : public ObIDag
 {
 public:
   ObBasicDag() :
-    ObIDag(ObDagType::DAG_TYPE_MINOR_MERGE),
+    ObIDag(ObDagType::DAG_TYPE_MAJOR_MERGE),
     id_(ObTimeUtility::current_time() + random())
   {}
   void init(int64_t id) { id_ = id; }
@@ -126,6 +135,8 @@ public:
   virtual int fill_dag_key(char *buf,const int64_t size) const override { UNUSEDx(buf, size); return OB_SUCCESS; }
   virtual lib::Worker::CompatMode get_compat_mode() const override
   { return lib::Worker::CompatMode::MYSQL; }
+  virtual uint64_t get_consumer_group_id() const override
+  { return consumer_group_id_; }
 
   INHERIT_TO_STRING_KV("ObIDag", ObIDag, K_(is_inited), K_(type), K_(id), K(task_list_.get_size()), K_(dag_ret));
 
@@ -448,11 +459,8 @@ class ObOperator
 public:
   ObOperator() : num_(0) {}
   ~ObOperator() {}
-  void inc() { ++num_; }
-  void dec()
-  {
-    --num_;
-  }
+  void inc() { ATOMIC_INC(&num_); }
+  void dec() { ATOMIC_DEC(&num_); }
 private:
   int64_t num_;
 };
@@ -1531,6 +1539,23 @@ TEST_F(TestDagScheduler, test_cancel_dag_net_func)
 
   EXPECT_EQ(true, scheduler->is_empty());
   EXPECT_EQ(0, ObDagWarningHistoryManager::get_instance().size());
+}
+
+
+TEST_F(TestDagScheduler, test_destroy_when_running)
+{
+  ObTenantDagScheduler *scheduler = MTL(ObTenantDagScheduler*);
+  ASSERT_TRUE(nullptr != scheduler);
+
+  #ifndef BUILD_COVERAGE
+  // not participate in coverage compilation to fix hang problem
+  ObCancelDagNet *dag_net = nullptr;
+  EXPECT_EQ(OB_SUCCESS, scheduler->create_and_add_dag_net(nullptr, dag_net));
+
+  while (scheduler->get_cur_dag_cnt() < 3) {
+    usleep(100);
+  }
+  #endif
 }
 
 

@@ -27,6 +27,7 @@ public:
   ObPooledAllocator(int64_t block_size = common::OB_MALLOC_NORMAL_BLOCK_SIZE,
                     const BlockAllocatorT &alloc = BlockAllocatorT(ObModIds::OB_POOL));
   virtual ~ObPooledAllocator();
+  void set_attr(const lib::ObMemAttr &attr) { the_pool_.set_attr(attr); }
 
   T *alloc();
   void free(T *obj);
@@ -67,7 +68,7 @@ T *ObPooledAllocator<T, BlockAllocatorT, LockT>::alloc()
   T *ret = NULL;
   void *p = the_pool_.alloc();
   if (OB_ISNULL(p)) {
-    LIB_LOG(ERROR, "no memory");
+    LIB_LOG_RET(ERROR, OB_ALLOCATE_MEMORY_FAILED, "no memory");
   } else {
     ret = new(p) T();
   }

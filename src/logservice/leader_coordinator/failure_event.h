@@ -31,6 +31,7 @@ enum class FailureType
   RESOURCE_NOT_ENOUGH = 2,// 资源不足，如磁盘与内存，通常为环境原因所致
   PROCESS_HANG = 3,// 流程阻塞，发现某主要流程一直不结束或者不断重试却不能成功
   MAJORITY_FAILURE = 4,// 多数派异常，如副本的网络与多数派断连
+  SCHEMA_NOT_REFRESHED = 5, // sql may failed when tenant schema not refreshed yet
 };
 
 enum class FailureModule
@@ -39,6 +40,8 @@ enum class FailureModule
   TENANT = 1,
   LOG = 2,
   TRANSACTION = 3,
+  STORAGE = 4,
+  SCHEMA = 5,
 };
 
 enum class FailureLevel
@@ -65,6 +68,9 @@ inline const char *obj_to_cstring(FailureType type)
     case FailureType::MAJORITY_FAILURE:
       ret = "MAJORITY FAILURE";
       break;
+    case FailureType::SCHEMA_NOT_REFRESHED:
+      ret = "SCHEMA NOT REFRESHED";
+      break;
     default:
       break;
   }
@@ -83,6 +89,12 @@ inline const char *obj_to_cstring(FailureModule module)
       break;
     case FailureModule::TRANSACTION:
       ret = "TRANSACTION";
+      break;
+    case FailureModule::STORAGE:
+      ret = "STORAGE";
+      break;
+    case FailureModule::SCHEMA:
+      ret = "SCHEMA";
       break;
     default:
       break;
@@ -123,6 +135,7 @@ public:
   module_(module),
   level_(level) {}
   FailureLevel get_failure_level() const { return level_; }
+  FailureModule get_failure_module() const { return module_; }
   int set_info(const ObString &info) {
     return info_.assign(info);
   }
@@ -135,20 +148,7 @@ public:
   bool operator==(const FailureEvent &rhs) {
     bool ret = false;
     if (type_ == rhs.type_ && module_ == rhs.module_ && level_ == rhs.level_) {
-      const char * p1 = info_.get_ob_string().ptr();
-      const char * p2 = rhs.info_.get_ob_string().ptr();
-      if (p1 == p2) {// 包含p1 == p2 == nullptr
-        ret = true;
-      } else if (p1 == nullptr || p2 == nullptr) {
-        ret = false;
-      } else {// p1和p2均不为空
-        while (*p1 != '\0' && *p2 != '\0' && (*(p1++) == *(p2++)));
-        if (*p1 == '\0' || *p2 == '\0') {
-          ret = true;
-        } else {
-          ret = false;
-        }
-      }
+      ret = (0 == info_.get_ob_string().case_compare(rhs.info_.get_ob_string()));
     }
     return ret;
   }

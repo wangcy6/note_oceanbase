@@ -43,48 +43,44 @@ const int64_t ObSqlWorkAreaProfile::MIN_BOUND_SIZE[ObSqlWorkAreaType::MAX_TYPE] 
 
 int64_t ObSqlWorkAreaProfile::get_dop()
 {
-  int64_t dop = 1;
-  if (OB_NOT_NULL(exec_ctx_)) {
-    dop = ObPxSqcUtil::get_actual_worker_count(exec_ctx_);
-  }
-  return dop;
+  return dop_;
 }
 
 uint64_t ObSqlWorkAreaProfile::get_plan_id()
 {
-  uint64_t plan_id = UINT64_MAX;
-  if (OB_NOT_NULL(exec_ctx_)) {
-    plan_id = ObPxSqcUtil::get_plan_id(exec_ctx_);
-  }
-  return plan_id;
+  return plan_id_;
 }
 
 uint64_t ObSqlWorkAreaProfile::get_exec_id()
 {
-  uint64_t exec_id = UINT64_MAX;
-  if (OB_NOT_NULL(exec_ctx_)) {
-    exec_id = ObPxSqcUtil::get_exec_id(exec_ctx_);
-  }
-  return exec_id;
+  return exec_id_;
 }
 
 const char* ObSqlWorkAreaProfile::get_sql_id()
 {
-  const char* sql_id = nullptr;
-  if (OB_NOT_NULL(exec_ctx_)) {
-    sql_id = ObPxSqcUtil::get_sql_id(exec_ctx_);
-  }
-  return sql_id;
+  return sql_id_.ptr();
 }
 
 uint64_t ObSqlWorkAreaProfile::get_session_id()
 {
-  uint64_t session_id = UINT64_MAX;
-  if (OB_NOT_NULL(exec_ctx_)) {
-    session_id = ObPxSqcUtil::get_session_id(exec_ctx_);
-  }
-  return session_id;
+  return session_id_;
 }
+
+int ObSqlWorkAreaProfile::set_exec_info(ObExecContext &exec_ctx)
+  {
+    int ret = OB_SUCCESS;
+    dop_ = ObPxSqcUtil::get_actual_worker_count(&exec_ctx);
+    plan_id_ = ObPxSqcUtil::get_plan_id(&exec_ctx);
+    exec_id_ = ObPxSqcUtil::get_exec_id(&exec_ctx);
+    session_id_ = ObPxSqcUtil::get_session_id(&exec_ctx);
+    ObPhysicalPlanCtx *plan_ctx = exec_ctx.get_physical_plan_ctx();
+    if (OB_NOT_NULL(plan_ctx) && OB_NOT_NULL(plan_ctx->get_phy_plan())) {
+      OZ (ob_write_string(exec_ctx.get_allocator(),
+                          plan_ctx->get_phy_plan()->get_sql_id_string(),
+                          sql_id_));
+    }
+    return ret;
+  }
 
 ////////////////////////////////////////////////////////////////////////////////////
 int ObSqlWorkAreaIntervalStat::analyze_profile(
@@ -335,16 +331,17 @@ int ObTenantSqlMemoryManager::mtl_init(ObTenantSqlMemoryManager *&sql_mem_mgr)
   sql_mem_mgr = nullptr;
   // 系统租户不创建
   if (OB_MAX_RESERVED_TENANT_ID < tenant_id) {
-    sql_mem_mgr = OB_NEW(ObTenantSqlMemoryManager, "SqlMemMgr", tenant_id);
+    sql_mem_mgr = OB_NEW(ObTenantSqlMemoryManager,
+                         ObMemAttr(tenant_id, "SqlMemMgr"), tenant_id);
     if (nullptr == sql_mem_mgr) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("failed to alloc tenant sql memory manager", K(ret));
     } else if (OB_FAIL(sql_mem_mgr->allocator_.init(
               lib::ObMallocAllocator::get_instance(),
-              OB_MALLOC_NORMAL_BLOCK_SIZE))) {
+              OB_MALLOC_NORMAL_BLOCK_SIZE,
+              ObMemAttr(tenant_id, "SqlMemMgr")))) {
       LOG_WARN("failed to init fifo allocator", K(ret));
     } else {
-      sql_mem_mgr->allocator_.set_label("SqlMemMgr");
       int64_t work_area_interval_size = sizeof(ObSqlWorkAreaInterval) * INTERVAL_NUM;
       sql_mem_mgr->wa_intervals_ = reinterpret_cast<ObSqlWorkAreaInterval*>(
                                     sql_mem_mgr->allocator_.alloc(work_area_interval_size));
@@ -646,7 +643,7 @@ int ObTenantSqlMemoryManager::try_fill_workarea_stat(
 {
   int ret = OB_SUCCESS;
   need_insert = false;
-  ObLatchRGuard guard(lock_, ObLatchIds::CONFIG_LOCK);
+  ObLatchRGuard guard(lock_, ObLatchIds::SQL_WA_STAT_MAP_LOCK);
   ObSqlWorkAreaStat *wa_stat = nullptr;
   if (OB_FAIL(wa_ht_.get_refactored(workarea_key, wa_stat))) {
     if (OB_HASH_NOT_EXIST == ret) {
@@ -684,7 +681,7 @@ int ObTenantSqlMemoryManager::new_and_fill_workarea_stat(
 {
   int ret = OB_SUCCESS;
   ObSqlWorkAreaStat *wa_stat = nullptr;
-  ObLatchWGuard guard(lock_, ObLatchIds::CONFIG_LOCK);
+  ObLatchWGuard guard(lock_, ObLatchIds::SQL_WA_STAT_MAP_LOCK);
   if (OB_FAIL(wa_ht_.get_refactored(workarea_key, wa_stat))) {
   }
   if (OB_HASH_NOT_EXIST == ret) {
@@ -884,7 +881,7 @@ int ObTenantSqlMemoryManager::get_max_work_area_size(
             ret = OB_SUCCESS;
           } else {
             // TODO: kvcache大概可以淘汰多少内存，目前没有数据，后续寒晖他们会提供接口
-            // bug34818894 https://work.aone.alibaba-inc.com/issue/34818894
+            // bug34818894
             // 这里暂时写一个默认比例
             max_tenant_memory_size += resource_handle.get_memory_mgr()->get_cache_hold() * pctg / 100;
             washable_size = -1;
@@ -1095,7 +1092,7 @@ bool ObTenantSqlMemoryManager::enable_auto_sql_memory_manager()
     LOG_TRACE("get work area policy config", K(tenant_id_), K(auto_memory_mgr), K(tmp_str),
       K(tenant_config->workarea_size_policy.str()));
   } else {
-    LOG_WARN("failed to init tenant config", K(tenant_id_));
+    LOG_WARN_RET(OB_ERR_UNEXPECTED, "failed to init tenant config", K(tenant_id_));
   }
   return auto_memory_mgr;
 }
@@ -1254,7 +1251,7 @@ int ObTenantSqlMemoryManager::calculate_global_bound_size(ObIAllocator *allocato
 int ObTenantSqlMemoryManager::get_workarea_stat(ObIArray<ObSqlWorkAreaStat> &wa_stats)
 {
   int ret = OB_SUCCESS;
-  ObLatchRGuard guard(lock_, ObLatchIds::CONFIG_LOCK);
+  ObLatchRGuard guard(lock_, ObLatchIds::SQL_WA_STAT_MAP_LOCK);
   for (int64_t i = wa_start_; i < wa_start_ + wa_cnt_ && OB_SUCC(ret); ++i) {
     int64_t nth = i % MAX_WORKAREA_STAT_CNT;
     if (OB_FAIL(wa_stats.push_back(workarea_stats_.at(nth)))) {

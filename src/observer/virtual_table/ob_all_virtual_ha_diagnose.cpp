@@ -164,24 +164,29 @@ int ObAllVirtualHADiagnose::insert_stat_(storage::DiagnoseInfo &diagnose_info)
                                                 ObCharset::get_default_charset()));
         }
         break;
+<<<<<<< HEAD
       case MAX_APPLIED_SCN: {
+=======
+      case MAX_APPLIED_SCN:
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         cur_row_.cells_[i].set_uint64(diagnose_info.apply_diagnose_info_.max_applied_scn_.get_val_for_inner_table_field());
         break;
-      }
-      case MAX_REPALYED_LSN: {
+      case MAX_REPALYED_LSN:
         cur_row_.cells_[i].set_uint64(diagnose_info.replay_diagnose_info_.max_replayed_lsn_.val_);
         break;
+<<<<<<< HEAD
       }
       case MAX_REPLAYED_SCN: {
+=======
+      case MAX_REPLAYED_SCN:
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         cur_row_.cells_[i].set_uint64(diagnose_info.replay_diagnose_info_.max_replayed_scn_.get_val_for_inner_table_field());
         break;
-      }
-      case REPLAY_DIAGNOSE_INFO: {
+      case REPLAY_DIAGNOSE_INFO:
         cur_row_.cells_[i].set_varchar((diagnose_info.replay_diagnose_info_.diagnose_str_.string()));
         cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
                                               ObCharset::get_default_charset()));
         break;
-      }
       case GC_STATE:
         if (OB_FAIL(gc_state_to_string(diagnose_info.gc_diagnose_info_.gc_state_,
                                        gc_state_str_,
@@ -193,24 +198,29 @@ int ObAllVirtualHADiagnose::insert_stat_(storage::DiagnoseInfo &diagnose_info)
                                                 ObCharset::get_default_charset()));
         }
         break;
-      case GC_START_TS: {
+      case GC_START_TS:
         cur_row_.cells_[i].set_int(diagnose_info.gc_diagnose_info_.gc_start_ts_);
         break;
-      }
       //TODO: @keqing.llt archive_scn列目前只占位
-      case ARCHIVE_SCN: {
+      case ARCHIVE_SCN:
         cur_row_.cells_[i].set_uint64(0);
         break;
+<<<<<<< HEAD
       }
       case CHECKPOINT_SCN: {
         cur_row_.cells_[i].set_uint64(diagnose_info.checkpoint_diagnose_info_.checkpoint_.get_val_for_inner_table_field());
         break;
       }
       case MIN_REC_SCN: {
+=======
+      case CHECKPOINT_SCN:
+        cur_row_.cells_[i].set_uint64(diagnose_info.checkpoint_diagnose_info_.checkpoint_.get_val_for_inner_table_field());
+        break;
+      case MIN_REC_SCN:
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         cur_row_.cells_[i].set_uint64(diagnose_info.checkpoint_diagnose_info_.min_rec_scn_.get_val_for_inner_table_field());
         break;
-      }
-      case MIN_REC_SCN_LOG_TYPE: {
+      case MIN_REC_SCN_LOG_TYPE:
         if (OB_FAIL(log_base_type_to_string(diagnose_info.checkpoint_diagnose_info_.log_type_,
                                             min_rec_log_scn_log_type_str_,
                                             sizeof(min_rec_log_scn_log_type_str_)))) {
@@ -221,7 +231,40 @@ int ObAllVirtualHADiagnose::insert_stat_(storage::DiagnoseInfo &diagnose_info)
                                                 ObCharset::get_default_charset()));
         }
         break;
-      }
+      case RESTORE_HANDLER_ROLE:
+        if (OB_FAIL(role_to_string(diagnose_info.restore_diagnose_info_.restore_role_,
+                                   restore_handler_role_str_, sizeof(restore_handler_role_str_)))) {
+          SERVER_LOG(WARN, "role_to_string failed", K(ret), K(diagnose_info));
+        } else {
+          cur_row_.cells_[i].set_varchar(ObString::make_string(restore_handler_role_str_));
+          cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
+                                                ObCharset::get_default_charset()));
+        }
+        break;
+      case RESTORE_HANDLER_PROPOSAL_ID:
+        cur_row_.cells_[i].set_int(diagnose_info.restore_diagnose_info_.restore_proposal_id_);
+        break;
+      case RESTORE_CONTEXT_INFO:
+        cur_row_.cells_[i].set_varchar((diagnose_info.restore_diagnose_info_.restore_context_info_.string()));
+        cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
+                                              ObCharset::get_default_charset()));
+        break;
+      case RESTORE_ERR_CONTEXT_INFO:
+        cur_row_.cells_[i].set_varchar((diagnose_info.restore_diagnose_info_.restore_err_context_info_.string()));
+        cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
+                                              ObCharset::get_default_charset()));
+        break;
+      case ENABLE_SYNC:
+        cur_row_.cells_[i].set_bool(diagnose_info.palf_diagnose_info_.enable_sync_);
+        break;
+      case ENABLE_VOTE:
+        cur_row_.cells_[i].set_bool(diagnose_info.palf_diagnose_info_.enable_vote_);
+        break;
+      case ARB_SRV_INFO:
+        cur_row_.cells_[i].set_varchar(ObString(""));
+        cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
+                                              ObCharset::get_default_charset()));
+        break;
       default:
         ret = OB_ERR_UNEXPECTED;
         SERVER_LOG(WARN, "unkown column");
@@ -230,5 +273,6 @@ int ObAllVirtualHADiagnose::insert_stat_(storage::DiagnoseInfo &diagnose_info)
   }
   return ret;
 }
+
 } // namespace observer
 } // namespace oceanbase

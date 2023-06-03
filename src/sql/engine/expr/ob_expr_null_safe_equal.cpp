@@ -108,13 +108,15 @@ int ObExprNullSafeEqual::cg_expr(
       } else {
         auto &l = rt_expr.args_[0]->datum_meta_;
         auto &r = rt_expr.args_[1]->datum_meta_;
+        bool has_lob_header = rt_expr.args_[0]->obj_meta_.has_lob_header() ||
+                              rt_expr.args_[1]->obj_meta_.has_lob_header();
         if (ObDatumFuncs::is_string_type(l.type_) && ObDatumFuncs::is_string_type(r.type_)) {
           CK(l.cs_type_ == r.cs_type_);
         }
 
         if (OB_SUCC(ret)) {
           funcs[0] = (void *)ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
-                  l.type_, r.type_, lib::is_oracle_mode(), l.cs_type_);
+                  l.type_, r.type_, l.scale_, r.scale_, lib::is_oracle_mode(), l.cs_type_, has_lob_header);
           CK(NULL != funcs[0]);
           rt_expr.inner_functions_ = funcs;
           rt_expr.inner_func_cnt_ = 1;
@@ -139,6 +141,7 @@ int ObExprNullSafeEqual::ns_equal(const ObExpr &expr, ObDatum &res,
   ObDatum *l = NULL;
   ObDatum *r = NULL;
   bool equal = true;
+  int cmp_ret = 0;
   for (int64_t i = 0; OB_SUCC(ret) && equal && i < expr.inner_func_cnt_; i++) {
     if (NULL == expr.inner_functions_[i]) {
       ret = OB_INVALID_ARGUMENT;
@@ -150,7 +153,11 @@ int ObExprNullSafeEqual::ns_equal(const ObExpr &expr, ObDatum &res,
       if (l->is_null() && r->is_null()) {
         equal = true;
       } else if (!l->is_null() && !r->is_null()) {
-        equal = (0 == reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[i])(*l, *r));
+        if (OB_FAIL(reinterpret_cast<DatumCmpFunc>(expr.inner_functions_[i])(*l, *r, cmp_ret))) {
+          LOG_WARN("cmp failed", K(ret));
+        } else {
+          equal = (0 == cmp_ret);
+        }
       } else {
         equal = false;
       }

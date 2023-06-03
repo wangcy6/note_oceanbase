@@ -28,9 +28,9 @@ namespace tablelock
 constexpr const char ObSimpleIteratorModIds::OB_OBJ_LOCK[];
 constexpr const char ObSimpleIteratorModIds::OB_OBJ_LOCK_MAP[];
 
-bool is_deadlock_avoid_enabled(const int64_t timeout_us)
+bool is_deadlock_avoid_enabled(const bool is_from_sql, const int64_t timeout_us)
 {
-  return (timeout_us >= MIN_DEADLOCK_AVOID_TIMEOUT_US);
+  return (!is_from_sql && timeout_us >= MIN_DEADLOCK_AVOID_TIMEOUT_US);
 }
 
 OB_SERIALIZE_MEMBER(ObTableLockOp, lock_id_,
@@ -96,6 +96,20 @@ int ObLockID::set(const ObLockOBJType &type, const uint64_t obj_id)
     obj_id_ = obj_id;
   }
   hash_value_ = inner_hash();
+  return ret;
+}
+
+int get_lock_id(const ObLockOBJType obj_type,
+                const uint64_t obj_id,
+                ObLockID &lock_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_lock_obj_type_valid(obj_type) || !is_valid_id(obj_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument ", K(ret), K(obj_type), K(obj_id));
+  } else if (OB_FAIL(lock_id.set(obj_type, obj_id))) {
+    LOG_WARN("create lock id failed.", K(ret));
+  }
   return ret;
 }
 

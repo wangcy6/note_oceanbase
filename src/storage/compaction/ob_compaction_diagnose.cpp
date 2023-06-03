@@ -23,7 +23,11 @@
 #include "storage/tx_storage/ob_ls_service.h"
 #include "storage/ls/ob_ls.h"
 #include "observer/omt/ob_tenant_config_mgr.h"
-
+#include "rootserver/freeze/ob_major_freeze_service.h"
+#include "rootserver/freeze/ob_major_freeze_util.h"
+#include "share/ob_tablet_meta_table_compaction_operator.h"
+#include "storage/compaction/ob_compaction_util.h"
+#include "storage/tablet/ob_tablet.h"
 namespace oceanbase
 {
 using namespace storage;
@@ -70,15 +74,15 @@ int64_t ObScheduleSuspectInfo::gen_hash(int64_t tenant_id, int64_t dag_hash)
 
 ObScheduleSuspectInfoMgr::ObScheduleSuspectInfoMgr()
   : is_inited_(false),
-    allocator_("scheSuspectInfo", OB_SERVER_TENANT_ID),
-    lock_()
+    allocator_(SET_USE_500("scheSuspectInfo")),
+    lock_(common::ObLatchIds::INFO_MGR_LOCK)
 {
 }
 
 int ObScheduleSuspectInfoMgr::init()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(info_map_.create(SUSPECT_INFO_BUCKET_NUM, "scheSuspectInfo"))) {
+  if (OB_FAIL(info_map_.create(SUSPECT_INFO_BUCKET_NUM, SET_USE_500("scheSuspectInfo")))) {
     COMMON_LOG(WARN, "failed to create dap map", K(ret));
   } else {
     is_inited_ = true;
@@ -88,7 +92,15 @@ int ObScheduleSuspectInfoMgr::init()
 
 void ObScheduleSuspectInfoMgr::destroy()
 {
+  common::SpinWLockGuard guard(lock_);
   if (info_map_.created()) {
+    auto free_map_entry = [this](common::hash::HashMapPair<int64_t, ObScheduleSuspectInfo *> &entry) {
+      ObScheduleSuspectInfo *info = entry.second;
+      info->~ObScheduleSuspectInfo();
+      allocator_.free((void *)info);
+      return OB_SUCCESS;
+    };
+    info_map_.foreach_refactored(free_map_entry);
     info_map_.destroy();
   }
 }
@@ -185,18 +197,26 @@ int ObScheduleSuspectInfoMgr::gc_info()
     int tmp_ret = OB_SUCCESS;
     int64_t gc_cnt = 0;
     ObScheduleSuspectInfo *info = nullptr;
+    ObSEArray<int64_t, 128> remove_info_keys;
     const int64_t gc_time = ObTimeUtility::fast_current_time() - GC_INFO_TIME_LIMIT;
     common::SpinWLockGuard guard(lock_);
     for (InfoMap::iterator iter = info_map_.begin(); iter != info_map_.end(); ++iter) {
       if (OB_NOT_NULL(info = iter->second)) {
-        if (info->add_time_ < gc_time) {
-          if (OB_TMP_FAIL(info_map_.erase_refactored(iter->first))) {
-            LOG_WARN("failed to erase from map", K(tmp_ret), K(iter->first));
-          } else {
-            gc_cnt++;
-            allocator_.free(info);
-            info = nullptr;
-          }
+        if (info->add_time_ < gc_time && OB_TMP_FAIL(remove_info_keys.push_back(iter->first))) {
+          LOG_WARN("failed to push back remove info key", K(tmp_ret), K(iter->first));
+        }
+      }
+    }
+    for (int64_t i = 0; i < remove_info_keys.count(); ++i) {
+      if (OB_TMP_FAIL(info_map_.get_refactored(remove_info_keys.at(i), info))) {
+        LOG_WARN("failed to get from map", K(tmp_ret), K(remove_info_keys.at(i)));
+      } else if (OB_NOT_NULL(info)) {
+        if (OB_TMP_FAIL(info_map_.erase_refactored(remove_info_keys.at(i)))) {
+          LOG_WARN("failed to erase from map", K(tmp_ret), K(remove_info_keys.at(i)));
+        } else {
+          gc_cnt++;
+          allocator_.free(info);
+          info = nullptr;
         }
       }
     }
@@ -213,6 +233,8 @@ const char *ObCompactionDiagnoseInfo::ObDiagnoseStatusStr[DIA_STATUS_MAX] = {
     "NOT_SCHEDULE",
     "RUNNING",
     "FAILED",
+    "FINISH",
+    "RS_UNCOMPACTED"
 };
 
 const char * ObCompactionDiagnoseInfo::get_diagnose_status_str(ObDiagnoseStatus status)
@@ -291,6 +313,12 @@ int ObCompactionDiagnoseMgr::diagnose_dag(
 
   if (OB_FAIL(dag.init_by_param(&param))) {
     STORAGE_LOG(WARN, "failed to init dag", K(ret), K(param));
+  } else if (is_minor_merge(merge_type)) {
+    if (OB_FAIL(MTL(ObTenantDagScheduler *)->diagnose_minor_exe_dag(&dag, progress))) {
+      if (OB_HASH_NOT_EXIST != ret) {
+        STORAGE_LOG(WARN, "failed to diagnose minor execute dag", K(ret), K(ls_id), K(tablet_id), K(progress));
+      }
+    }
   } else if (OB_FAIL(MTL(ObTenantDagScheduler *)->diagnose_dag(&dag, progress))) {
     if (OB_HASH_NOT_EXIST != ret) {
       STORAGE_LOG(WARN, "failed to diagnose dag", K(ret), K(ls_id), K(tablet_id), K(progress));
@@ -315,6 +343,7 @@ int ObCompactionDiagnoseMgr::diagnose_all_tablets(const int64_t tenant_id)
     if (!is_virtual_tenant_id(tenant_id)) { // skip virtual tenant
       MTL_SWITCH(tenant_id) {
         (void)diagnose_tenant_tablet();
+        (void)diagnose_tenant_major_merge();
       } else {
         if (OB_TENANT_NOT_IN_SERVER != ret) {
           STORAGE_LOG(WARN, "switch tenant failed", K(ret), K(tenant_id));
@@ -350,6 +379,30 @@ int ObCompactionDiagnoseMgr::get_suspect_info(
   return ret;
 }
 
+int ObCompactionDiagnoseMgr::diagnose_ls_merge(
+    const ObMergeType merge_type,
+    const ObLSID &ls_id)
+{
+  int ret = OB_SUCCESS;
+  ObScheduleSuspectInfo ret_info;
+  if (OB_FAIL(get_suspect_info(merge_type, ls_id, ObTabletID(INT64_MAX), ret_info))) {
+    if (OB_HASH_NOT_EXIST != ret) {
+      LOG_WARN("failed get ls merge suspect info", K(ret), K(ls_id));
+    }
+  } else if (can_add_diagnose_info()) {
+    SET_DIAGNOSE_INFO(
+        info_array_[idx_++],
+        merge_type,
+        ret_info.tenant_id_,
+        ls_id,
+        ObTabletID(INT64_MAX),
+        ObCompactionDiagnoseInfo::DIA_STATUS_FAILED,
+        ret_info.add_time_,
+        "schedule_suspect_info", ret_info.suspect_info_);
+  }
+  return ret;
+}
+
 int ObCompactionDiagnoseMgr::diagnose_tenant_tablet()
 {
   int ret = OB_SUCCESS;
@@ -366,20 +419,20 @@ int ObCompactionDiagnoseMgr::diagnose_tenant_tablet()
       int tmp_ret = OB_SUCCESS;
       bool diagnose_major_flag = false;
       ObTenantTabletScheduler *scheduler = MTL(ObTenantTabletScheduler*);
-      int64_t compaction_scn = scheduler->get_frozen_version();
+      int64_t compaction_scn = MAX(scheduler->get_frozen_version(), MTL(ObTenantFreezeInfoMgr*)->get_latest_frozen_version());
       ObTenantFreezeInfoMgr::FreezeInfo freeze_info;
 
-      if (compaction_scn > scheduler->get_merged_version()) { // check major merge
+      if (compaction_scn > scheduler->get_inner_table_merged_scn()) { // check major merge
         diagnose_major_flag = true;
-        const int64_t merged_version = scheduler->get_merged_version();
+        const int64_t merged_version = scheduler->get_inner_table_merged_scn();
         if (merged_version == ObTenantTabletScheduler::INIT_COMPACTION_SCN) {
           // do nothing
-        } else if (OB_FAIL(MTL(ObTenantFreezeInfoMgr *)->get_freeze_info_behind_snapshot_version(merged_version, freeze_info))) {
-          LOG_WARN("failed to get freeze info behind snapshot version", K(ret), K(merged_version));
+        } else if (OB_TMP_FAIL(MTL(ObTenantFreezeInfoMgr *)->get_freeze_info_behind_snapshot_version(merged_version, freeze_info))) {
+          LOG_WARN("failed to get freeze info behind snapshot version", K(tmp_ret), K(merged_version));
           if (can_add_diagnose_info()
               && OB_TMP_FAIL(SET_DIAGNOSE_INFO(
                         info_array_[idx_++],
-                        MAJOR_MERGE,
+                        MEDIUM_MERGE,
                         MTL_ID(),
                         ObLSID(INT64_MAX),
                         ObTabletID(INT64_MAX),
@@ -389,11 +442,39 @@ int ObCompactionDiagnoseMgr::diagnose_tenant_tablet()
             LOG_WARN("failed to add dignose info about freeze_info", K(tmp_ret), K(merged_version));
           }
         } else {
+<<<<<<< HEAD
           compaction_scn = freeze_info.freeze_scn.get_val_for_tx();
+=======
+          compaction_scn = freeze_info.freeze_version;
+        }
+      }
+      (void)diagnose_medium_scn_table(compaction_scn);
+      // check tenant suspect info
+      if (diagnose_major_flag) {
+        ObScheduleSuspectInfo ret_info;
+        if (OB_TMP_FAIL(get_suspect_info(MEDIUM_MERGE, share::ObLSID(INT64_MAX), ObTabletID(INT64_MAX), ret_info))) {
+          if (OB_HASH_NOT_EXIST != tmp_ret) {
+            LOG_WARN("failed get tenant merge suspect info", K(tmp_ret));
+          }
+        } else if (can_add_diagnose_info()) {
+          SET_DIAGNOSE_INFO(
+              info_array_[idx_++],
+              MEDIUM_MERGE,
+              ret_info.tenant_id_,
+              share::ObLSID(INT64_MAX),
+              ObTabletID(INT64_MAX),
+              ObCompactionDiagnoseInfo::DIA_STATUS_FAILED,
+              ret_info.add_time_,
+              "schedule_suspect_info", ret_info.suspect_info_);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
         }
       }
 
-      while (OB_SUCC(ret)) { // loop all log_stream
+      bool tenant_major_finish = true;
+      bool ls_major_finish = true;
+      bool tablet_major_finish = true;
+      ObSEArray<ObLSID, 64> abnormal_ls_id;
+      while (OB_SUCC(ret) && can_add_diagnose_info()) { // loop all log_stream
         bool need_merge = false;
         if (OB_FAIL(ls_iter_guard.get_ptr()->get_next(ls))) {
           if (OB_ITER_END != ret) {
@@ -413,7 +494,7 @@ int ObCompactionDiagnoseMgr::diagnose_tenant_tablet()
               && can_add_diagnose_info()) {
             SET_DIAGNOSE_INFO(
                 info_array_[idx_++],
-                MAJOR_MERGE,
+                MEDIUM_MERGE,
                 MTL_ID(),
                 ls_id,
                 ObTabletID(INT64_MAX),
@@ -423,25 +504,26 @@ int ObCompactionDiagnoseMgr::diagnose_tenant_tablet()
                 compaction_scn);
           }
           // check ls suspect info for memtable freezing
-          ObScheduleSuspectInfo ret_info;
-          if (OB_SUCC(get_suspect_info(MINI_MERGE, ls_id, ObTabletID(INT64_MAX), ret_info))
-              && can_add_diagnose_info()) {
-            SET_DIAGNOSE_INFO(
-                info_array_[idx_++],
-                MINI_MERGE,
-                ret_info.tenant_id_,
-                ls_id,
-                ObTabletID(INT64_MAX),
-                ObCompactionDiagnoseInfo::DIA_STATUS_FAILED,
-                ret_info.add_time_,
-                "schedule_suspect_info", ret_info.suspect_info_);
+          if (OB_TMP_FAIL(diagnose_ls_merge(MINI_MERGE, ls_id))) {
+            LOG_WARN("failed to diagnose about memtable freezing", K(tmp_ret));
+          }
+
+          // check ls locality change and leader change
+          if (OB_TMP_FAIL(diagnose_ls_merge(MEDIUM_MERGE, ls_id))) {
+            LOG_WARN("failed to diagnose about ls locality change", K(tmp_ret));
           }
           ObLSTabletIterator tablet_iter(ObTabletCommon::NO_CHECK_GET_TABLET_TIMEOUT_US);
-          if (OB_FAIL(ls->build_tablet_iter(tablet_iter))) {
+          ObLSVTInfo ls_info;
+          if (OB_FAIL(ls->get_ls_info(ls_info))) {
+            LOG_WARN("failed to get ls info", K(ret), K(ls));
+          } else if (MAX_LS_TABLET_CNT < ls_info.tablet_count_) {
+            LOG_INFO("there is too many tablets, skip diagnose in this ls", K(ls_id), "tablet_count", ls_info.tablet_count_);
+          } else if (OB_FAIL(ls->build_tablet_iter(tablet_iter))) {
             LOG_WARN("failed to build ls tablet iter", K(ret), K(ls));
           } else {
+            ls_major_finish = true;
             ObTabletHandle tablet_handle;
-            while (OB_SUCC(ret)) { // loop all tablets in ls
+            while (OB_SUCC(ret) && can_add_diagnose_info()) { // loop all tablets in ls
               if (OB_FAIL(tablet_iter.get_next_tablet(tablet_handle))) {
                 if (OB_ITER_END == ret) {
                   ret = OB_SUCCESS;
@@ -458,25 +540,155 @@ int ObCompactionDiagnoseMgr::diagnose_tenant_tablet()
                     && OB_TMP_FAIL(diagnose_tablet_major_merge(
                             compaction_scn,
                             ls_id,
-                            *tablet_handle.get_obj()))) {
-                  LOG_WARN("failed to get diagnoe major merge", K(tmp_ret));
+                            *tablet_handle.get_obj(),
+                            tablet_major_finish))) {
+                  LOG_WARN("failed to get diagnose major merge", K(tmp_ret));
                 }
+                ls_major_finish &= tablet_major_finish;
                 if (OB_TMP_FAIL(diagnose_tablet_mini_merge(ls_id, *tablet_handle.get_obj()))) {
-                  LOG_WARN("failed to get diagnoe mini merge", K(tmp_ret));
+                  LOG_WARN("failed to get diagnose mini merge", K(tmp_ret));
                 }
                 if (OB_TMP_FAIL(diagnose_tablet_minor_merge(ls_id, *tablet_handle.get_obj()))) {
-                  LOG_WARN("failed to get diagnoe minor merge", K(tmp_ret));
+                  LOG_WARN("failed to get diagnose minor merge", K(tmp_ret));
+                }
+                if (OB_TMP_FAIL(diagnose_tablet_medium_merge(compaction_scn, ls_id, *tablet_handle.get_obj()))) {
+                  LOG_WARN("failed to get diagnose medium merge", K(tmp_ret));
                 }
               }
             } // end of while
+            tenant_major_finish &= ls_major_finish;
+            LOG_INFO("finish ls merge diagnose", K(ret), K(ls_id));
           }
+        } else {
+          (void)abnormal_ls_id.push_back(ls->get_ls_id());
         }
       } // end of while
+      if (diagnose_major_flag && tenant_major_finish && can_add_diagnose_info()) {
+        ObCompactionDiagnoseInfo &info = info_array_[idx_++];
+        SET_DIAGNOSE_INFO(
+          info,
+          MEDIUM_MERGE,
+          MTL_ID(),
+          share::ObLSID(INT64_MAX),
+          ObTabletID(INT64_MAX),
+          ObCompactionDiagnoseInfo::DIA_STATUS_FINISH,
+          ObTimeUtility::fast_current_time(),
+          "compaction has finished in storage, please check RS. compaction_scn", compaction_scn);
+        if (!abnormal_ls_id.empty()) {
+          char * buf = info.diagnose_info_;
+          const int64_t buf_len = common::OB_DIAGNOSE_INFO_LENGTH;
+          ADD_COMPACTION_INFO_PARAM(buf, buf_len,
+              "some ls may offline", abnormal_ls_id);
+        }
+      }
     }
   }
   return ret;
 }
 
+int ObCompactionDiagnoseMgr::diagnose_tenant_major_merge()
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObCompactionDiagnoseMgr is not init", K(ret));
+  } else {
+    rootserver::ObMajorFreezeService *major_freeze_service = nullptr;
+    bool need_diagnose = false;
+    // only leader need diagnose
+    if (OB_FAIL(check_if_need_diagnose(major_freeze_service, need_diagnose))) {
+      LOG_WARN("fail to check if need diagnose tenant major merge", KR(ret));
+    } else if (need_diagnose) {
+      if (OB_FAIL(do_tenant_major_merge_diagnose(major_freeze_service))) {
+        LOG_WARN("fail to do tenant major merge diagnose", KR(ret));
+      } else {
+        LOG_INFO("finish diagnose tenant major merge", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObCompactionDiagnoseMgr::check_if_need_diagnose(
+    rootserver::ObMajorFreezeService *&major_freeze_service,
+    bool &need_diagnose) const
+{
+  int ret = OB_SUCCESS;
+  need_diagnose = false;
+  rootserver::ObPrimaryMajorFreezeService *primary_major_freeze_service = nullptr;
+  rootserver::ObRestoreMajorFreezeService *restore_major_freeze_service = nullptr;
+  if (OB_ISNULL(primary_major_freeze_service = MTL(rootserver::ObPrimaryMajorFreezeService*))
+      || OB_ISNULL(restore_major_freeze_service = MTL(rootserver::ObRestoreMajorFreezeService*))) {
+    ret = OB_ERR_UNEXPECTED;
+    RS_LOG(ERROR, "primary or restore major_freeze_service is nullptr", KR(ret),
+           KP(primary_major_freeze_service), KP(restore_major_freeze_service));
+  } else {
+    bool is_primary_service = true;
+    if (OB_FAIL(rootserver::ObMajorFreezeUtil::get_major_freeze_service(primary_major_freeze_service,
+                restore_major_freeze_service, major_freeze_service, is_primary_service))) {
+      if (OB_LEADER_NOT_EXIST == ret) {
+        ret = OB_SUCCESS; // ignore ret
+        LOG_INFO("no need to diagnose tenant major merge on this server");
+      } else {
+        LOG_WARN("fail to get major_freeze_service", KR(ret));
+      }
+    } else if (OB_ISNULL(major_freeze_service)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("major_freeze_service is null", KR(ret));
+    } else {
+      need_diagnose = true;
+    }
+  }
+  return ret;
+}
+
+int ObCompactionDiagnoseMgr::do_tenant_major_merge_diagnose(
+    rootserver::ObMajorFreezeService *major_freeze_service)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(major_freeze_service)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), KP(major_freeze_service));
+  } else {
+    ObTenantTabletScheduler *scheduler = MTL(ObTenantTabletScheduler*);
+    const int64_t frozen_scn = MAX(scheduler->get_frozen_version(), MTL(ObTenantFreezeInfoMgr*)->get_latest_frozen_version());
+    SMART_VAR(ObArray<ObTabletReplica>, uncompacted_tablets) {
+      if (OB_FAIL(major_freeze_service->get_uncompacted_tablets(uncompacted_tablets))) {
+        LOG_WARN("fail to get uncompacted tablets", KR(ret));
+      } else {
+        int64_t uncompacted_tablets_cnt = uncompacted_tablets.count();
+        LOG_INFO("finish get uncompacted tablets for diagnose", K(ret), K(uncompacted_tablets_cnt));
+        for (int64_t i = 0; (OB_SUCCESS == ret) && i < uncompacted_tablets_cnt; ++i) {
+          if (can_add_diagnose_info()) {
+            bool compaction_scn_not_valid = frozen_scn > uncompacted_tablets.at(i).get_snapshot_version();
+            const char *status =
+                ObTabletReplica::SCN_STATUS_ERROR == uncompacted_tablets.at(i).get_status()
+                    ? "CHECKSUM_ERROR"
+                    : (compaction_scn_not_valid ? "compaction_scn_not_update" : "report_scn_not_update");
+            if (OB_FAIL(SET_DIAGNOSE_INFO(
+                    info_array_[idx_++], MAJOR_MERGE, MTL_ID(),
+                    uncompacted_tablets.at(i).get_ls_id(),
+                    uncompacted_tablets.at(i).get_tablet_id(),
+                    ObCompactionDiagnoseInfo::DIA_STATUS_RS_UNCOMPACTED,
+                    ObTimeUtility::fast_current_time(), "server",
+                    uncompacted_tablets.at(i).get_server(), "status", status,
+                    "frozen_scn", frozen_scn,
+                    "compaction_scn", uncompacted_tablets.at(i).get_snapshot_version(),
+                    "report_scn", uncompacted_tablets.at(i).get_report_scn()))) {
+              LOG_WARN("fail to set diagnose info", KR(ret), "uncompacted_tablet",
+                      uncompacted_tablets.at(i));
+              ret = OB_SUCCESS; // ignore ret, and process next uncompacted_tablet
+            }
+          } else {
+            LOG_INFO("can not add diagnose info", K_(idx), K_(max_cnt), "uncompacted_tablet",
+                    uncompacted_tablets.at(i));
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
 
 int ObCompactionDiagnoseMgr::diagnose_tablet_mini_merge(
     const ObLSID &ls_id,
@@ -533,8 +745,15 @@ int ObCompactionDiagnoseMgr::diagnose_tablet_mini_merge(
 int ObCompactionDiagnoseMgr::diagnose_tablet_minor_merge(const ObLSID &ls_id, ObTablet &tablet)
 {
   int ret = OB_SUCCESS;
-  if (tablet.get_table_store().get_minor_sstables().count() >= DIAGNOSE_TABLE_CNT_IN_STORAGE) {
-    ObTabletMinorMergeDag dag;
+  int64_t minor_compact_trigger = ObPartitionMergePolicy::DEFAULT_MINOR_COMPACT_TRIGGER;
+  {
+    omt::ObTenantConfigGuard tenant_config(TENANT_CONF(MTL_ID()));
+    if (tenant_config.is_valid()) {
+      minor_compact_trigger = tenant_config->minor_compact_trigger;
+    }
+  }
+  if (tablet.get_table_store().get_minor_sstables().count() >= minor_compact_trigger) {
+    ObTabletMergeExecuteDag dag;
     if (OB_FAIL(diagnose_tablet_merge(
             dag,
             MINOR_MERGE,
@@ -546,31 +765,103 @@ int ObCompactionDiagnoseMgr::diagnose_tablet_minor_merge(const ObLSID &ls_id, Ob
   return ret;
 }
 
-int ObCompactionDiagnoseMgr::diagnose_tablet_major_merge(
+int ObCompactionDiagnoseMgr::diagnose_tablet_medium_merge(
     const int64_t compaction_scn,
     const ObLSID &ls_id,
     ObTablet &tablet)
 {
   int ret = OB_SUCCESS;
+  const storage::ObMergeType merge_type = MEDIUM_MERGE;
+  const ObTabletID &tablet_id = tablet.get_tablet_meta().tablet_id_;
+  const int64_t max_serialized_medium_scn = tablet.get_tablet_meta().max_serialized_medium_scn_;
+  ObITable *last_major = tablet.get_table_store().get_major_sstables().get_boundary_table(true/*last*/);
+  int64_t max_sync_medium_scn = 0;
+
+  if (OB_ISNULL(last_major)) {
+  } else if (OB_FAIL(tablet.get_max_sync_medium_scn(max_sync_medium_scn))){
+    LOG_WARN("failed to get max sync medium scn", K(ret), K(ls_id), K(tablet_id));
+  } else if (max_sync_medium_scn > last_major->get_snapshot_version()) {
+    if (tablet.get_snapshot_version() < max_sync_medium_scn) { // wait mini compaction or tablet freeze
+      if (ObTimeUtility::fast_current_time() > max_sync_medium_scn + WAIT_MEDIUM_SCHEDULE_INTERVAL * 2
+        && can_add_diagnose_info()
+        && OB_FAIL(SET_DIAGNOSE_INFO(
+                info_array_[idx_++],
+                merge_type,
+                MTL_ID(),
+                ls_id,
+                tablet_id,
+                ObCompactionDiagnoseInfo::DIA_STATUS_NOT_SCHEDULE,
+                ObTimeUtility::fast_current_time(),
+                "max_receive_medium_scn", max_sync_medium_scn,
+                "max_serialized_medium_scn", max_serialized_medium_scn,
+                "tablet_snapshot", tablet.get_snapshot_version()))) {
+        LOG_WARN("failed to add diagnose info", K(ret), K(ls_id), K(tablet_id));
+      }
+    } else if (max_sync_medium_scn != compaction_scn) {
+      ObTabletMajorMergeDag dag;
+      if (OB_FAIL(diagnose_tablet_merge(
+              dag,
+              merge_type,
+              ls_id,
+              tablet_id,
+              max_sync_medium_scn))) {
+        LOG_WARN("diagnose failed", K(ret), K(ls_id), K(tablet_id), KPC(last_major));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObCompactionDiagnoseMgr::diagnose_tablet_major_merge(
+    const int64_t compaction_scn,
+    const ObLSID &ls_id,
+    ObTablet &tablet,
+    bool &tablet_major_finish)
+{
+  int ret = OB_SUCCESS;
+  tablet_major_finish = true;
   const ObTabletTableStore &table_store = tablet.get_table_store();
+  const ObTabletID &tablet_id = tablet.get_tablet_meta().tablet_id_;
+  const ObMergeType merge_type = MEDIUM_MERGE;
+  int64_t max_sync_medium_scn = 0;
   ObSSTable *latest_major_sstable = static_cast<ObSSTable*>(
       table_store.get_major_sstables().get_boundary_table(true/*last*/));
   if (OB_UNLIKELY(compaction_scn <= 0)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(compaction_scn));
+  } else if (OB_FAIL(tablet.get_max_sync_medium_scn(max_sync_medium_scn))) {
+    LOG_WARN("failed to get max sync medium snapshot", K(ret), K(tablet_id));
   } else {
     int tmp_ret = OB_SUCCESS;
     if (nullptr == latest_major_sstable
         || latest_major_sstable->get_snapshot_version() < compaction_scn) {
-      ObTabletMajorMergeDag dag;
-      if (OB_TMP_FAIL(diagnose_tablet_merge(
-              dag,
-              MAJOR_MERGE,
-              ls_id,
-              tablet.get_tablet_meta().tablet_id_,
-              compaction_scn))) {
-        LOG_WARN("diagnose failed", K(tmp_ret), K(ls_id), K(tablet), KPC(latest_major_sstable));
+      tablet_major_finish = false;
+      if (max_sync_medium_scn < compaction_scn) {
+        if (can_add_diagnose_info()
+              && ObTimeUtility::fast_current_time() > compaction_scn + WAIT_MEDIUM_SCHEDULE_INTERVAL
+              && OB_FAIL(SET_DIAGNOSE_INFO(
+                info_array_[idx_++],
+                merge_type,
+                MTL_ID(),
+                ls_id,
+                tablet_id,
+                ObCompactionDiagnoseInfo::DIA_STATUS_NOT_SCHEDULE,
+                ObTimeUtility::fast_current_time(),
+                "max_receive_medium_snapshot", max_sync_medium_scn))) {
+          LOG_WARN("failed to add diagnose info", K(ret), K(ls_id), K(tablet_id));
+        }
+      } else {
+        ObTabletMajorMergeDag dag;
+        if (OB_TMP_FAIL(diagnose_tablet_merge(
+                dag,
+                merge_type,
+                ls_id,
+                tablet.get_tablet_meta().tablet_id_,
+                compaction_scn))) {
+          LOG_WARN("diagnose failed", K(tmp_ret), K(ls_id), K(tablet), KPC(latest_major_sstable));
+        }
       }
+
     }
   }
   return ret;
@@ -594,6 +885,7 @@ int ObCompactionDiagnoseMgr::diagnose_tablet_merge(
   } else if (progress.is_valid()) { // dag exist, means compaction is running
     // check progress is normal
     if (progress.is_suspect_abormal_) { // progress is abnomal
+      const char* current_status = progress.is_waiting_schedule_ ? "dag may be waiting for schedule" : "dag may hang";
       if (can_add_diagnose_info()
             && OB_FAIL(SET_DIAGNOSE_INFO(
               info_array_[idx_++],
@@ -603,11 +895,13 @@ int ObCompactionDiagnoseMgr::diagnose_tablet_merge(
               tablet_id,
               ObCompactionDiagnoseInfo::DIA_STATUS_RUNNING,
               ObTimeUtility::fast_current_time(),
-              "current_status", "dag may hang",
+              K(current_status),
               "merge_progress", progress))) {
         LOG_WARN("failed to add diagnose info", K(ret), K(ls_id), K(tablet_id), K(progress));
       }
     }
+  } else if (OB_FAIL(diagnose_no_dag(dag, merge_type, ls_id, tablet_id, compaction_scn))) {
+    LOG_WARN("failed to dagnose no dag", K(ret), K(ls_id), K(tablet_id));
   }
   return ret;
 }
@@ -623,7 +917,8 @@ int ObCompactionDiagnoseMgr::get_suspect_and_warning_info(
 
   ObDagWarningInfo *warning_info = nullptr;
   bool add_schedule_info = false;
-  if (OB_FAIL(ObScheduleSuspectInfoMgr::get_instance().get_suspect_info(ObScheduleSuspectInfo::gen_hash(MTL_ID(), dag.hash()), info))) {
+  if (OB_FAIL(ObScheduleSuspectInfoMgr::get_instance().get_suspect_info(
+      ObScheduleSuspectInfo::gen_hash(MTL_ID(), dag.hash()), info))) {
     if (OB_HASH_NOT_EXIST != ret) {
       LOG_WARN("failed to get suspect info", K(ret), K(ls_id), K(tablet_id));
     } else { // no schedule suspect info
@@ -665,11 +960,12 @@ int ObCompactionDiagnoseMgr::diagnose_no_dag(
   int ret = OB_SUCCESS;
   ObScheduleSuspectInfo info;
   bool add_schedule_info = false;
+
   if (OB_FAIL(get_suspect_and_warning_info(dag, merge_type, ls_id, tablet_id, info))) {
     LOG_WARN("failed to get suspect and warning info", K(ret), K(ls_id), K(tablet_id));
   } else if (!info.is_valid()) {
     // do nothing
-  } else if (MAJOR_MERGE == merge_type) {
+  } else if (MEDIUM_MERGE == merge_type) {
     if (OB_UNLIKELY(compaction_scn <= 0)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("merge version or freeze ts is invalid", K(ret), K(compaction_scn));
@@ -718,6 +1014,26 @@ int ObCompactionDiagnoseMgr::diagnose_no_dag(
           info.add_time_,
           "schedule_suspect_info", info.suspect_info_))) {
     LOG_WARN("failed to add diagnose info", K(ret), K(ls_id), K(tablet_id), K(info));
+  }
+  return ret;
+}
+
+int ObCompactionDiagnoseMgr::diagnose_medium_scn_table(const int64_t compaction_scn)
+{
+  int ret = OB_SUCCESS;
+  int64_t error_tablet_cnt = MTL(ObTenantTabletScheduler*)->get_error_tablet_cnt();
+  if (0 != error_tablet_cnt
+      && can_add_diagnose_info()
+      && OB_FAIL(SET_DIAGNOSE_INFO(
+          info_array_[idx_++],
+          MEDIUM_MERGE,
+          MTL_ID(),
+          ObLSID(INT64_MAX),
+          ObTabletID(INT64_MAX),
+          ObCompactionDiagnoseInfo::DIA_STATUS_FAILED,
+          ObTimeUtility::fast_current_time(),
+          "checksum may error. error_tablet_cnt", error_tablet_cnt))) {
+    LOG_WARN("failed to add diagnose info", K(ret));
   }
   return ret;
 }

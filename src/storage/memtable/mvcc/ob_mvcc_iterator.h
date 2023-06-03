@@ -18,9 +18,14 @@
 #include "storage/memtable/mvcc/ob_mvcc_row.h"
 #include "storage/memtable/mvcc/ob_query_engine.h"
 #include "storage/tx/ob_trans_define.h"
+#include "storage/concurrency_control/ob_trans_stat_row.h"
 
 namespace oceanbase
 {
+namespace storage
+{
+class ObStoreRowLockState;
+}
 namespace memtable
 {
 
@@ -86,26 +91,20 @@ struct ObMvccScanRange
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-class ObIMvccValueIterator
-{
-public:
-  ObIMvccValueIterator() {}
-  virtual ~ObIMvccValueIterator() {}
-  virtual int get_next_node(const void *&tnode) = 0;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-class ObMvccValueIterator : public ObIMvccValueIterator
+class ObMvccValueIterator
 {
 public:
   ObMvccValueIterator()
       : is_inited_(false),
         ctx_(NULL),
         value_(NULL),
+<<<<<<< HEAD
         version_iter_(NULL),
         last_trans_version_(share::SCN::max_scn()),
         skip_compact_(false)
+=======
+        version_iter_(NULL)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   {
   }
   virtual ~ObMvccValueIterator() {}
@@ -113,8 +112,7 @@ public:
   int init(ObMvccAccessCtx &ctx,
            const ObMemtableKey *key,
            ObMvccRow *value,
-           const ObQueryFlag &query_flag,
-           const bool skip_compact);
+           const ObQueryFlag &query_flag);
   OB_INLINE bool is_exist()
   {
     return (NULL != version_iter_);
@@ -126,16 +124,36 @@ public:
     ctx_ = NULL;
     value_ = NULL;
     version_iter_ = NULL;
+<<<<<<< HEAD
     last_trans_version_ = share::SCN::max_scn();
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   }
+  int check_row_locked(storage::ObStoreRowLockState &lock_state);
+  const transaction::ObTransID get_trans_id() const { return ctx_->get_tx_id(); }
+  share::SCN get_snapshot_version() const { return ctx_->get_snapshot_version(); }
+  ObMvccAccessCtx *get_mvcc_acc_ctx() { return ctx_; }
+  const ObMvccAccessCtx *get_mvcc_acc_ctx() const { return ctx_; }
   const ObMvccRow *get_mvcc_row() const { return value_; }
   const ObMvccTransNode *get_trans_node() const { return version_iter_; }
+  void get_trans_stat_row(concurrency_control::ObTransStatRow &row);
+
+  // The interface returns the reader's reader_tx_id and snapshot_tx_id. Both of
+  // the reader_tx_id and snapshot_tx_id is initialized after the first dml and
+  // the former one is used for read latest check and the later one is used for
+  // the read between statements(including cursor)
+  //
+  // NB: Be careful with these interface, because it is only for defensive code
+  // usage.
+  transaction::ObTransID get_reader_tx_id() const { return ctx_->tx_id_; }
+  transaction::ObTransID get_snapshot_tx_id() const { return ctx_->snapshot_.tx_id_; }
+
+  TO_STRING_KV(KPC_(value), KPC_(version_iter), KPC_(ctx));
 private:
   int lock_for_read_(const ObQueryFlag &flag);
   int lock_for_read_inner_(const ObQueryFlag &flag, ObMvccTransNode *&iter);
   int try_cleanout_tx_node_(ObMvccTransNode *tnode);
   void move_to_next_node_();
-  void lock_begin(int64_t &lock_start_time) const;
   void lock_for_read_end(const int64_t lock_start_time, int64_t ret) const;
 private:
   static const int64_t WAIT_COMMIT_US = 20 * 1000;
@@ -146,8 +164,11 @@ private:
   ObMvccAccessCtx *ctx_;
   ObMvccRow *value_;
   ObMvccTransNode *version_iter_;
+<<<<<<< HEAD
   share::SCN last_trans_version_;
   bool skip_compact_;
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -164,14 +185,11 @@ public:
            const ObQueryFlag &query_flag);
   int get_next_row(const ObMemtableKey *&key,
                    ObMvccValueIterator *&value_iter,
-                   uint8_t& iter_flag,
-                   const bool skip_compact = false);
+                   uint8_t& iter_flag);
   void reset();
   int get_key_val(const ObMemtableKey*& key, ObMvccRow*& row);
   int try_purge(const transaction::ObTxSnapshot &snapshot_info,
                 const ObMemtableKey* key, ObMvccRow* row);
-  int get_end_gap_key(const transaction::ObTxSnapshot &snapshot_info,
-                      const ObStoreRowkey *&key, int64_t& size);
   uint8_t get_iter_flag()
   {
     return query_engine_iter_? query_engine_iter_->get_iter_flag(): 0;

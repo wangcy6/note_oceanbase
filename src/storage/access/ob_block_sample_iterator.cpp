@@ -404,7 +404,7 @@ int ObBlockSampleRangeIterator::init_and_push_endkey_iterator(ObGetTableParam &g
         } else {
           STORAGE_LOG(WARN, "Fail to get next table iter", K(ret), K(get_table_param.tablet_iter_.table_iter_));
         }
-      } else if (!table->is_sstable()) {
+      } else if (!table->is_sstable() || table->is_ddl_mem_sstable()) {
       } else if (OB_ISNULL(table) || OB_ISNULL(sample_range_) || OB_ISNULL(allocator_)) {
         ret = OB_ERR_UNEXPECTED;
         STORAGE_LOG(WARN, "Unexpected null sstable", K(ret), KP(table), KP(sample_range_), KP(allocator_));
@@ -463,7 +463,7 @@ int ObBlockSampleRangeIterator::calculate_level_and_batch_size(const double perc
     }
   } else {
     // micro level
-    batch_size_ = micro_count * percent / 100 / EXPECTED_OPEN_RANGE_NUM;
+   batch_size_ = micro_count * percent / 100 / EXPECTED_OPEN_RANGE_NUM;
   }
 
   return ret;
@@ -577,12 +577,12 @@ bool ObBlockSampleRangeIterator::ObBlockSampleSSTableEndkeyComparor::operator()(
 
   if (OB_UNLIKELY(nullptr == datum_utils_)) {
     ret_ = OB_NOT_INIT;
-    STORAGE_LOG(WARN, "The ObBlockSampleSSTableEndkeyComparor is invalid", K(ret_));
+    STORAGE_LOG_RET(WARN, ret_, "The ObBlockSampleSSTableEndkeyComparor is invalid", K(ret_));
   } else if (OB_UNLIKELY(OB_SUCCESS != ret_)) {
-    STORAGE_LOG(WARN, "The ObBlockSampleSSTableEndkeyComparor is under error", K(ret_));
+    STORAGE_LOG_RET(WARN, ret_, "The ObBlockSampleSSTableEndkeyComparor is under error", K(ret_));
   } else if (OB_UNLIKELY(left == nullptr || right == nullptr)) {
     ret_ = OB_INVALID_ARGUMENT;
-    STORAGE_LOG(WARN, "Invalid argument", K(ret_), KP(left), KP(right));
+    STORAGE_LOG_RET(WARN, ret_, "Invalid argument", K(ret_), KP(left), KP(right));
   } else {
     ret_ = left->get_endkey().compare(right->get_endkey(), *datum_utils_, cmp_ret);
   }

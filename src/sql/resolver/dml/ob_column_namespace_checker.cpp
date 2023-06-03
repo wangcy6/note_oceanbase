@@ -68,7 +68,9 @@ int ObColumnNamespaceChecker::remove_reference_table(int64_t tid)
  * for oracle mode, if table name is specified, we need to make sure that this column does not appear in the using columns in the joined table
  * for example, select t1.a from t1 inner join t2 using (a), this is not allowed in oracle mode
  */
-int ObColumnNamespaceChecker::check_table_column_namespace(const ObQualifiedName &q_name, const TableItem *&table_item)
+int ObColumnNamespaceChecker::check_table_column_namespace(const ObQualifiedName &q_name,
+                                                           const TableItem *&table_item,
+                                                           bool is_from_multi_tab_insert/*default false*/)
 {
   int ret = OB_SUCCESS;
   table_item = NULL;
@@ -76,7 +78,7 @@ int ObColumnNamespaceChecker::check_table_column_namespace(const ObQualifiedName
   bool need_check_unique = false;
   //针对multi table insert需要进行特殊检测,因为同一个sql中可能插入多次相同表,eg:
   //insert all into t1 values(1,1) into t1 values(2,2) select 1 from dual;
-  if (get_resolve_params().is_multi_table_insert_) {
+  if (is_from_multi_tab_insert) {
     if (OB_UNLIKELY(all_table_refs_.count() <= 0) ||
         OB_ISNULL(cur_table = all_table_refs_.at(all_table_refs_.count() - 1))) {
       ret = OB_ERR_UNEXPECTED;
@@ -257,8 +259,7 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
   } else if (table_item.is_basic_table()) {
     //check column name in schema checker
     if (OB_FAIL(params_.schema_checker_->check_column_exists(
-                params_.session_info_->get_effective_tenant_id(), table_id, col_name, is_exist,
-                table_item.is_link_table()))) {
+                params_.session_info_->get_effective_tenant_id(), table_id, col_name, is_exist))) {
       LOG_WARN("check column exists failed", K(ret));
     }
   } else if (table_item.is_generated_table() || table_item.is_temp_table()) {
@@ -305,8 +306,7 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
   } else if (table_item.is_fake_cte_table()) {
     // cte table 按照generate的方式来检查列就好了
     if (OB_FAIL(params_.schema_checker_->check_column_exists(
-        params_.session_info_->get_effective_tenant_id(), table_id, col_name, is_exist,
-        table_item.is_link_table()))) {
+        params_.session_info_->get_effective_tenant_id(), table_id, col_name, is_exist))) {
       LOG_WARN("check column exists failed", K(ret));
     }
   } else if (table_item.is_function_table()) {
@@ -317,13 +317,20 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
     } else {
       is_exist = true;
     }
+  } else if (table_item.is_json_table()) {
+    if (OB_FAIL(ObResolverUtils::check_json_table_column_exists(table_item,
+                                                                params_,
+                                                                col_name,
+                                                                is_exist))) {
+      LOG_WARN("failed to check json table column exist", K(ret), K(col_name));
+    }
   } else if (table_item.is_link_table()) {
     const share::schema::ObColumnSchemaV2 *col_schema = NULL;
     ObSqlSchemaGuard *sql_schema_guard = params_.schema_checker_->get_sql_schema_guard();
     if (OB_ISNULL(sql_schema_guard)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("expected dblink schema guard", K(ret));
-    } else if (OB_FAIL(sql_schema_guard->get_column_schema(table_id, col_name, col_schema, table_item.is_link_table()))) {
+    } else if (OB_FAIL(sql_schema_guard->get_column_schema(table_id, col_name, col_schema, true))) {
       LOG_WARN("failed to get col schema");
     } else if (OB_NOT_NULL(col_schema)) {
       is_exist = true;
@@ -533,7 +540,8 @@ int ObColumnNamespaceChecker::check_rowscn_table_column_namespace(
 }
 
 int ObColumnNamespaceChecker::check_rowid_table_column_namespace(const ObQualifiedName &q_name,
-                                                                 const TableItem *&table_item)
+                                                                 const TableItem *&table_item,
+                                                                 bool is_from_multi_tab_insert/*default false*/)
 {
   int ret = OB_SUCCESS;
   table_item = nullptr;
@@ -541,7 +549,7 @@ int ObColumnNamespaceChecker::check_rowid_table_column_namespace(const ObQualifi
   bool is_match = false;
   //for multi table insert need extra check, because rowid must be come from generate table and the
   //generate table must be the last one in all_table_refs_.
-  if (get_resolve_params().is_multi_table_insert_) {
+  if (is_from_multi_tab_insert) {
     if (OB_UNLIKELY(all_table_refs_.count() <= 1) ||
         OB_ISNULL(cur_table = all_table_refs_.at(all_table_refs_.count() - 1)) ||
         OB_UNLIKELY(!cur_table->is_generated_table())) {
@@ -556,25 +564,12 @@ int ObColumnNamespaceChecker::check_rowid_table_column_namespace(const ObQualifi
         && (cur_table = table_item_iter.get_next_table_item()) != nullptr) {
       if (!q_name.tbl_name_.empty()) {
         if (cur_table->is_joined_table()) {
-          const JoinedTable *joined_table = reinterpret_cast<const JoinedTable*>(cur_table);
-          if (OB_ISNULL(joined_table->left_table_) || OB_ISNULL(joined_table->right_table_)) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("left or right table of joined table is NULL", K(ret), 
-                KP(joined_table->left_table_), KP(joined_table->right_table_));
-          } else if (OB_FAIL(ObResolverUtils::name_case_cmp(params_.session_info_, q_name.tbl_name_,
-                                                            joined_table->left_table_->get_object_name(),
-                                                            OB_TABLE_NAME_CLASS, is_match))) {
-            LOG_WARN("table name case compare failed", K(ret),
-                K(q_name.tbl_name_), K(joined_table->left_table_->get_object_name()));
-          } else if (is_match) {
-            table_item = joined_table->left_table_;
-          } else if (OB_FAIL(ObResolverUtils::name_case_cmp(params_.session_info_, q_name.tbl_name_,
-                                                            joined_table->right_table_->get_object_name(),
-                                                            OB_TABLE_NAME_CLASS, is_match))) {
-            LOG_WARN("table name case compare failed", K(ret),
-                K(q_name.tbl_name_), K(joined_table->right_table_->get_object_name()));
-          } else if (is_match) {
-            table_item = joined_table->right_table_;
+          if (OB_FAIL(check_rowid_existence_in_joined_table(params_.session_info_,
+                                                            q_name.tbl_name_,
+                                                            reinterpret_cast<const JoinedTable*>(cur_table),
+                                                            is_match,
+                                                            table_item))) {
+            LOG_WARN("failed to check rowid existence in joined table", K(ret));
           }
         } else if (OB_FAIL(ObResolverUtils::name_case_cmp(params_.session_info_,
                                                           q_name.tbl_name_,
@@ -593,6 +588,64 @@ int ObColumnNamespaceChecker::check_rowid_table_column_namespace(const ObQualifi
         LOG_WARN("column in all tables is ambiguous", K(ret), K(q_name));
       }
     }
+  }
+  return ret;
+}
+
+int ObColumnNamespaceChecker::check_rowid_existence_in_joined_table(const ObSQLSessionInfo *session_info,
+                                                                    const ObString &tbl_name,
+                                                                    const JoinedTable *joined_table,
+                                                                    bool &found_it,
+                                                                    const TableItem *&table_item)
+{
+  int ret = OB_SUCCESS;
+  if (found_it) {
+    //do nothing
+  } else if (OB_ISNULL(joined_table)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret), K(joined_table));
+  } else if (OB_ISNULL(joined_table->left_table_) || OB_ISNULL(joined_table->right_table_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("left or right table of joined table is NULL", K(ret), KP(joined_table->left_table_),
+                                                            KP(joined_table->right_table_));
+  } else if (!joined_table->left_table_->is_joined_table() &&
+             OB_FAIL(ObResolverUtils::name_case_cmp(session_info,
+                                                    tbl_name,
+                                                    joined_table->left_table_->get_object_name(),
+                                                    OB_TABLE_NAME_CLASS,
+                                                    found_it))) {
+    LOG_WARN("table name case compare failed", K(ret), K(tbl_name),
+                                               K(joined_table->left_table_->get_object_name()));
+  } else if (found_it) {
+    table_item = joined_table->left_table_;
+  } else if (joined_table->left_table_->is_joined_table() &&
+             OB_FAIL(SMART_CALL(check_rowid_existence_in_joined_table(session_info,
+                                                                      tbl_name,
+                                                                      reinterpret_cast<const JoinedTable*>(joined_table->left_table_),
+                                                                      found_it,
+                                                                      table_item)))) {
+    LOG_WARN("failed to check rowid existence in joined table", K(ret));
+  } else if (found_it) {
+    //do nothing
+  } else if (!joined_table->right_table_->is_joined_table() &&
+             OB_FAIL(ObResolverUtils::name_case_cmp(session_info,
+                                                    tbl_name,
+                                                    joined_table->right_table_->get_object_name(),
+                                                    OB_TABLE_NAME_CLASS,
+                                                    found_it))) {
+    LOG_WARN("table name case compare failed", K(ret), K(tbl_name),
+                                               K(joined_table->right_table_->get_object_name()));
+  } else if (found_it) {
+    table_item = joined_table->right_table_;
+  } else if (joined_table->right_table_->is_joined_table() &&
+             OB_FAIL(SMART_CALL(check_rowid_existence_in_joined_table(session_info,
+                                                                      tbl_name,
+                                                                      reinterpret_cast<const JoinedTable*>(joined_table->right_table_),
+                                                                      found_it,
+                                                                      table_item)))) {
+    LOG_WARN("failed to check rowid existence in joined table", K(ret));
+  } else if (found_it) {
+    //do nothing
   }
   return ret;
 }

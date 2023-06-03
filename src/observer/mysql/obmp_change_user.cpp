@@ -12,6 +12,7 @@
 
 #define USING_LOG_PREFIX SERVER
 #include "observer/mysql/obmp_change_user.h"
+#include "observer/mysql/obmp_utils.h"
 #include "lib/string/ob_sql_string.h"
 #include "rpc/obmysql/ob_mysql_util.h"
 #include "rpc/obmysql/packet/ompk_ok.h"
@@ -200,13 +201,20 @@ int ObMPChangeUser::process()
   int ret = OB_SUCCESS;
   ObSQLSessionInfo *session = NULL;
   bool is_proxy_mod = get_conn()->is_proxy_;
-  bool need_disconnect = false;
+  bool need_disconnect = true;
+  bool need_response_error = true;
+  const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
   if (OB_FAIL(get_session(session))) {
     LOG_ERROR("get session  fail", K(ret));
   } else if (OB_ISNULL(session)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("fail to get session info", K(ret), K(session));
+  } else if (FALSE_IT(session->set_txn_free_route(pkt.txn_free_route()))) {
+  } else if (OB_FAIL(process_extra_info(*session, pkt, need_response_error))) {
+    LOG_WARN("fail get process extra info", K(ret));
+  } else if (FALSE_IT(session->post_sync_session_info())) {
   } else {
+    need_disconnect = false;
     ObSQLSessionInfo::LockGuard lock_guard(session->get_query_lock());
     session->update_last_active_time();
     if (OB_FAIL(ObSqlTransControl::rollback_trans(session, need_disconnect))) {
@@ -241,7 +249,7 @@ int ObMPChangeUser::process()
     if (OB_FAIL(send_ok_packet(*session, ok_param))) {
       OB_LOG(WARN, "response ok packet fail", K(ret));
     }
-  } else {
+  } else if (need_response_error) {
     if (OB_FAIL(send_error_packet(ret, NULL))) {
       OB_LOG(WARN,"response fail packet fail", K(ret));
     }
@@ -297,11 +305,9 @@ int ObMPChangeUser::load_privilege_info(ObSQLSessionInfo *session)
     SSL *ssl_st = SQL_REQ_OP.get_sql_ssl_st(req_);
 
     share::schema::ObSessionPrivInfo session_priv;
-    if (session->has_got_conn_res()) {
-      // disconnect previous user connection first.
-      if (OB_FAIL(session->on_user_disconnect())) {
-        LOG_WARN("user disconnect failed", K(ret));
-      }
+    // disconnect previous user connection first.
+    if (OB_FAIL(session->on_user_disconnect())) {
+      LOG_WARN("user disconnect failed", K(ret));
     }
     const ObUserInfo *user_info = NULL;
     if (OB_FAIL(ret)) {

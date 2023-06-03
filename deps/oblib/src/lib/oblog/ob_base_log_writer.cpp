@@ -26,6 +26,8 @@
 #include "lib/oblog/ob_log_print_kv.h"
 #include "lib/worker.h"
 #include "lib/thread/ob_thread_name.h"
+#include "lib/thread/thread.h"
+#include "lib/thread/protected_stack_allocator.h"
 
 using namespace oceanbase::lib;
 
@@ -56,6 +58,7 @@ int ObBaseLogWriter::init(
     const uint64_t tenant_id)
 {
   int ret = OB_SUCCESS;
+  ObMemAttr attr(tenant_id, "BaseLogWriter");
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_STDERR("The ObBaseLogWriter has been inited.\n");
@@ -67,10 +70,10 @@ int ObBaseLogWriter::init(
     LOG_STDERR("Fail to allocate memory, max_buffer_item_cnt=%lu.\n", log_cfg.max_buffer_item_cnt_);
   } else if (0 != pthread_mutex_init(&thread_mutex_, NULL)) {
     ret = OB_ERR_SYS;
-  } else if (OB_ISNULL(log_write_cond_ = OB_NEW(SimpleCond, "BaseLogWriter"))) {
+  } else if (OB_ISNULL(log_write_cond_ = OB_NEW(SimpleCond, attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_STDERR("Fail to allocate memory, max_buffer_item_cnt=%lu.\n", log_cfg.max_buffer_item_cnt_);
-  } else if (OB_ISNULL(log_flush_cond_ = OB_NEW(SimpleCond, "BaseLogWriter"))) {
+  } else if (OB_ISNULL(log_flush_cond_ = OB_NEW(SimpleCond, attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_STDERR("Fail to allocate memory, max_buffer_item_cnt=%lu.\n", log_cfg.max_buffer_item_cnt_);
   } else {
@@ -79,14 +82,7 @@ int ObBaseLogWriter::init(
     log_cfg_ = log_cfg;
     max_buffer_item_cnt_ = log_cfg.max_buffer_item_cnt_;
     memset((void*) log_items_, 0, sizeof(ObIBaseLogItem*) * max_buffer_item_cnt_);
-    if (STRLEN(thread_name) > MAX_THREAD_NAME_LEN) {
-      ret = OB_SIZE_OVERFLOW;
-      LOG_STDERR("Size of thread_name exceeds the limit, thread_name_size=%lu.\n", sizeof(thread_name));
-    } else if (tenant_id == 0) {
-      MEMCPY(thread_name_, thread_name, STRLEN(thread_name));
-    } else {
-      snprintf(thread_name_, PR_SET_NAME, "T%lu_%s", tenant_id, thread_name);
-    }
+    thread_name_ = thread_name;
     if (OB_SUCC(ret)) {
       is_inited_ = true;
       LOG_STDOUT("successfully init ObBaseLogWriter\n");
@@ -252,9 +248,10 @@ void *ObBaseLogWriter::flush_log_thread(void *arg)
   if (OB_ISNULL(arg)) {
     LOG_STDERR("invalid argument, arg = %p\n", arg);
   } else {
+    ObStackHeaderGuard stack_header_guard;
     pthread_cleanup_push(cleanup_log_thread, arg);
     ObBaseLogWriter *log_writer = reinterpret_cast<ObBaseLogWriter*> (arg);
-    prctl(PR_SET_NAME, log_writer->thread_name_, 0, 0, 0);
+    lib::set_thread_name(log_writer->thread_name_);
     log_writer->flush_log();
     pthread_cleanup_pop(1);
   }
@@ -264,6 +261,7 @@ void *ObBaseLogWriter::flush_log_thread(void *arg)
 void ObBaseLogWriter::flush_log()
 {
   while (!has_stopped_) {
+    IGNORE_RETURN lib::Thread::update_loop_ts(ObTimeUtility::fast_current_time());
     pthread_mutex_lock(&thread_mutex_);
     // 每个线程执行16次再重新抢占, 对cpu cache hit有利
     for (int64_t i = 0; i < 16; i++) {

@@ -118,13 +118,7 @@ protected:
   int check_all_sqc(common::ObIArray<ObDfo *> &active_dfos,
       int64_t &time_offset,
       bool &all_dfo_terminate,
-      int64_t &cur_timestamp,
-      bool &server_all_alive);
-
-  int calc_admited_worker_count(int64_t px_expected,
-                                  int64_t query_expected,
-                                  int64_t query_admited,
-                                  int64_t &admited_worker_count);
+      int64_t &cur_timestamp);
 
   int register_interrupt();
   void clear_interrupt();
@@ -136,6 +130,9 @@ protected:
   int init_batch_info();
   int batch_rescan();
   int erase_dtl_interm_result();
+  // send rpc to clean dtl interm result of not scheduled dfos.
+  virtual void clean_dfos_dtl_interm_result() = 0;
+  int try_clear_p2p_dh_info();
 protected:
   common::ObArenaAllocator allocator_;
   common::ObArenaAllocator row_allocator_;
@@ -156,10 +153,13 @@ protected:
     * */
   uint64_t px_sequence_id_;
   ObInterruptibleTaskID interrupt_id_;
+  bool register_detectable_id_;
+  ObDetectableId detectable_id_;
   int px_dop_;
   int64_t time_recorder_;
   int64_t batch_rescan_param_version_;
   ObExtraServerAliveCheck server_alive_checker_;
+  int64_t last_px_batch_rescan_size_;
 };
 
 class ObPxCoordSpec : public ObPxReceiveSpec

@@ -23,6 +23,7 @@
 #include "storage/tx/ob_trans_part_ctx.h"
 #include "storage/tx/ob_tx_data_functor.h"
 #include "storage/tx_table/ob_tx_table.h"
+#include "storage/ob_tenant_tablet_stat_mgr.h"
 
 namespace oceanbase
 {
@@ -124,7 +125,7 @@ void ObMultiVersionValueIterator::print_cur_status()
 {
   ObMvccTransNode *node = value_->get_list_head();
   while (OB_NOT_NULL(node)) {
-    TRANS_LOG(ERROR, "print_cur_status", KPC(node));
+    TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "print_cur_status", KPC(node));
     node = node->prev_;
   }
 }
@@ -256,14 +257,14 @@ int ObMultiVersionValueIterator::get_state_of_curr_trans_node(
   return ret;
 }
 
-int ObMultiVersionValueIterator::get_trans_status(
-    const transaction::ObTransID &trans_id,
-    int64_t &state,
-    uint64_t &cluster_version)
+int ObMultiVersionValueIterator::get_trans_status(const transaction::ObTransID &trans_id,
+                                                  int64_t &state,
+                                                  uint64_t &cluster_version)
 {
   UNUSED(cluster_version);
   int ret = OB_SUCCESS;
   SCN trans_version = SCN::max_scn();
+<<<<<<< HEAD
   ObTxTable *tx_table = ctx_->get_tx_table_guard().get_tx_table();
   int64_t read_epoch = ctx_->get_tx_table_guard().epoch();
   if (OB_ISNULL(tx_table)) {
@@ -274,6 +275,10 @@ int ObMultiVersionValueIterator::get_trans_status(
                                                         read_epoch,
                                                         state,
                                                         trans_version))) {
+=======
+
+  if (OB_FAIL(ctx_->get_tx_table_guard().get_tx_state_with_scn(trans_id, merge_scn_, state, trans_version))) {
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
     STORAGE_LOG(WARN, "check_with_tx_data fail.", K(trans_id));
   }
 
@@ -477,7 +482,10 @@ ObMultiVersionRowIterator::ObMultiVersionRowIterator()
       version_range_(),
       value_iter_(),
       query_engine_(NULL),
-      query_engine_iter_(NULL)
+      query_engine_iter_(NULL),
+      insert_row_count_(0),
+      update_row_count_(0),
+      delete_row_count_(0)
 {
 }
 
@@ -577,24 +585,32 @@ int ObMultiVersionRowIterator::try_cleanout_mvcc_row_(ObMvccRow *value)
   return ret;
 }
 
-int ObMultiVersionRowIterator::try_cleanout_tx_node_(ObMvccRow *value,
-                                                     ObMvccTransNode *tnode)
+int ObMultiVersionRowIterator::try_cleanout_tx_node_(ObMvccRow *value, ObMvccTransNode *tnode)
 {
   int ret = OB_SUCCESS;
-  ObTxTable *tx_table = ctx_->get_tx_table_guard().get_tx_table();
-  int64_t read_epoch = ctx_->get_tx_table_guard().epoch();
   const ObTransID data_tx_id = tnode->tx_id_;
-  if (!(tnode->is_committed() || tnode->is_aborted())
-      && tnode->is_delayed_cleanout()
-      && OB_FAIL(tx_table->cleanout_tx_node(data_tx_id,
-                                            read_epoch,
-                                            *value,
-                                            *tnode,
-                                            false     /*need_row_latch*/))) {
+  if (!(tnode->is_committed() || tnode->is_aborted()) && tnode->is_delayed_cleanout() &&
+      OB_FAIL(ctx_->get_tx_table_guard().cleanout_tx_node(data_tx_id, *value, *tnode, false /*need_row_latch*/))) {
     TRANS_LOG(WARN, "cleanout tx state failed", K(ret), K(*value), K(*tnode));
-  }
+  } else if (!tnode->is_aborted()) {
+    const blocksstable::ObDmlFlag dml_flag = tnode->get_dml_flag();
 
+    if (blocksstable::ObDmlFlag::DF_INSERT == dml_flag) {
+      ++insert_row_count_;
+    } else if (blocksstable::ObDmlFlag::DF_UPDATE == dml_flag) {
+      ++update_row_count_;
+    } else if (blocksstable::ObDmlFlag::DF_DELETE == dml_flag) {
+      ++delete_row_count_;
+    }
+  }
   return ret;
+}
+
+void ObMultiVersionRowIterator::get_tnode_dml_stat(storage::ObTransNodeDMLStat &stat) const
+{
+  stat.insert_row_count_ += insert_row_count_;
+  stat.update_row_count_ += update_row_count_;
+  stat.delete_row_count_ += delete_row_count_;
 }
 
 void ObMultiVersionRowIterator::reset()
@@ -609,6 +625,10 @@ void ObMultiVersionRowIterator::reset()
     query_engine_iter_ = NULL;
   }
   query_engine_ = NULL;
+
+  insert_row_count_ = 0;
+  update_row_count_ = 0;
+  delete_row_count_ = 0;
 }
 
 

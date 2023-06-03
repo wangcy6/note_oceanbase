@@ -15,7 +15,6 @@
 #include "storage/tx/ob_trans_service.h"
 #include "storage/tx/ob_ts_worker.h"
 #include "storage/tx_storage/ob_ls_freeze_thread.h"
-#include "storage/tx_storage/ob_ls_cb_queue_thread.h"
 #include "rootserver/ob_index_builder.h"
 #include "observer/ob_srv_deliver.h"
 #include "logservice/palf/log_io_task_cb_thread_pool.h"
@@ -34,7 +33,7 @@ void ob_init_create_func()
 {
   #define TG_DEF(id, name, desc, scope, type, args...)                 \
     lib::create_funcs_[lib::TGDefIDs::id] = []() {                     \
-      auto ret = OB_NEW(TGCLSMap<TGType::type>::CLS, "tg", args);      \
+      auto ret = OB_NEW(TGCLSMap<TGType::type>::CLS, SET_USE_500("tg"), args); \
       ret->attr_ = {#name, desc, TGScope::scope, TGType::type};        \
       return ret;                                                      \
     };

@@ -149,7 +149,7 @@ void ObSSTableMergeInfoIterator::reset()
  */
 ObTenantSSTableMergeInfoMgr::ObTenantSSTableMergeInfoMgr()
   : is_inited_(false),
-    allocator_(ObModIds::OB_SSTABLE_MERGE_INFO, OB_MALLOC_BIG_BLOCK_SIZE),
+    allocator_(SET_USE_500(ObModIds::OB_SSTABLE_MERGE_INFO), OB_MALLOC_BIG_BLOCK_SIZE),
     major_merge_infos_(allocator_),
     minor_merge_infos_(allocator_)
 {
@@ -205,6 +205,7 @@ void ObTenantSSTableMergeInfoMgr::destroy()
   minor_merge_infos_.destroy();
   allocator_.reset();
   is_inited_ = false;
+  STORAGE_LOG(INFO, "ObTenantSSTableMergeInfoMgr is destroyed");
 }
 
 int ObTenantSSTableMergeInfoMgr::add_sstable_merge_info(ObSSTableMergeInfo &merge_info)
@@ -217,7 +218,7 @@ int ObTenantSSTableMergeInfoMgr::add_sstable_merge_info(ObSSTableMergeInfo &merg
   } else if (OB_UNLIKELY(!merge_info.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "merge info is invalid", K(ret), K(merge_info));
-  } else if (merge_info.is_major_merge()) {
+  } else if (merge_info.is_major_merge_type()) {
     if (OB_FAIL(major_merge_infos_.add(merge_info))) {
       STORAGE_LOG(WARN, "Fail to add into major merge info manager", K(ret), K(merge_info));
     }

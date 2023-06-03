@@ -16,6 +16,8 @@
 #include "rpc/obmysql/ob_mysql_util.h"
 #include "lib/hash/ob_array_index_hash_set.h"
 #include "lib/container/ob_array_wrap.h"
+#include "lib/json_type/ob_json_tree.h"
+#include "share/rc/ob_tenant_base.h"
 
 namespace oceanbase
 {
@@ -552,7 +554,7 @@ public:
   int deserialize(const char* buf, const int64_t len, int64_t &pos);
   void print() const;
 
-  TO_STRING_KV(K_(type));
+  TO_STRING_KV(K_(type), K_(id), K_(is_null));
 
 protected:
   ObPLType type_;
@@ -702,7 +704,7 @@ public:
   inline int64_t get_count() const { return count_; }
   inline void set_count(int64_t count) { count_ = count; }
   inline int64_t get_column_count() const { return element_.field_cnt_; }
-  inline void set_column_count(int64_t count) { element_.field_cnt_ = count; }
+  inline void set_column_count(int64_t count) { element_.field_cnt_ = static_cast<int32_t>(count); }
   int64_t get_first();
   inline void set_first(int64_t first) { first_ = first; }
   int64_t get_last();

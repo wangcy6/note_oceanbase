@@ -25,6 +25,7 @@
 #include "sql/plan_cache/ob_plan_cache_util.h"
 #include "sql/plan_cache/ob_plan_cache_struct.h"
 #include "objit/common/ob_item_type.h"
+#include "sql/plan_cache/ob_cache_object_factory.h"
 
 namespace oceanbase
 {
@@ -126,11 +127,12 @@ inline const char *get_scope_name(const ObStmtScope &scope)
 
 //don't use me in other place
 enum { CSTRING_BUFFER_LEN = 1024 };
+
 inline char *get_sql_string_buffer()
 {
   char *ret = nullptr;
   const int64_t BUF_COUNT = 8;
-  char *buf = reinterpret_cast<char *>(GET_TSI(char[BUF_COUNT*CSTRING_BUFFER_LEN]));
+  char *buf = reinterpret_cast<char *>(GET_TSI(ByteBuf<BUF_COUNT*CSTRING_BUFFER_LEN>));
   RLOCAL_INLINE(uint32_t, cur_buf_idx);
   if (OB_LIKELY(buf != nullptr)) {
     char (&BUFFERS)[BUF_COUNT][CSTRING_BUFFER_LEN]
@@ -326,12 +328,12 @@ struct ObResolverParams
        have_same_table_name_(false),
        is_default_param_(false),
        is_batch_stmt_(false),
+       batch_stmt_num_(0),
        new_gen_did_(common::OB_INVALID_ID - 1),
        new_gen_cid_(common::OB_MAX_TMP_COLUMN_ID),
        new_gen_qid_(1),
        new_cte_tid_(common::OB_MIN_CTE_TABLE_ID + 1),
        new_gen_wid_(1),
-       is_multi_table_insert_(false),
        is_resolve_table_function_expr_(false),
        has_cte_param_list_(false),
        has_recursive_word_(false),
@@ -341,7 +343,13 @@ struct ObResolverParams
        hidden_column_scope_(T_NONE_SCOPE),
        outline_parse_result_(NULL),
        is_execute_call_stmt_(false),
+<<<<<<< HEAD
        is_by_ordinal_(false)
+=======
+       enable_res_map_(false),
+       need_check_col_dup_(true),
+       is_specified_col_name_(false)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   {}
   bool is_force_trace_log() { return force_trace_log_; }
 
@@ -386,6 +394,7 @@ public:
   bool have_same_table_name_;
   bool is_default_param_;
   bool is_batch_stmt_;
+  int64_t batch_stmt_num_;
 private:
   uint64_t new_gen_did_;
   uint64_t new_gen_cid_;
@@ -394,7 +403,6 @@ private:
   int64_t new_gen_wid_;   // when number
   friend class ObStmtResolver;
 public:
-  bool is_multi_table_insert_;           // used to mark is multi table insert
   bool is_resolve_table_function_expr_;  // used to mark resolve table function expr.
   bool has_cte_param_list_;
   bool has_recursive_word_;
@@ -404,7 +412,14 @@ public:
   ObStmtScope hidden_column_scope_; // record scope for first hidden column which need check hidden_column_visable in opt_param hint
   ParseResult *outline_parse_result_;
   bool is_execute_call_stmt_;
+<<<<<<< HEAD
   bool is_by_ordinal_;
+=======
+  bool enable_res_map_;
+  bool need_check_col_dup_;
+  bool is_specified_col_name_;//mark if specify the column name in create view or create table as..
+  bool is_in_sys_view_;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 };
 } // end namespace sql
 } // end namespace oceanbase

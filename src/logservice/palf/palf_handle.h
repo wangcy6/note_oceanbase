@@ -63,19 +63,8 @@ public:
   //    return OB_SUCCESS if success
   //    else return other errno
   int set_initial_member_list(const common::ObMemberList &member_list,
-                              const int64_t paxos_replica_num);
-  // @brief set the initial member list of paxos group which contains
-  // arbitration replica after creating palf successfully,
-  // it can only be called once
-  // @param[in] ObMemberList, the initial member list, do not include arbitration replica
-  // @param[in] ObMember, the arbitration replica
-  // @param[in] int64_t, the paxos relica num(including arbitration replica)
-  // @retval
-  //    return OB_SUCCESS if success
-  //    else return other errno
-  int set_initial_member_list(const common::ObMemberList &member_list,
-                              const common::ObMember &arb_replica,
-                              const int64_t paxos_replica_num);
+                              const int64_t paxos_replica_num,
+                              const common::GlobalLearnerList &learner_list);
   int set_region(const common::ObRegion &region);
   int set_paxos_member_region_map(const common::ObArrayHashMap<common::ObAddr, common::ObRegion> &region_map);
   //================ 文件访问相关接口 =======================
@@ -134,7 +123,11 @@ public:
   // - OB_ENTRY_NOT_EXIST: there is no log in disk
   // - OB_ERR_OUT_OF_LOWER_BOUND: scn is too small, log files may have been recycled
   // - others: bug
+<<<<<<< HEAD
   virtual int locate_by_scn_coarsely(const share::SCN &scn, LSN &result_lsn);
+=======
+  int locate_by_scn_coarsely(const share::SCN &scn, LSN &result_lsn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // @desc: query coarse scn by lsn, that means there is a log in disk,
   // its lsn and scn are result_lsn and result_scn, and result_lsn <= lsn.
@@ -145,21 +138,32 @@ public:
   // - OB_INVALID_ARGUMENT
   // - OB_ERR_OUT_OF_LOWER_BOUND: lsn is too small, log files may have been recycled
   // - others: bug
+<<<<<<< HEAD
   virtual int locate_by_lsn_coarsely(const LSN &lsn, share::SCN &result_scn);
+=======
+  int locate_by_lsn_coarsely(const LSN &lsn, share::SCN &result_scn);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // 开启日志同步
-  virtual int enable_sync();
+  int enable_sync();
   // 关闭日志同步
-  virtual int disable_sync();
-  virtual bool is_sync_enabled() const;
+  int disable_sync();
+  bool is_sync_enabled() const;
   // 推进文件的可回收点
-  virtual int advance_base_lsn(const LSN &lsn);
+  int advance_base_lsn(const LSN &lsn);
   // 迁移/rebuild场景推进base_lsn
-  virtual int advance_base_info(const palf::PalfBaseInfo &palf_base_info, const bool is_rebuild);
+  int advance_base_info(const palf::PalfBaseInfo &palf_base_info, const bool is_rebuild);
+  int flashback(const int64_t mode_version, const share::SCN &flashback_scn, const int64_t timeout_us);
 
   // 返回文件中可读的最早日志的位置信息
   int get_begin_lsn(LSN &lsn) const;
   int get_begin_scn(share::SCN &scn) const;
+<<<<<<< HEAD
+=======
+
+  // return the max recyclable point of Palf
+  int get_base_lsn(LSN &lsn) const;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   // PalfBaseInfo include the 'base_lsn' and the 'prev_log_info' of sliding window.
   // @param[in] const LSN&, base_lsn of ls.
@@ -169,7 +173,11 @@ public:
 
   // 返回最后一条已确认日志的下一位置
   // 在没有新的写入的场景下，返回的end_lsn不可读
+<<<<<<< HEAD
   virtual int get_end_lsn(LSN &lsn) const;
+=======
+  int get_end_lsn(LSN &lsn) const;
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int get_end_scn(share::SCN &scn) const;
   int get_max_lsn(LSN &lsn) const;
   int get_max_scn(share::SCN &scn) const;
@@ -185,9 +193,14 @@ public:
  	//
  	// @return :TODO
   int get_role(common::ObRole &role, int64_t &proposal_id, bool &is_pending_state) const;
+  int get_palf_id(int64_t &palf_id) const;
 
   int get_global_learner_list(common::GlobalLearnerList &learner_list) const;
   int get_paxos_member_list(common::ObMemberList &member_list, int64_t &paxos_replica_num) const;
+  int get_paxos_member_list_and_learner_list(common::ObMemberList &member_list,
+                                             int64_t &paxos_replica_num,
+                                             GlobalLearnerList &learner_list) const;
+  int get_election_leader(common::ObAddr &addr) const;
 
   // @brief: a special config change interface, change replica number of paxos group
   // @param[in] common::ObMemberList: current memberlist, for pre-check
@@ -204,7 +217,14 @@ public:
                          const int64_t curr_replica_num,
                          const int64_t new_replica_num,
                          const int64_t timeout_us);
+<<<<<<< HEAD
+=======
+  // @brief: force set self as single member
+  int force_set_as_single_replica();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
+  int get_ack_info_array(LogMemberAckInfoList &ack_info_array,
+                         common::GlobalLearnerList &degraded_list) const;
   // @brief, add a member to paxos group, can be called only in leader
   // @param[in] common::ObMember &member: member which will be added
   // @param[in] const int64_t new_replica_num: replica number of paxos group after adding 'member'
@@ -271,6 +291,11 @@ public:
 
   // @brief: switch a learner(read only replica) to acceptor(full replica) in this clsuter
   // @param[in] const common::ObMember &learner: learner will be switched to acceptor
+<<<<<<< HEAD
+=======
+  // @param[in] const int64_t new_replica_num: replica number of paxos group after switching
+  //            learner to acceptor (similar to add_member)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   // @param[in] const int64_t timeout_us
   // @return
   // - OB_SUCCESS
@@ -278,10 +303,19 @@ public:
   // - OB_TIMEOUT: switch_learner_to_acceptor timeout
   // - OB_NOT_MASTER: not leader or rolechange during membership changing
   int switch_learner_to_acceptor(const common::ObMember &learner,
+<<<<<<< HEAD
+=======
+                                 const int64_t new_replica_num,
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
                                  const int64_t timeout_us);
 
   // @brief: switch an acceptor(full replica) to learner(read only replica) in this clsuter
   // @param[in] const common::ObMember &member: acceptor will be switched to learner
+<<<<<<< HEAD
+=======
+  // @param[in] const int64_t new_replica_num: replica number of paxos group after switching
+  //            acceptor to learner (similar to remove_member)
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   // @param[in] const int64_t timeout_us
   // @return
   // - OB_SUCCESS
@@ -289,6 +323,7 @@ public:
   // - OB_TIMEOUT: switch_acceptor_to_learner timeout
   // - OB_NOT_MASTER: not leader or rolechange during membership changing
   int switch_acceptor_to_learner(const common::ObMember &member,
+<<<<<<< HEAD
                                  const int64_t timeout_us);
 
   // @brief, add an arbitration member to paxos group
@@ -350,6 +385,10 @@ public:
   // - OB_TIMEOUT: timeout
   // - OB_NOT_MASTER: not leader
   int upgrade_learner_to_acceptor(const common::ObMemberList &learner_list, const int64_t timeout_us);
+=======
+                                 const int64_t new_replica_num,
+                                 const int64_t timeout_us);
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
   int revoke_leader(const int64_t proposal_id);
   int change_leader_to(const common::ObAddr &dst_addr);
   // @brief: change AccessMode of palf.
@@ -380,11 +419,17 @@ public:
   //   OB_SUCCESS
   int get_access_mode(int64_t &mode_version, AccessMode &access_mode) const;
   int get_access_mode(AccessMode &access_mode) const;
+
+  // @brief: check whether the palf instance is allowed to vote for logs
+  // By default, return true;
+  // After calling disable_vote(), return false.
+  bool is_vote_enabled() const;
   // @brief: store a persistent flag which means this paxos replica
   // can not reply ack when receiving logs.
+  // @param[in] need_check_log_missing: for rebuildinng caused by log missing, need check whether log
   // By default, paxos replica can reply ack.
   // @return:
-  int disable_vote();
+  int disable_vote(const bool need_check_log_missing);
   // @brief: store a persistent flag which means this paxos replica
   // can reply ack when receiving logs.
   // By default, paxos replica can reply ack.
@@ -430,7 +475,7 @@ public:
   int diagnose(PalfDiagnoseInfo &diagnose_info) const;
   TO_STRING_KV(KP(palf_handle_impl_), KP(rc_cb_), KP(fs_cb_));
 private:
-  palf::PalfHandleImpl *palf_handle_impl_;
+  palf::IPalfHandleImpl *palf_handle_impl_;
   palf::PalfRoleChangeCbNode *rc_cb_;
   palf::PalfFSCbNode *fs_cb_;
   palf::PalfRebuildCbNode *rebuild_cb_;

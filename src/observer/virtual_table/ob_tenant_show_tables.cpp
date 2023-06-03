@@ -184,8 +184,10 @@ int ObTenantShowTables::inner_get_next_row()
               if ((!table_schema->is_user_table()
                   && !table_schema->is_sys_table()
                   && !table_schema->is_view_table()
+                  && !table_schema->is_external_table()
                   && !is_information_schema_database_id(table_schema->get_database_id())
                   && !is_mysql_database_id(table_schema->get_database_id()))
+                  || table_schema->is_ctas_tmp_table()
                   || table_schema->is_user_hidden_table()) {
                 is_allow = false;
               } else {

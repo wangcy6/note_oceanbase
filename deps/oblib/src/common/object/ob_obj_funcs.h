@@ -15,6 +15,7 @@
 
 #include "lib/timezone/ob_timezone_info.h"
 #include "lib/timezone/ob_time_convert.h"
+#include "lib/json_type/ob_json_parse.h"
 #include "lib/json_type/ob_json_base.h"
 #include "lib/json_type/ob_json_bin.h"
 #include "common/object/ob_object.h"
@@ -77,7 +78,7 @@ template <ObObjType type>
 template <ObObjType type>
     inline void obj_batch_checksum(const ObObj &obj, ObBatchChecksum &bc);
 template <ObObjType type>
-    inline uint64_t obj_murmurhash(const ObObj &obj, const uint64_t hash);
+    inline int obj_murmurhash(const ObObj &obj, const uint64_t hash, uint64_t &res);
 template <ObObjType type>
     inline int obj_val_serialize(const ObObj &obj, char* buf, const int64_t buf_len, int64_t& pos);
 template <ObObjType type>
@@ -96,7 +97,11 @@ template <>
   UNUSED(obj);
   UNUSED(params);
   int ret = OB_SUCCESS;
-  ret = databuff_printf(buffer, length, pos, "NULL");
+  if (params.print_null_string_value_) {
+    ret = databuff_printf(buffer, length, pos, "''");
+  } else {
+    ret = databuff_printf(buffer, length, pos, "NULL");
+  }
   return ret;
 }
 template <>
@@ -157,19 +162,20 @@ template <>
   bc.fill(&type, sizeof(type));
 }
 template <>
-    inline uint64_t obj_murmurhash<ObNullType>(const ObObj &obj, const uint64_t hash)
+    inline int obj_murmurhash<ObNullType>(const ObObj &obj, const uint64_t hash, uint64_t &res)
 {
   int type = obj.get_type();
-  return murmurhash(&type, sizeof(type), hash);
+  res = murmurhash(&type, sizeof(type), hash);
+  return OB_SUCCESS;
 }
 template <typename T, typename P>
 struct ObjHashCalculator<ObNullType, T, P>
 {
-  static uint64_t calc_hash_value(const P &param, const uint64_t hash) {
+  static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {
     UNUSED(param);
     int type = ObNullType;
-    uint64_t ret = T::hash(&type, sizeof(type), hash);
-    return ret;
+    res = T::hash(&type, sizeof(type), hash);
+    return OB_SUCCESS;
   }
 };
 template <>
@@ -228,20 +234,22 @@ template <>
   }                                                                     \
                                                                         \
   template <>\
-  inline uint64_t obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash) \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
   {                                                                     \
     int type = obj.get_type();                                          \
     uint64_t ret =  murmurhash(&type, sizeof(type), hash);            \
     VTYPE v = obj.get_##TYPE();                                         \
-    return murmurhash(&v, sizeof(obj.get_##TYPE()), ret);   \
+    res = murmurhash(&v, sizeof(obj.get_##TYPE()), ret);   \
+    return OB_SUCCESS;                                                  \
   }                                                                     \
   template <typename T, typename P>                                     \
   struct ObjHashCalculator<OBJTYPE, T, P>                               \
   {                                                                             \
-    static uint64_t calc_hash_value(const P &param, const uint64_t hash) {      \
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {      \
       VTYPE v = param.get_##TYPE();                                     \
       HTYPE v2 = v;                                                     \
-      return T::hash(&v2, sizeof(v2), hash);                            \
+      res = T::hash(&v2, sizeof(v2), hash);                             \
+      return OB_SUCCESS;                                                \
     }                                                                   \
   };                                                                    \
   template <>\
@@ -279,7 +287,7 @@ template <>
   }                                                                     \
                                                                         \
   template <>\
-  inline uint64_t obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash) \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
   {                                                                     \
     int type = obj.get_type();                                          \
     uint64_t ret =  murmurhash(&type, sizeof(type), hash);            \
@@ -288,13 +296,39 @@ template <>
       v = 0.0;                                                        \
     } else if (isnan(v)) {                                            \
       v = NAN;                                                        \
-    }                                                                 \
-    return murmurhash(&v, sizeof(obj.get_##TYPE()), ret);   \
+    } else if (obj.is_fixed_double() && lib::is_mysql_mode()) {       \
+      char buf[OB_CAST_TO_VARCHAR_MAX_LENGTH] = {0};                   \
+      int64_t len = ob_fcvt(v, static_cast<int>(obj.get_scale()), sizeof(buf) - 1, buf, NULL); \
+      res = murmurhash(buf, static_cast<int32_t>(len), ret);            \
+      return OB_SUCCESS;                                              \
+    }                                                       \
+    res = murmurhash(&v, sizeof(obj.get_##TYPE()), ret);   \
+    return OB_SUCCESS;                                              \
   }                                                                     \
+  template <typename T>                                     \
+  struct ObjHashCalculator<OBJTYPE, T, ObObj>                               \
+  {                                                                             \
+    static int calc_hash_value(const ObObj &obj, const uint64_t hash, uint64_t &res) {      \
+      VTYPE v = obj.get_##TYPE();                                     \
+      HTYPE v2 = v;                                                     \
+      if (0.0 == v2) {                                                \
+        v2 = 0.0;                                                     \
+      } else if (isnan(v2)) {                                         \
+        v2 = NAN;                                                     \
+      } else if (obj.is_fixed_double() && lib::is_mysql_mode()) {     \
+        char buf[OB_CAST_TO_VARCHAR_MAX_LENGTH] = {0};                   \
+        int64_t len = ob_fcvt(v2, static_cast<int>(obj.get_scale()), sizeof(buf) - 1, buf, NULL); \
+        res = T::hash(buf, static_cast<int32_t>(len), hash);            \
+        return OB_SUCCESS;                                              \
+      }                                                                 \
+      res = T::hash(&v2, sizeof(v2), hash);                             \
+      return OB_SUCCESS;                                                \
+    }                                                                   \
+  };                                                                    \
   template <typename T, typename P>                                     \
   struct ObjHashCalculator<OBJTYPE, T, P>                               \
   {                                                                             \
-    static uint64_t calc_hash_value(const P &param, const uint64_t hash) {      \
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {      \
       VTYPE v = param.get_##TYPE();                                     \
       HTYPE v2 = v;                                                     \
       if (0.0 == v2) {                                                \
@@ -302,7 +336,8 @@ template <>
       } else if (isnan(v2)) {                                         \
         v2 = NAN;                                                     \
       }                                                               \
-      return T::hash(&v2, sizeof(v2), hash);                            \
+      res = T::hash(&v2, sizeof(v2), hash);                            \
+      return OB_SUCCESS;                                                \
     }                                                                   \
   };                                                                    \
   template <>\
@@ -361,10 +396,10 @@ template <>
     UNUSED(params);                                                    \
     int64_t print_len = 0;\
     if (IS_DOUBLE) {\
-      print_len = ob_gcvt_opt(obj.get_double(), OB_GCVT_ARG_DOUBLE, length - pos , buffer + pos, \
+      print_len = ob_gcvt_opt(obj.get_double(), OB_GCVT_ARG_DOUBLE, static_cast<int32_t>(length - pos) , buffer + pos, \
                               NULL, lib::is_oracle_mode(), TRUE);\
     } else {\
-      print_len = ob_gcvt_opt(obj.get_float(), OB_GCVT_ARG_FLOAT, length - pos, buffer + pos, \
+      print_len = ob_gcvt_opt(obj.get_float(), OB_GCVT_ARG_FLOAT, static_cast<int32_t>(length - pos), buffer + pos, \
                               NULL, lib::is_oracle_mode(), TRUE);\
     }\
     if (OB_UNLIKELY(print_len <=0 || print_len + pos > length)) {\
@@ -376,7 +411,6 @@ template <>
           ret = OB_SIZE_OVERFLOW;\
         } else {\
           buffer[pos++] = (IS_DOUBLE ? 'D' : 'F');\
-          buffer[pos] = '\0';\
         }\
       }\
     }\
@@ -395,10 +429,10 @@ template <>
     } else {                                                                \
       buffer[pos++] = '\'';                                                 \
       if (IS_DOUBLE) {\
-        print_len = ob_gcvt_opt(obj.get_double(), OB_GCVT_ARG_DOUBLE, length - pos , buffer + pos, \
+        print_len = ob_gcvt_opt(obj.get_double(), OB_GCVT_ARG_DOUBLE, static_cast<int32_t>(length - pos), buffer + pos, \
                                 NULL, lib::is_oracle_mode(), TRUE);\
       } else {\
-        print_len = ob_gcvt_opt(obj.get_float(), OB_GCVT_ARG_FLOAT, length - pos, buffer + pos, \
+        print_len = ob_gcvt_opt(obj.get_float(), OB_GCVT_ARG_FLOAT, static_cast<int32_t>(length - pos), buffer + pos, \
                                 NULL, lib::is_oracle_mode(), TRUE);\
       }\
       if (OB_UNLIKELY(print_len <= 0 || print_len + pos > length)) {\
@@ -434,10 +468,10 @@ template <>
     UNUSED(params);                                                    \
     int64_t print_len = 0;\
     if (IS_DOUBLE) {\
-      print_len = ob_gcvt_opt(obj.get_double(), OB_GCVT_ARG_DOUBLE, length - pos , buffer + pos, \
+      print_len = ob_gcvt_opt(obj.get_double(), OB_GCVT_ARG_DOUBLE, static_cast<int32_t>(length - pos), buffer + pos, \
                               NULL, lib::is_oracle_mode(), TRUE);\
     } else {\
-      print_len = ob_gcvt_opt(obj.get_float(), OB_GCVT_ARG_FLOAT, length - pos, buffer + pos, \
+      print_len = ob_gcvt_opt(obj.get_float(), OB_GCVT_ARG_FLOAT, static_cast<int32_t>(length - pos), buffer + pos, \
                               NULL, lib::is_oracle_mode(), TRUE);\
     }\
     if (OB_UNLIKELY(print_len <=0 || print_len + pos > length)) {\
@@ -707,21 +741,23 @@ DEF_NUMERIC_FUNCS(ObSetType, set, uint64_t, "%lu", "'%lu'", uint64_t);
     bc.fill(obj.get_number_digits(), sizeof(uint32_t)*obj.get_number_desc().len_); \
   }                                                                     \
   template <>                                                           \
-  inline uint64_t obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash) \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
   {                                                                     \
     int type = obj.get_type();                                          \
-    uint64_t ret =  murmurhash(&type, sizeof(type), hash);             \
-    ret = murmurhash(&obj.get_number_desc().se_, 1, ret);             \
-    return murmurhash(obj.get_number_digits(), static_cast<int32_t>(sizeof(uint32_t) \
-                                              * obj.get_number_desc().len_), ret); \
+    res =  murmurhash(&type, sizeof(type), hash);                       \
+    res = murmurhash(&obj.get_number_desc().se_, 1, res);               \
+    res = murmurhash(obj.get_number_digits(), static_cast<int32_t>(sizeof(uint32_t) \
+                                              * obj.get_number_desc().len_), res); \
+    return OB_SUCCESS;                                                  \
   }                                                                     \
   template <typename T, typename P>                                     \
   struct ObjHashCalculator<OBJTYPE, T, P>                               \
   {                                                                               \
-    static uint64_t calc_hash_value(const P &param, const uint64_t hash) {        \
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {        \
       uint64_t ret = T::hash(&param.get_number_desc().se_, 1, hash);              \
-      return T::hash(param.get_number_digits(), static_cast<uint64_t>(sizeof(uint32_t)  \
+      res = T::hash(param.get_number_digits(), static_cast<uint64_t>(sizeof(uint32_t)  \
                       * param.get_number_desc().len_), ret);            \
+      return OB_SUCCESS;                                                \
     }                                                                   \
   };                                                                    \
   template <>                                                           \
@@ -785,14 +821,22 @@ DEF_NUMBER_FUNCS(ObNumberFloatType, number_float);
     int ret = common::OB_SUCCESS;                                       \
     static const char *CAST_PREFIX_ORACLE = "TO_DATE('";                \
     static const char *CAST_SUFFIX_ORACLE = "', 'YYYY-MM-DD HH24:MI:SS')"; \
+    static const char *CAST_PREFIX_MYSQL_TIMESTAMP = "TIMESTAMP";        \
+    static const char *CAST_PREFIX_MYSQL_DATETIME = "DATETIME";        \
     static const char *NORMAL_SUFFIX = "'";                             \
     const ObTimeZoneInfo *tz_info = params.tz_info_;                    \
     const char *NORMAL_PREFIX = params.beginning_space_ ? "' " : "'";        \
     ObString str(static_cast<int32_t>(length - pos - 1), 0, buffer + pos + 1);  \
     if (OB_SUCC(ret)) {                                                 \
-      const char *fmt_prefix = params.need_cast_expr_ && lib::is_oracle_mode() ? \
-                                 CAST_PREFIX_ORACLE : NORMAL_PREFIX;    \
-      ret = databuff_printf(buffer, length, pos, "%s", fmt_prefix);        \
+      if (lib::is_oracle_mode() && params.need_cast_expr_) {                                            \
+        ret = databuff_printf(buffer, length, pos, "%s", CAST_PREFIX_ORACLE);                           \
+      } else if (params.print_const_expr_type_ && !lib::is_oracle_mode() && ObDateTimeType == obj.get_type()) {  \
+        ret = databuff_printf(buffer, length, pos, "CAST('"); \
+      } else if (params.print_const_expr_type_ && !lib::is_oracle_mode() && ObTimestampType == obj.get_type()) {                         \
+        ret = databuff_printf(buffer, length, pos, "%s %s", CAST_PREFIX_MYSQL_TIMESTAMP, NORMAL_PREFIX);\
+      } else {                                                                                          \
+        ret = databuff_printf(buffer, length, pos, "%s", NORMAL_PREFIX);                                \
+      }                                                                                                 \
     }                                                                   \
     if (OB_SUCC(ret)) {                                            \
       if (ObTimestampType != obj.get_type()) {                          \
@@ -803,10 +847,14 @@ DEF_NUMBER_FUNCS(ObNumberFloatType, number_float);
                                             obj.get_scale(), buffer, length, pos); \
     }                                                                   \
     if (OB_SUCC(ret)) {                                            \
-      const char *fmt_suffix = params.need_cast_expr_ && lib::is_oracle_mode() ? \
-                                 CAST_SUFFIX_ORACLE : NORMAL_SUFFIX;    \
-      ret = databuff_printf(buffer, length, pos, "%s", fmt_suffix);     \
-    }                                                                   \
+      if (params.print_const_expr_type_ && !lib::is_oracle_mode() &&  ObDateTimeType == obj.get_type()) {                        \
+        ret = databuff_printf(buffer, length, pos, "' AS %s)", CAST_PREFIX_MYSQL_DATETIME);     \
+      } else {                                                                                  \
+        const char *fmt_suffix = params.need_cast_expr_ && lib::is_oracle_mode() ?              \
+                                  CAST_SUFFIX_ORACLE : NORMAL_SUFFIX;                           \
+        ret = databuff_printf(buffer, length, pos, "%s", fmt_suffix);     \
+      }                                                                   \
+    }                                                                     \
     return ret;                                                         \
   }                                                                     \
                                                                         \
@@ -881,7 +929,12 @@ DEF_DATETIME_FUNCS(ObTimestampType, timestamp, int64_t);
                                     const ObObjPrintParams &params) \
   {                                                                     \
     UNUSED(params);                                                    \
-    int ret = databuff_printf(buffer, length, pos, "'");                \
+    int ret = OB_SUCCESS;                                               \
+    if (params.print_const_expr_type_ && !lib::is_oracle_mode() && ObDateType == obj.get_type()) {       \
+      ret = databuff_printf(buffer, length, pos, "DATE '");            \
+    } else {                                                           \
+      ret = databuff_printf(buffer, length, pos, "'");                 \
+    }                                                                  \
     if (OB_SUCC(ret)) {                                            \
       ret = ObTimeConverter::TYPE##_to_str(obj.get_##TYPE(), buffer, length, pos);  \
     }                                                                   \
@@ -946,8 +999,13 @@ DEF_DATE_YEAR_FUNCS(ObDateType, date, int32_t);
                                     const ObObjPrintParams &params)      \
   {                                                                     \
     UNUSED(params);                                                    \
-    int ret = databuff_printf(buffer, length, pos, "'");                \
-    if (OB_SUCC(ret)) {                                            \
+    int ret = OB_SUCCESS;                                              \
+    if (params.print_const_expr_type_ && !lib::is_oracle_mode() && ObTimeType == obj.get_type()) {      \
+      ret = databuff_printf(buffer, length, pos, "TIME '");            \
+    } else {                                                           \
+      ret = databuff_printf(buffer, length, pos, "'");                 \
+    }                                                                  \
+    if (OB_SUCC(ret)) {                                                \
       ret = ObTimeConverter::TYPE##_to_str(obj.get_##TYPE(), obj.get_scale(), buffer, length, pos);\
     }                                                                   \
     if (OB_SUCC(ret)) {                                            \
@@ -1180,16 +1238,18 @@ inline int obj_print_plain_str<ObHexStringType>(const ObObj &obj, char *buffer,
     bc.fill(obj.get_string_ptr(), obj.get_string_len());                \
   }                                                                     \
   template <>                                                           \
-  inline uint64_t obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash) \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
   {                                                                     \
-    return varchar_murmurhash(obj, obj.get_collation_type(), hash);     \
+    res = varchar_murmurhash(obj, obj.get_collation_type(), hash);      \
+    return OB_SUCCESS;                                                  \
   }                                                                     \
   template <typename T>                                                 \
   struct ObjHashCalculator<OBJTYPE, T, ObObj>                           \
   {                                                                             \
-    static uint64_t calc_hash_value(const ObObj &obj, const uint64_t hash) {    \
-      return varchar_hash_with_collation(obj, obj.get_collation_type(), hash,   \
+    static int calc_hash_value(const ObObj &obj, const uint64_t hash, uint64_t &res) {    \
+      res = varchar_hash_with_collation(obj, obj.get_collation_type(), hash,   \
                                          T::is_varchar_hash ? T::hash : NULL);  \
+      return OB_SUCCESS;                                                        \
     }                                                                           \
   };                                                                            \
   template <>                                                               \
@@ -1366,7 +1426,7 @@ DEF_ENUMSET_INNER_FUNCS(ObSetInnerType, set_inner, ObString);
   {                                                                     \
     UNUSED(params);                                                    \
     int ret = OB_SUCCESS;                                        \
-    ObString str = obj.get_print_string(length - pos);                  \
+    ObString str = obj.get_text_print_string(length - pos);             \
     if (CS_TYPE_BINARY == obj.get_collation_type()) {                   \
       if (!lib::is_oracle_mode() && OB_SUCCESS != (ret = databuff_printf(buffer, \
                                                                         length, pos, "X'"))) { \
@@ -1390,7 +1450,7 @@ DEF_ENUMSET_INNER_FUNCS(ObSetInnerType, set_inner, ObString);
   {                                                                     \
     UNUSED(params);                                                    \
     int ret = OB_SUCCESS;                                               \
-    ObString str = obj.get_print_string(length - pos);                              \
+    ObString str = obj.get_text_print_string(length - pos);             \
     if (CS_TYPE_BINARY == obj.get_collation_type()) {                   \
       ret = databuff_printf(buffer, length, pos, "'%.*s", str.length(), str.ptr());  \
       if (OB_SUCC(ret)) {                                        \
@@ -1406,7 +1466,10 @@ DEF_ENUMSET_INNER_FUNCS(ObSetInnerType, set_inner, ObString);
   inline int obj_print_plain_str<OBJTYPE>(const ObObj &obj, char *buffer, int64_t length, \
                                           int64_t &pos, const ObObjPrintParams &params) \
   {                                                                     \
-    return obj_print_plain_str<ObVarcharType>(obj, buffer, length, pos, params); \
+    ObObj tmp_obj = obj; \
+    ObString str = obj.get_text_print_string(length - pos); \
+    tmp_obj.set_lob_value(obj.get_type(), str.ptr(), str.length()); \
+    return obj_print_plain_str<ObVarcharType>(tmp_obj, buffer, length, pos, params); \
   }                                                                     \
   template <>                                                           \
   inline int obj_print_json<OBJTYPE>(const ObObj &obj, char *buf, int64_t buf_len, \
@@ -1417,7 +1480,7 @@ DEF_ENUMSET_INNER_FUNCS(ObSetInnerType, set_inner, ObString);
     PRINT_META();                                                       \
     BUF_PRINTO(ob_obj_type_str(obj.get_type()));                        \
     J_COLON();                                                          \
-    BUF_PRINTO(obj.get_print_string(buf_len - pos));                    \
+    BUF_PRINTO(obj.get_text_print_string(buf_len - pos));                    \
     J_COMMA();                                                          \
     J_KV(N_COLLATION, ObCharset::collation_name(obj.get_collation_type()));\
     J_COMMA();                                                          \
@@ -1457,6 +1520,11 @@ DEF_ENUMSET_INNER_FUNCS(ObSetInnerType, set_inner, ObString);
    return len;                                                          \
    }
 
+// ToDo: @gehao
+// 1. SERIALIZE/DESERIALIZE will drop has_lob_header flag. However, only table api use these functions,
+//    and lob locators are removed in table apis. Error may occur if used in other scenes.
+// 2. CS_FUNCS: lob with same content and different lobids will have different crc & hash,
+//    but error occur in farm, not used?
 #define DEF_TEXT_FUNCS(OBJTYPE, TYPE, VTYPE) \
   DEF_TEXT_PRINT_FUNCS(OBJTYPE);             \
   DEF_STRING_CS_FUNCS(OBJTYPE);                 \
@@ -1466,6 +1534,81 @@ DEF_TEXT_FUNCS(ObTinyTextType, string, ObString);
 DEF_TEXT_FUNCS(ObTextType, string, ObString);
 DEF_TEXT_FUNCS(ObMediumTextType, string, ObString);
 DEF_TEXT_FUNCS(ObLongTextType, string, ObString);
+
+
+#define DEF_GEO_CS_FUNCS(OBJTYPE)                                    \
+  template <>                                                           \
+  inline int64_t obj_crc64<OBJTYPE>(const ObObj &obj, const int64_t current)   \
+  {                                                                     \
+    int type = obj.get_type();                                          \
+    int cs = obj.get_collation_type();                                  \
+    int64_t ret =  ob_crc64_sse42(current, &type, sizeof(type));        \
+    ret = ob_crc64_sse42(ret, &cs, sizeof(cs));                         \
+    return ob_crc64_sse42(ret, obj.get_string_ptr(), obj.get_string_len()); \
+  }                                                                     \
+  template <>                                                           \
+  inline int64_t obj_crc64_v2<OBJTYPE>(const ObObj &obj, const int64_t current)   \
+  {                                                                     \
+    int cs = obj.get_collation_type();                                  \
+    int64_t ret =  ob_crc64_sse42(current, &cs, sizeof(cs));        \
+    return ob_crc64_sse42(ret, obj.get_string_ptr(), obj.get_string_len()); \
+  }                                                                     \
+  template <>                                                           \
+  inline void obj_batch_checksum<OBJTYPE>(const ObObj &obj, ObBatchChecksum &bc) \
+  {                                                                     \
+    int type = obj.get_type();                                          \
+    int cs = obj.get_collation_type();                                  \
+    bc.fill(&type, sizeof(type));                                       \
+    bc.fill(&cs, sizeof(cs));                                           \
+    bc.fill(obj.get_string_ptr(), obj.get_string_len());                \
+  }                                                                     \
+  template <>                                                           \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
+  {                                                                     \
+    res = varchar_murmurhash(obj, obj.get_collation_type(), hash);      \
+    return OB_SUCCESS;                                                  \
+  }                                                                     \
+  template <typename T, typename P>                                     \
+  struct ObjHashCalculator<OBJTYPE, T, P>                               \
+  {                                                                             \
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {      \
+      int ret = OB_SUCCESS;                                                          \
+      res = 0;                                                                       \
+      common::ObString str = param.get_string();                                     \
+      common::ObString wkb;                                                          \
+      ObLobLocatorV2 lob(str, false);                                                \
+      if (!lob.is_valid()) {                                                         \
+        COMMON_LOG(WARN, "invalid lob", K(ret), K(str));                             \
+      } else if (!lob.has_inrow_data()) {                                            \
+        COMMON_LOG(WARN, "meet outrow lob do calc hash value", K(lob));              \
+        res = hash;                                                                  \
+      } else if (OB_FAIL(lob.get_inrow_data(wkb))) {                                 \
+        COMMON_LOG(WARN, "fail to get inrow data", K(ret), K(lob));                  \
+      } else {                                                                       \
+        res = hash;                                                                  \
+        if (wkb.length() > 0 && !param.is_null()) {                                  \
+          res = ObCharset::hash(CS_TYPE_BINARY, wkb.ptr(),                           \
+                                     wkb.length(), hash,                             \
+                                     false,  T::is_varchar_hash ? T::hash : NULL);   \
+        }                                                                            \
+      }                                                                              \
+      return ret;                                                                    \
+    }                                                                                \
+  };                                                                                 \
+  template <>                                                               \
+  inline uint64_t obj_crc64_v3<OBJTYPE>(const ObObj &obj, const uint64_t current)  \
+  {                                                                         \
+    int cs = obj.get_collation_type();                                      \
+    uint64_t ret = ob_crc64_sse42(current, &cs, sizeof(cs));               \
+    return ob_crc64_sse42(ret, obj.get_string_ptr(), obj.get_string_len()); \
+  }                                                                         \
+
+#define DEF_GEO_FUNCS(OBJTYPE, TYPE, VTYPE)        \
+  DEF_TEXT_PRINT_FUNCS(OBJTYPE);                   \
+  DEF_GEO_CS_FUNCS(OBJTYPE);                       \
+  DEF_TEXT_SERIALIZE_FUNCS(OBJTYPE, TYPE, VTYPE)
+
+DEF_GEO_FUNCS(ObGeometryType, string, ObString);
 
 #define DEF_JSON_CS_FUNCS(OBJTYPE)                                    \
   template <>                                                           \
@@ -1494,32 +1637,41 @@ DEF_TEXT_FUNCS(ObLongTextType, string, ObString);
     bc.fill(obj.get_string_ptr(), obj.get_string_len());                \
   }                                                                     \
   template <>                                                           \
-  inline uint64_t obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash) \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
   {                                                                     \
-    return varchar_murmurhash(obj, obj.get_collation_type(), hash);     \
+    res = varchar_murmurhash(obj, obj.get_collation_type(), hash);      \
+    return OB_SUCCESS;                                                  \
   }                                                                     \
-  template <typename T, typename P>                                                \
-  struct ObjHashCalculator<OBJTYPE, T, P>                                          \
-  {                                                                                \
-    static uint64_t calc_hash_value(const P &param, const uint64_t hash) {         \
-      int ret = OB_SUCCESS;                                                        \
-      common::ObString j_bin_str = param.get_string();                             \
-      uint64_t hash_res = 0;                                                       \
-      ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());                        \
-      ObIJsonBase *j_base = &j_bin;                                                \
-      if (j_bin_str.length() == 0 || param.is_null()) {                             \
-        hash_res = hash;                                                           \
-      } else if (OB_FAIL(j_bin.reset_iter())) {                                    \
-        COMMON_LOG(WARN, "fail to reset json bin iter", K(ret), K(j_bin_str));     \
-        right_to_die_or_duty_to_live();                                            \
-      } else if (OB_FAIL(j_base->calc_json_hash_value(hash, T::hash, hash_res))) { \
-        COMMON_LOG(ERROR, "fail to calc hash", K(ret), K(*j_base));                \
-        right_to_die_or_duty_to_live();                                            \
-      }                                                                            \
-                                                                                   \
-      return hash_res;                                                             \
-    }                                                                              \
-  };                                                                               \
+  template <typename T, typename P>                                                  \
+  struct ObjHashCalculator<OBJTYPE, T, P>                                            \
+  {                                                                                  \
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {           \
+      int ret = OB_SUCCESS;                                                          \
+      res = 0;                                                                       \
+      common::ObString str = param.get_string();                                     \
+      common::ObString j_bin_str;                                                    \
+      ObLobLocatorV2 lob(str, false);                                                \
+      if (!lob.is_valid()) {                                                         \
+        COMMON_LOG(WARN, "invalid lob", K(ret), K(str));                             \
+      } else if (!lob.has_inrow_data()) {                                            \
+        COMMON_LOG(WARN, "meet outrow lob do calc hash value", K(lob));              \
+        res = hash;                                                                  \
+      } else if (OB_FAIL(lob.get_inrow_data(j_bin_str))) {                           \
+        COMMON_LOG(WARN, "fail to get inrow data", K(ret), K(lob));                  \
+      } else {                                                                       \
+        ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());                        \
+        ObIJsonBase *j_base = &j_bin;                                                \
+        if (j_bin_str.length() == 0 || param.is_null()) {                            \
+          res = hash;                                                                \
+        } else if (OB_FAIL(j_bin.reset_iter())) {                                    \
+          COMMON_LOG(WARN, "fail to reset json bin iter", K(ret), K(j_bin_str));     \
+        } else if (OB_FAIL(j_base->calc_json_hash_value(hash, T::hash, res))) {      \
+          COMMON_LOG(ERROR, "fail to calc hash", K(ret), K(*j_base));                \
+        }                                                                            \
+      }                                                                              \
+      return ret;                                                                    \
+    }                                                                                \
+  };                                                                                 \
   template <>                                                               \
   inline uint64_t obj_crc64_v3<OBJTYPE>(const ObObj &obj, const uint64_t current)  \
   {                                                                         \
@@ -1545,7 +1697,11 @@ inline int obj_print_sql<ObJsonType>(const ObObj &obj, char *buffer, int64_t len
   ObJsonBuffer jbuf(&tmp_allocator);
   ObIJsonBase *j_base = NULL;
   ObJsonInType in_type = ObJsonInType::JSON_BIN;
-  if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base))) {
+  uint32_t parse_flag = lib::is_mysql_mode() ? 0 : ObJsonParser::JSN_RELAXED_FLAG;
+  if (OB_FAIL(obj.get_json_print_data(str, buffer, length, pos))) {
+    COMMON_LOG(WARN, "fail to get json data", K(ret), K(in_type));
+  } else if (str.empty()) { // nothing to print;
+  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
     COMMON_LOG(WARN, "fail to get json base", K(ret), K(in_type));
   } else if (OB_FAIL(j_base->print(jbuf, false))) { // json binary to string
     COMMON_LOG(WARN, "fail to convert json to string", K(ret), K(obj));
@@ -1569,7 +1725,7 @@ inline int obj_print_str<ObJsonType>(const ObObj &obj, char *buffer, int64_t len
 }
 template <>
 inline int obj_print_plain_str<ObJsonType>(const ObObj &obj, char *buffer, int64_t length,
-                                        int64_t &pos, const ObObjPrintParams &params)
+                                           int64_t &pos, const ObObjPrintParams &params)
 {
   UNUSED(params); \
   int ret = OB_SUCCESS;
@@ -1578,7 +1734,11 @@ inline int obj_print_plain_str<ObJsonType>(const ObObj &obj, char *buffer, int64
   ObIJsonBase *j_base = NULL;
   ObJsonBuffer jbuf(&tmp_allocator);
   ObJsonInType in_type = ObJsonInType::JSON_BIN;
-  if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base))) {
+  uint32_t parse_flag = lib::is_mysql_mode() ? 0 : ObJsonParser::JSN_RELAXED_FLAG;
+  if (OB_FAIL(obj.get_json_print_data(str, buffer, length, pos))) {
+    COMMON_LOG(WARN, "fail to get json data", K(ret), K(in_type));
+  } else if (str.empty()) { // nothing to print;
+  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
     COMMON_LOG(WARN, "fail to get json base", K(ret), K(in_type));
   } else if (OB_FAIL(j_base->print(jbuf, false))) { // json binary to string
     COMMON_LOG(WARN, "fail to convert json to string", K(ret), K(obj));
@@ -1593,16 +1753,20 @@ inline int obj_print_plain_str<ObJsonType>(const ObObj &obj, char *buffer, int64
 }
 template <>
 inline int obj_print_json<ObJsonType>(const ObObj &obj, char *buf, int64_t buf_len,
-                                  int64_t &pos, const ObObjPrintParams &params)
+                                      int64_t &pos, const ObObjPrintParams &params)
 {
   UNUSED(params);
   int ret = OB_SUCCESS;
-  ObString str = obj.get_string();
+  ObString str;
   ObArenaAllocator tmp_allocator;
   ObIJsonBase *j_base = NULL;
   ObJsonInType in_type = ObJsonInType::JSON_BIN;
   ObJsonBuffer jbuf(&tmp_allocator);
-  if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base))) {
+  uint32_t parse_flag = lib::is_mysql_mode() ? 0 : ObJsonParser::JSN_RELAXED_FLAG;
+  if (OB_FAIL(obj.get_json_print_data(str, buf, buf_len, pos))) {
+    COMMON_LOG(WARN, "fail to get json data", K(ret), K(in_type));
+  } else if (str.empty()) { // nothing to print;
+  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
     COMMON_LOG(WARN, "fail to get json base", K(ret), K(in_type));
   } else if (OB_FAIL(j_base->print(jbuf, false))) { // json binary to string
     COMMON_LOG(WARN, "fail to convert json to string", K(ret), K(obj));
@@ -1740,23 +1904,23 @@ inline int obj_print_json<ObJsonType>(const ObObj &obj, char *buf, int64_t buf_l
     bc.fill(&tmp_data.time_ctx_.desc_, sizeof(uint32_t)); \
   }                                                                     \
   template <>                                                           \
-  inline uint64_t obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash) \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
   {                                                                     \
     int type = obj.get_type();                                          \
     ObOTimestampData tmp_data = obj.get_otimestamp_value();            \
-    uint64_t ret = murmurhash(&type, sizeof(type), hash);             \
-    ret = murmurhash(&tmp_data.time_us_, static_cast<int32_t>(sizeof(int64_t)), ret); \
-    ret = murmurhash(&tmp_data.time_ctx_.desc_, static_cast<int32_t>(sizeof(uint32_t)), ret); \
-    return ret;                                                                     \
+    res = murmurhash(&type, sizeof(type), hash);             \
+    res = murmurhash(&tmp_data.time_us_, static_cast<int32_t>(sizeof(int64_t)), res); \
+    res = murmurhash(&tmp_data.time_ctx_.desc_, static_cast<int32_t>(sizeof(uint32_t)), res); \
+    return OB_SUCCESS;                                                                     \
   }                                                                                 \
   template <typename T>                                               \
   struct ObjHashCalculator<OBJTYPE, T, ObObj>                         \
   {                                                                                 \
-    static uint64_t calc_hash_value(const ObObj &obj, const uint64_t hash) {        \
+    static int calc_hash_value(const ObObj &obj, const uint64_t hash, uint64_t &res) {        \
       ObOTimestampData tmp_data = obj.get_otimestamp_value();                       \
       uint64_t ret = T::hash(&tmp_data.time_us_, static_cast<int32_t>(sizeof(int64_t)), hash);  \
-      ret = T::hash(&tmp_data.time_ctx_.desc_, static_cast<int32_t>(sizeof(uint32_t)), ret);    \
-      return ret;                                                       \
+      res = T::hash(&tmp_data.time_ctx_.desc_, static_cast<int32_t>(sizeof(uint32_t)), ret);    \
+      return OB_SUCCESS;                                                                        \
     }                                                                   \
   };                                                                    \
   template <>                                                           \
@@ -1826,24 +1990,23 @@ inline int obj_print_json<ObJsonType>(const ObObj &obj, char *buf, int64_t buf_l
     bc.fill(&tmp_data.time_ctx_.time_desc_, sizeof(uint16_t)); \
   }                                                                     \
   template <>                                                           \
-  inline uint64_t obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash) \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
   {                                                                     \
     int type = obj.get_type();                                          \
-    uint64_t ret = murmurhash(&type, sizeof(type), hash);             \
+    res = murmurhash(&type, sizeof(type), hash);             \
     ObOTimestampData tmp_data = obj.get_otimestamp_value();            \
-    ret = murmurhash(&tmp_data.time_us_, static_cast<int32_t>(sizeof(int64_t)), ret); \
-    ret = murmurhash(&tmp_data.time_ctx_.time_desc_, static_cast<int32_t>(sizeof(uint16_t)), ret);\
-    return ret;                                                         \
+    res = murmurhash(&tmp_data.time_us_, static_cast<int32_t>(sizeof(int64_t)), res); \
+    res = murmurhash(&tmp_data.time_ctx_.time_desc_, static_cast<int32_t>(sizeof(uint16_t)), res);\
+    return OB_SUCCESS;                                                  \
   }                                                                     \
   template <typename T>                                                 \
   struct ObjHashCalculator<OBJTYPE, T, ObObj>                           \
   {                                                                     \
-    static uint64_t calc_hash_value(const ObObj &obj, const uint64_t hash) {    \
-      uint64_t ret = OB_SUCCESS;                                         \
+    static int calc_hash_value(const ObObj &obj, const uint64_t hash, uint64_t &res) {    \
       ObOTimestampData tmp_data = obj.get_otimestamp_value();                   \
-      ret = T::hash(&tmp_data.time_us_, static_cast<int32_t>(sizeof(int64_t)), hash); \
-      ret = T::hash(&tmp_data.time_ctx_.time_desc_, static_cast<int32_t>(sizeof(uint16_t)), ret);\
-      return ret;                                                         \
+      res = T::hash(&tmp_data.time_us_, static_cast<int32_t>(sizeof(int64_t)), hash); \
+      res = T::hash(&tmp_data.time_ctx_.time_desc_, static_cast<int32_t>(sizeof(uint16_t)), res);\
+      return OB_SUCCESS;                                                         \
     }                                                                     \
   };                                                                      \
   template <>                                                           \
@@ -1990,8 +2153,7 @@ template <>
       ret = databuff_printf(buffer, length, pos, "%s", N_UPPERCASE_CUR_TIMESTAMP);
       break;
     default:
-      _OB_LOG(WARN, "ext %ld should not be print as sql", obj.get_ext());
-      ret = OB_INVALID_ARGUMENT;
+      ret = databuff_printf(buffer, length, pos, "%s", "Extend Obj");
       break;
   }
   return ret;
@@ -2128,10 +2290,10 @@ inline int64_t obj_val_get_serialize_size<ObExtendType>(const ObObj &obj)
   int64_t len = 0;
   OB_UNIS_ADD_LEN(obj.get_ext());
   if (obj.is_pl_extend()) {
-    COMMON_LOG(ERROR, "Unexpected serialize", K(OB_NOT_SUPPORTED), K(obj), K(obj.get_meta().get_extend_type()));
+    COMMON_LOG_RET(ERROR, OB_NOT_SUPPORTED, "Unexpected serialize", K(OB_NOT_SUPPORTED), K(obj), K(obj.get_meta().get_extend_type()));
     return len; //TODO:@ryan.ly: close this feature before composite refactor
     if (NULL == composite_serialize_size_callback) {
-      COMMON_LOG(ERROR, "Unexpected callback", K(OB_ERR_UNEXPECTED), K(obj));
+      COMMON_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "Unexpected callback", K(OB_ERR_UNEXPECTED), K(obj));
     } else {
       len += composite_serialize_size_callback(obj);
     }
@@ -2194,20 +2356,20 @@ template <>
   bc.fill(&obj.get_meta(), sizeof(obj.get_meta()));
 }
 template <>
-    inline uint64_t obj_murmurhash<ObUnknownType>(const ObObj &obj, const uint64_t hash)
+    inline int obj_murmurhash<ObUnknownType>(const ObObj &obj, const uint64_t hash, uint64_t &res)
 {
-  uint64_t ret = 0;
   int64_t value = obj.get_unknown();
-  ret = murmurhash(&obj.get_meta(), sizeof(obj.get_meta()), hash);
-  return murmurhash(&value, sizeof(obj.get_unknown()), ret);
+  res = murmurhash(&obj.get_meta(), sizeof(obj.get_meta()), hash);
+  res = murmurhash(&value, sizeof(obj.get_unknown()), res);
+  return OB_SUCCESS;
 }
 template <typename T, typename P>
 struct ObjHashCalculator<ObUnknownType, T, P>
 {
-  static uint64_t calc_hash_value(const P &param, const uint64_t hash) {
+  static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {
   int64_t value = param.get_unknown();
-  uint64_t ret = T::hash(&value, sizeof(value), hash);
-  return ret;
+  res = T::hash(&value, sizeof(value), hash);
+  return OB_SUCCESS;
   }
 };
 template <>
@@ -2348,22 +2510,23 @@ template <>
     bc.fill(&value.nmonth_, sizeof(value.nmonth_));
   }
 template <>
-  inline uint64_t obj_murmurhash<ObIntervalYMType>(const ObObj &obj, const uint64_t hash)
+  inline int obj_murmurhash<ObIntervalYMType>(const ObObj &obj, const uint64_t hash, uint64_t &res)
   {
     int type = obj.get_type();
     ObIntervalYMValue value = obj.get_interval_ym();
-    uint64_t result = hash;
+    res = hash;
 
-    result = murmurhash(&type, sizeof(type), result);
-    result = murmurhash(&value.nmonth_, sizeof(value.nmonth_), result);
-    return result;
+    res = murmurhash(&type, sizeof(type), res);
+    res = murmurhash(&value.nmonth_, sizeof(value.nmonth_), res);
+    return OB_SUCCESS;
   }
 template <typename T, typename P>
   struct ObjHashCalculator<ObIntervalYMType, T, P>
   {
-    static uint64_t calc_hash_value(const P &param, const uint64_t hash) {
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {
       ObIntervalYMValue value = param.get_interval_ym();
-      return T::hash(&value.nmonth_, sizeof(value.nmonth_), hash);
+      res = T::hash(&value.nmonth_, sizeof(value.nmonth_), hash);
+      return OB_SUCCESS;
     }
   };
   template <>
@@ -2405,26 +2568,26 @@ template <>
     bc.fill(&value.fractional_second_, sizeof(value.fractional_second_));
   }
 template <>
-  inline uint64_t obj_murmurhash<ObIntervalDSType>(const ObObj &obj, const uint64_t hash)
+  inline int obj_murmurhash<ObIntervalDSType>(const ObObj &obj, const uint64_t hash, uint64_t &res)
   {
     int type = obj.get_type();
     ObIntervalDSValue value = obj.get_interval_ds();
-    uint64_t result = hash;
+    res = hash;
 
-    result = murmurhash(&type, sizeof(type), result);
-    result = murmurhash(&value.nsecond_, sizeof(value.nsecond_), result);
-    result = murmurhash(&value.fractional_second_, sizeof(value.fractional_second_), result);
-    return result;
+    res = murmurhash(&type, sizeof(type), res);
+    res = murmurhash(&value.nsecond_, sizeof(value.nsecond_), res);
+    res = murmurhash(&value.fractional_second_, sizeof(value.fractional_second_), res);
+    return OB_SUCCESS;
   }
 template <typename T, typename P>
   struct ObjHashCalculator<ObIntervalDSType, T, P>
   {
-    static uint64_t calc_hash_value(const P &param, const uint64_t hash) {
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {
       ObIntervalDSValue value = param.get_interval_ds();
-      uint64_t result = hash;
-      result = T::hash(&value.nsecond_, sizeof(value.nsecond_), result);
-      result = T::hash(&value.fractional_second_, sizeof(value.fractional_second_), result);
-      return result;
+      res = hash;
+      res = T::hash(&value.nsecond_, sizeof(value.nsecond_), res);
+      res = T::hash(&value.fractional_second_, sizeof(value.fractional_second_), res);
+      return OB_SUCCESS;
     }
   };
 template <>
@@ -2618,8 +2781,9 @@ DEF_NVARCHAR_FUNCS(ObNCharType, nchar, ObString);
 template <typename T, typename P>
 struct ObjHashCalculator<ObURowIDType, T, P>
 {
-  static uint64_t calc_hash_value(const P &param, const uint64_t hash) {
-    return T::hash(param.get_string().ptr(), param.get_string().length(), hash);
+  static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) {
+    res = T::hash(param.get_string().ptr(), param.get_string().length(), hash);
+    return OB_SUCCESS;
   }
 };
 
@@ -2779,22 +2943,23 @@ template <>
     bc.fill(obj.get_lob_locator(), obj.get_val_len());
   }
 template <>
-  inline uint64_t obj_murmurhash<ObLobType>(const ObObj &obj, const uint64_t hash)
+  inline int obj_murmurhash<ObLobType>(const ObObj &obj, const uint64_t hash, uint64_t &res)
   {
     int type = obj.get_type();
     ObCollationType cs_type = obj.get_collation_type();
-    uint64_t result = hash;
-    result = murmurhash(&type, sizeof(type), result);
-    result = ObCharset::hash(cs_type, obj.get_lob_payload_ptr(), obj.get_lob_payload_size(), result,
+    res = hash;
+    res = murmurhash(&type, sizeof(type), res);
+    res = ObCharset::hash(cs_type, obj.get_lob_payload_ptr(), obj.get_lob_payload_size(), res,
                               false, NULL);
-    return result;
+    return OB_SUCCESS;
   }
 template <typename T>
   struct ObjHashCalculator<ObLobType, T, ObObj>
   {
-    static uint64_t calc_hash_value(const ObObj &obj, const uint64_t hash) {
-      return ObCharset::hash(obj.get_collation_type(), obj.get_string_ptr(), obj.get_string_len(), hash,
-           false,  T::is_varchar_hash ? T::hash : NULL);
+    static int calc_hash_value(const ObObj &obj, const uint64_t hash, uint64_t &res) {
+      res = ObCharset::hash(obj.get_collation_type(), obj.get_string_ptr(), obj.get_string_len(), hash,
+            false,  T::is_varchar_hash ? T::hash : NULL);
+      return OB_SUCCESS;
     }
   };
 // use for hash join, only calc payload
@@ -2804,6 +2969,196 @@ inline uint64_t obj_crc64_v3<ObLobType>(const ObObj &obj, const uint64_t current
   int cs = obj.get_collation_type();
   uint64_t ret =  ob_crc64_sse42(current, &cs, sizeof(cs));
   return ob_crc64_sse42(ret, obj.get_lob_payload_ptr(), obj.get_lob_payload_size());
+}
+
+// ObUserDefinedSQLType = 49
+// An UDT is stored as it's leaf type columns, the root type column will not appear in storage now,
+// and will be atmost a few bytes in the feature.
+// UDTs does not have hash functions
+// subschema id or flags are not used in checksum functions, because the same subschema id may has different meanings.
+// subschema id or flags are used in serialize functions, because serialization are used in a same physic plan.
+// about print functions, UDTs are printed as HexStrings, except system defined types like xmltype.
+
+#define DEF_UDT_CS_FUNCS(OBJTYPE)                                       \
+  template <>                                                           \
+  inline int64_t obj_crc64<OBJTYPE>(const ObObj &obj, const int64_t current)     \
+  {                                                                     \
+    int type = obj.get_type();                                          \
+    int64_t ret =  ob_crc64_sse42(current, &type, sizeof(type));        \
+    return ob_crc64_sse42(ret, obj.get_string_ptr(), obj.get_string_len());      \
+  }                                                                     \
+  template <>                                                           \
+  inline int64_t obj_crc64_v2<OBJTYPE>(const ObObj &obj, const int64_t current)  \
+  {                                                                     \
+    return ob_crc64_sse42(current, obj.get_string_ptr(), obj.get_string_len());  \
+  }                                                                     \
+  template <>                                                           \
+  inline void obj_batch_checksum<OBJTYPE>(const ObObj &obj, ObBatchChecksum &bc) \
+  {                                                                     \
+    int type = obj.get_type();                                          \
+    bc.fill(&type, sizeof(type));                                       \
+    bc.fill(obj.get_string_ptr(), obj.get_string_len());                \
+  }                                                                     \
+  template <>                                                           \
+  inline int obj_murmurhash<OBJTYPE>(const ObObj &obj, const uint64_t hash, uint64_t &res) \
+  {                                                                     \
+    res = varchar_murmurhash(obj, CS_TYPE_BINARY, hash);                \
+    return OB_SUCCESS;                                                  \
+  }                                                                     \
+  template <typename T, typename P>                                                  \
+  struct ObjHashCalculator<OBJTYPE, T, P>                                            \
+  {                                                                                  \
+    static int calc_hash_value(const P &param, const uint64_t hash, uint64_t &res) { \
+      int ret = OB_NOT_SUPPORTED;                                                    \
+      res = 0;                                                                       \
+      COMMON_LOG(WARN, "UDTS does not have hash function", K(ret), K(param));        \
+      return ret;                                                                    \
+    }                                                                                \
+  };                                                                                 \
+  template <>                                                                        \
+  inline uint64_t obj_crc64_v3<OBJTYPE>(const ObObj &obj, const uint64_t current)    \
+  {                                                                                  \
+    return ob_crc64_sse42(current, obj.get_string_ptr(), obj.get_string_len());      \
+  }                                                                                  \
+
+DEF_UDT_CS_FUNCS(ObUserDefinedSQLType);
+
+// DEF_TEXT_PRINT_FUNCS(ObUserDefinedSQLType);
+// use clob for test currently
+// ToDo: @gehao XML will be blob later, need to convert to xml text(utf-8);
+template <>
+inline int obj_print_sql<ObUserDefinedSQLType>(const ObObj &obj, char *buffer, int64_t length,
+                                               int64_t &pos, const ObObjPrintParams &params)
+{
+  UNUSED(params);
+  int ret = OB_SUCCESS;
+  if (obj.get_meta().is_xml_sql_type()) {
+    ObString udt_data;
+    if (OB_FAIL(obj.get_udt_print_data(udt_data, buffer, length, pos, true))) {
+    } else if (OB_FAIL(databuff_printf(buffer, length, pos, "'"))) {
+    } else {
+      ObHexEscapeSqlStr sql_str(udt_data);
+      pos += sql_str.to_string(buffer + pos, length - pos);
+      ret = databuff_printf(buffer, length, pos, "'");
+    }
+  } else { // should not come here currently!
+    ret = OB_NOT_SUPPORTED;
+    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(obj.get_meta()), K(length), K(pos));
+  }
+  return ret;
+}
+
+template <>
+inline int obj_print_str<ObUserDefinedSQLType>(const ObObj &obj, char *buffer, int64_t length,
+                                               int64_t &pos, const ObObjPrintParams &params)
+{
+  UNUSED(params);
+  int ret = OB_SUCCESS;
+  if (obj.get_meta().is_xml_sql_type()) {
+    ObString udt_data;
+    if (OB_FAIL(obj.get_udt_print_data(udt_data, buffer, length, pos, true))) {
+    } else {
+      ret = databuff_printf(buffer, length, pos, "'%.*s'", udt_data.length(), udt_data.ptr());
+    }
+  } else {
+    ret = OB_NOT_SUPPORTED;
+    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(obj.get_meta()), K(length), K(pos));
+  }
+  return ret;
+}
+
+template <>
+inline int obj_print_plain_str<ObUserDefinedSQLType>(const ObObj &obj, char *buffer, int64_t length,
+                                           int64_t &pos, const ObObjPrintParams &params)
+{
+  int ret = OB_SUCCESS;
+  if (obj.get_meta().is_xml_sql_type()) {
+    ObObj tmp_obj = obj;
+    ObString udt_data;
+    if (OB_FAIL(obj.get_udt_print_data(udt_data, buffer, length, pos, true))) {
+    } else {
+      tmp_obj.set_string(obj.get_type(), udt_data); // ToDo: @gehao convert to xml text(utf-8);
+      tmp_obj.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+      ret = obj_print_plain_str<ObVarcharType>(tmp_obj, buffer, length, pos, params);
+    }
+  } else {
+    ret = OB_NOT_SUPPORTED;
+    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(obj.get_meta()), K(length), K(pos));
+  }
+  return ret;
+}
+template <>
+inline int obj_print_json<ObUserDefinedSQLType>(const ObObj &obj, char *buf, int64_t buf_len,
+                                                int64_t &pos, const ObObjPrintParams &params)
+{
+  UNUSED(params);
+  int ret = OB_SUCCESS;
+  if (obj.get_meta().is_xml_sql_type()) {
+    ObString udt_data;
+    if (OB_FAIL(obj.get_udt_print_data(udt_data, buf, buf_len, pos, true))) {
+    } else {
+      J_OBJ_START();
+      PRINT_META();
+      BUF_PRINTO("XML");
+      J_COLON();
+      BUF_PRINTO(udt_data);
+      J_OBJ_END();
+    }
+  } else {
+    ret = OB_NOT_SUPPORTED;
+    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(obj.get_meta()), K(buf_len), K(pos));
+  }
+  return ret;
+}
+
+// DEF_TEXT_SERIALIZE_FUNCS(ObUserDefinedSQLType, TYPE, VTYPE)
+template <>
+inline int obj_val_serialize<ObUserDefinedSQLType>(const ObObj &obj, char* buf, const int64_t buf_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  OB_UNIS_ENCODE(obj.get_meta().get_subschema_id());
+  OB_UNIS_ENCODE(obj.get_meta().get_udt_flags());
+  if (OB_FAIL(ret)) {
+  } else if (obj.get_meta().is_xml_sql_type()) {
+    OB_UNIS_ENCODE(obj.get_string());
+  } else { // need callback for different types?
+    ret = OB_NOT_SUPPORTED;
+    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(obj.get_meta()), K(buf_len), K(pos));
+  }
+  return ret;
+}
+
+template <>
+inline int obj_val_deserialize<ObUserDefinedSQLType>(ObObj &obj, const char* buf, const int64_t data_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  uint16_t subschema_id = uint16_t();
+  uint8_t udt_flags = uint16_t();
+
+  OB_UNIS_DECODE(subschema_id);
+  OB_UNIS_DECODE(udt_flags);
+  if (OB_FAIL(ret)) {
+  } else if (ob_is_xml_sql_type(ObUserDefinedSQLType, subschema_id)) {
+    ObString blob;
+    OB_UNIS_DECODE(blob);
+    if (OB_SUCC(ret)) {
+      obj.set_sql_udt(blob.ptr(), blob.length(), subschema_id, udt_flags);
+    }
+  } else {
+    ret = OB_NOT_SUPPORTED;
+    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(subschema_id), K(udt_flags));
+  }
+  return ret;
+}
+
+template <>
+inline int64_t obj_val_get_serialize_size<ObUserDefinedSQLType>(const ObObj &obj)
+{
+  int64_t len = 0;
+  OB_UNIS_ADD_LEN(obj.get_meta().get_subschema_id());
+  OB_UNIS_ADD_LEN(obj.get_meta().get_udt_flags());
+  OB_UNIS_ADD_LEN(obj.get_string());
+  return len;
 }
 
 }

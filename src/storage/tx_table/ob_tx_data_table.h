@@ -15,9 +15,11 @@
 
 #include "storage/meta_mem/ob_tablet_handle.h"
 #include "lib/future/ob_future.h"
+#include "share/scn.h"
 #include "storage/tx_table/ob_tx_data_memtable_mgr.h"
 #include "storage/tx_table/ob_tx_table_define.h"
 #include "share/ob_occam_timer.h"
+
 namespace oceanbase
 {
 
@@ -44,11 +46,11 @@ struct TxDataReadSchema
 
 // In Ob4.0, transaction state table is divided into tx data table and tx
 // context table. See details :
-// https://yuque.antfin.com/docs/share/127d0836-8931-4c9e-8e68-64b900ba91f4?#
+//
 //
 // All operatitons related to tx_data are implemented by ObTxDataTable.
 // See details ::
-// https://yuque.antfin-inc.com/ob/transaction/skxugn
+//
 class ObTxDataTable
 {
 public:
@@ -106,11 +108,11 @@ public:
   // cache cleaning task will delete at least 11w tx data.
   static const int64_t DEFAULT_CACHE_RETAINED_TIME = 100_ms; // 100ms
 
-  // The tx data memtable cannot freeze it self if its memory use is less than 1%
+  // The tx data memtable do not need freeze it self if its memory use is less than 1%
   static constexpr double TX_DATA_FREEZE_TRIGGER_MIN_PERCENTAGE = 1;
 
   // The tx data memtable will trigger a freeze if its memory use is more than 10%
-  static constexpr double TX_DATA_FREEZE_TRIGGER_MAX_PERCENTAGE = 10;
+  static constexpr double TX_DATA_FREEZE_TRIGGER_MAX_PERCENTAGE = 5;
 
   enum COLUMN_ID_LIST
   {
@@ -125,8 +127,8 @@ public:  // ObTxDataTable
   ObTxDataTable()
     : is_inited_(false),
       is_started_(false),
+      ls_id_(),
       tablet_id_(0),
-      mem_attr_(),
       slice_allocator_(),
       arena_allocator_(),
       ls_(nullptr),
@@ -151,7 +153,7 @@ public:  // ObTxDataTable
    *
    * @param[out] tx_data the tx data allocated by slice allocator
    */
-  virtual int alloc_tx_data(ObTxData *&tx_data);
+  virtual int alloc_tx_data(ObTxDataGuard &tx_data);
 
   /**
    * @brief allocate memory and deep copy tx data
@@ -159,14 +161,7 @@ public:  // ObTxDataTable
    * @param[in] in_tx_data input tx data
    * @param[out] out_tx_data output tx data
    */
-  virtual int deep_copy_tx_data(ObTxData *in_tx_data, ObTxData *&out_tx_data);
-
-  /**
-   * @brief Free tx data with slice allocator
-   *
-   * @param[out] tx_data the tx data need to be freed
-   */
-  virtual void free_tx_data(ObTxData *tx_data);
+  virtual int deep_copy_tx_data(const ObTxDataGuard &in_tx_data, ObTxDataGuard &out_tx_data);
 
   /**
    * @brief In order to reduce memory fragmentation and improve memory reuse rate,the variable
@@ -200,7 +195,7 @@ public:  // ObTxDataTable
    * @param[in] tx_id the tx id of the transaction to be checked
    * @param[in] fn the functor which is dealt with tx data
    */
-  virtual int check_with_tx_data(const transaction::ObTransID tx_id, ObITxDataCheckFunctor &fn);
+  virtual int check_with_tx_data(const transaction::ObTransID tx_id, ObITxDataCheckFunctor &fn, ObTxDataGuard &tx_data_guard);
 
   /**
    * @brief See ObTxTable::get_recycle_scn
@@ -215,7 +210,7 @@ public:  // ObTxDataTable
   /**
    * @brief see ObTxTable::supplement_undo_actions_if_exist
    */
-  int supplement_undo_actions_if_exist(ObTxData *&tx_data);
+  int supplement_undo_actions_if_exist(ObTxData *tx_data);
 
   int self_freeze_task();
 
@@ -236,6 +231,7 @@ public:  // ObTxDataTable
   TO_STRING_KV(KP(this),
                K_(is_inited),
                K_(is_started),
+               K_(ls_id),
                K_(tablet_id),
                K_(calc_upper_info),
                K_(memtables_cache),
@@ -254,14 +250,26 @@ private:
   virtual ObTxDataMemtableMgr *get_memtable_mgr_() { return memtable_mgr_; }
 
   int get_ls_min_end_scn_in_latest_tablets_(share::SCN &min_end_ts);
+<<<<<<< HEAD
+=======
+
+  int init_slice_allocator_();
+
+  int init_arena_allocator_();
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 
   int init_sstable_cache_();
 
+
   int register_clean_cache_task_();
 
-  int check_tx_data_in_memtable_(const transaction::ObTransID tx_id, ObITxDataCheckFunctor &fn);
+  int check_tx_data_in_memtable_(const transaction::ObTransID tx_id, ObITxDataCheckFunctor &fn, ObTxDataGuard &tx_data_guard);
 
-  int check_tx_data_in_sstable_(const transaction::ObTransID tx_id, ObITxDataCheckFunctor &fn);
+  int check_tx_data_with_cache_once_(const transaction::ObTransID tx_id, ObITxDataCheckFunctor &fn, ObTxDataGuard &tx_data_guard);
+
+  int get_tx_data_from_cache_(const transaction::ObTransID tx_id, ObTxDataGuard &tx_data_guard, bool &find);
+
+  int check_tx_data_in_sstable_(const transaction::ObTransID tx_id, ObITxDataCheckFunctor &fn, ObTxDataGuard &tx_data_guard);
 
   int get_tx_data_in_cache_(const transaction::ObTransID tx_id, ObTxData *&tx_data);
 
@@ -274,7 +282,7 @@ private:
   // free the whole undo status list allocated by slice allocator
   int get_min_end_scn_from_single_tablet_(ObTabletHandle &tablet_handle, share::SCN &end_scn);
 
-  int deep_copy_undo_status_list_(ObUndoStatusList &in_list, ObUndoStatusList &out_list);
+  int deep_copy_undo_status_list_(const ObUndoStatusList &in_list, ObUndoStatusList &out_list);
   int init_tx_data_read_schema_();
 
   int update_cache_if_needed_(bool &skip_calc);
@@ -311,14 +319,12 @@ private:
   int check_min_start_in_tx_data_(const share::SCN &sstable_end_scn,
                                   share::SCN &min_start_ts_in_tx_data_memtable,
                                   bool &need_skip);
-
   void print_alloc_size_for_test_();
-
   // free the whole undo status list allocated by slice allocator
   void free_undo_status_list_(ObUndoStatusNode *node_ptr);
-
   void clean_sstable_cache_task_(int64_t cache_keeped_time);
   void update_calc_upper_info_(const share::SCN &max_decided_log_ts);
+<<<<<<< HEAD
 
   void TEST_print_alloc_size_()
   {
@@ -336,14 +342,16 @@ private:
                     K(list_node_head_size), K(list_node_lock_size));
   }
 
+=======
+>>>>>>> 529367cd9b5b9b1ee0672ddeef2a9930fe7b95fe
 private:
   static const int64_t LS_TX_DATA_SCHEMA_VERSION = 0;
   static const int64_t LS_TX_DATA_SCHEMA_ROWKEY_CNT = 2;
   static const int64_t LS_TX_DATA_SCHEMA_COLUMN_CNT = 5;
   bool is_inited_;
   bool is_started_;
+  share::ObLSID ls_id_;
   ObTabletID tablet_id_;
-  ObMemAttr mem_attr_;
   // Allocator to allocate ObTxData and ObUndoStatus
   SliceAllocator slice_allocator_;
   ObArenaAllocator arena_allocator_;
